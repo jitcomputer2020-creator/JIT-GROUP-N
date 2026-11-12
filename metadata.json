@@ -1,0 +1,9 @@
+{
+  "name": "JIT GROUP - Social, Chat, Calls & Gaming",
+  "description": "All-in-one social networking, real-time messaging, WebRTC voice/video calling, and multiplayer gaming hub with virtual rewards.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
