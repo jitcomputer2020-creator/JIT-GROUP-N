@@ -534,6 +534,21 @@ function isPhoneMatch(p1: string, p2: string): boolean {
   return false;
 }
 
+const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
+
+function isProfileExpired(profile: any): boolean {
+  if (!profile) return false;
+  // System / demo accounts are maintained for instant exploration
+  if (profile.id === 'usr_jit_primary_001' || profile.isSystemAccount) {
+    return false;
+  }
+  const lastActiveStr = profile.lastLoginAt || profile.lastLogin || profile.joinedAt;
+  if (!lastActiveStr) return false;
+  const lastActiveTime = new Date(lastActiveStr).getTime();
+  if (isNaN(lastActiveTime)) return false;
+  return Date.now() - lastActiveTime > INACTIVITY_EXPIRY_MS;
+}
+
 function readProfiles(): any[] {
   try {
     if (!fs.existsSync(PROFILES_FILE)) {
@@ -541,7 +556,25 @@ function readProfiles(): any[] {
     }
     const raw = fs.readFileSync(PROFILES_FILE, 'utf-8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    const profiles = Array.isArray(parsed) ? parsed : [];
+
+    // Automatic expiration mechanism: clear/delete any inactive profile data (>180 days)
+    const activeProfiles = profiles.filter((p) => {
+      const expired = isProfileExpired(p);
+      if (expired) {
+        console.log(
+          `[180-Day Auto Cleanup] Purged inactive profile: ${p.fullName} (${p.contactNumber}), last active: ${
+            p.lastLoginAt || p.lastLogin || p.joinedAt
+          }`
+        );
+      }
+      return !expired;
+    });
+
+    if (activeProfiles.length !== profiles.length) {
+      writeProfiles(activeProfiles);
+    }
+    return activeProfiles;
   } catch (err) {
     console.error('Error reading profiles.json:', err);
     return [];
@@ -556,7 +589,16 @@ function writeProfiles(profiles: any[]) {
   }
 }
 
-// 1. Get all registered profiles
+// Background periodic sweep: runs auto-cleanup every 30 minutes
+setInterval(() => {
+  try {
+    readProfiles();
+  } catch (err) {
+    console.error('Error in periodic 180-day cleanup sweep:', err);
+  }
+}, 30 * 60 * 1000);
+
+// 1. Get all registered profiles (shared cloud data store for all browsers & devices)
 app.get('/api/profiles', (req, res) => {
   const profiles = readProfiles();
   res.json({ profiles });
@@ -565,7 +607,7 @@ app.get('/api/profiles', (req, res) => {
 // 2. Lookup profile by contact phone
 app.get('/api/profiles/lookup/:phone', (req, res) => {
   const phone = req.params.phone || '';
-  const profiles = readProfiles();
+  const profiles = readProfiles(); // Automatically cleans expired profiles first
   const matched = profiles.find((p: any) => isPhoneMatch(p.contactNumber, phone));
   if (matched) {
     return res.json({ found: true, profile: matched });
@@ -573,7 +615,36 @@ app.get('/api/profiles/lookup/:phone', (req, res) => {
   return res.json({ found: false });
 });
 
-// 3. Register or update profile (preserves existing state, rewards, and stats)
+// 3. User Login route: updates lastLogin and lastLoginAt timestamp so account stays active
+app.post('/api/profiles/login', (req, res) => {
+  const { contactNumber } = req.body;
+  if (!contactNumber) {
+    return res.status(400).json({ error: 'contactNumber is required' });
+  }
+
+  const profiles = readProfiles(); // Auto-cleans expired profiles first
+  const idx = profiles.findIndex((p: any) => isPhoneMatch(p.contactNumber, contactNumber));
+
+  if (idx === -1) {
+    return res.status(404).json({
+      success: false,
+      error: 'Account not found or expired due to 180 consecutive days of inactivity.',
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  profiles[idx].lastLoginAt = nowIso;
+  profiles[idx].lastLogin = nowIso;
+  writeProfiles(profiles);
+
+  return res.json({
+    success: true,
+    profile: profiles[idx],
+    message: 'Login successful. 180-day inactivity timer refreshed.',
+  });
+});
+
+// 4. Register or update profile (preserves existing state, rewards, and stats)
 app.post('/api/profiles', (req, res) => {
   const payload = req.body;
   if (!payload || !payload.contactNumber) {
@@ -587,6 +658,7 @@ app.post('/api/profiles', (req, res) => {
 
   let resultProfile: any;
   let isExisting = false;
+  const nowIso = new Date().toISOString();
 
   if (existingIdx >= 0) {
     // Existing user recognized: do NOT reset or wipe user data, points or stats
@@ -595,8 +667,9 @@ app.post('/api/profiles', (req, res) => {
       ...existing,
       ...payload,
       id: existing.id || payload.id,
-      joinedAt: existing.joinedAt || payload.joinedAt || new Date().toISOString(),
-      lastLoginAt: new Date().toISOString(),
+      joinedAt: existing.joinedAt || payload.joinedAt || nowIso,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
       // Retain max stats & points
       stats: {
         friendsCount: existing.stats?.friendsCount ?? payload.stats?.friendsCount ?? 0,
@@ -622,8 +695,9 @@ app.post('/api/profiles', (req, res) => {
     resultProfile = {
       ...payload,
       id: payload.id || `usr_jit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      joinedAt: payload.joinedAt || new Date().toISOString(),
-      lastLoginAt: new Date().toISOString(),
+      joinedAt: payload.joinedAt || nowIso,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
       stats: {
         friendsCount: 0,
         followersCount: 0,
@@ -645,22 +719,22 @@ app.post('/api/profiles', (req, res) => {
   return res.json({ success: true, profile: resultProfile, isExisting });
 });
 
-// 4. Bulk sync client profiles with server storage
+// 5. Bulk sync client profiles with server storage
 app.post('/api/profiles/sync', (req, res) => {
   const clientProfiles = Array.isArray(req.body.profiles) ? req.body.profiles : [];
-  const serverProfiles = readProfiles();
+  const serverProfiles = readProfiles(); // Auto-cleans expired profiles first
   const map = new Map<string, any>();
 
   // Load server profiles
   for (const sp of serverProfiles) {
-    if (sp && sp.contactNumber) {
+    if (sp && sp.contactNumber && !isProfileExpired(sp)) {
       map.set(normalizeDigits(sp.contactNumber), sp);
     }
   }
 
-  // Merge client profiles
+  // Merge client profiles (exclude expired profiles)
   for (const cp of clientProfiles) {
-    if (!cp || !cp.contactNumber) continue;
+    if (!cp || !cp.contactNumber || isProfileExpired(cp)) continue;
     const digits = normalizeDigits(cp.contactNumber);
     const existing = map.get(digits);
     if (!existing) {
@@ -670,6 +744,8 @@ app.post('/api/profiles/sync', (req, res) => {
         ...existing,
         ...cp,
         id: existing.id || cp.id,
+        lastLoginAt: cp.lastLoginAt || existing.lastLoginAt || new Date().toISOString(),
+        lastLogin: cp.lastLogin || existing.lastLogin || new Date().toISOString(),
         stats: {
           ...(existing.stats || {}),
           ...(cp.stats || {}),
@@ -685,6 +761,18 @@ app.post('/api/profiles/sync', (req, res) => {
   const merged = Array.from(map.values());
   writeProfiles(merged);
   return res.json({ success: true, profiles: merged });
+});
+
+// 6. Manual or test trigger for 180-day inactivity cleanup
+app.post('/api/profiles/cleanup', (req, res) => {
+  const beforeCount = readProfiles().length;
+  const activeProfiles = readProfiles();
+  res.json({
+    success: true,
+    activeCount: activeProfiles.length,
+    purgedCount: Math.max(0, beforeCount - activeProfiles.length),
+    inactivityThresholdDays: 180,
+  });
 });
 
 // ----------------------------------------------------------------------------

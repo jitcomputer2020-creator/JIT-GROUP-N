@@ -29,6 +29,7 @@ export interface UserProfile {
   coverUrl?: string;
   joinedAt: string;
   lastLoginAt: string; // Used for 180-day inactivity check
+  lastLogin?: string; // Standard timestamp alias for account retention tracking
   isContactNumberPublic?: boolean;
   isAddressPublic?: boolean;
   stats: {

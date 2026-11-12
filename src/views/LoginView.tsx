@@ -183,10 +183,10 @@ export const LoginView: React.FC<LoginViewProps> = ({ onNavigate }) => {
           <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-100 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
             <div className="flex items-center gap-1.5 font-bold text-slate-700 dark:text-slate-300">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-              <span>Phase 2 Local Persistence</span>
+              <span>Cross-Browser Cloud Persistence & 180-Day Rule</span>
             </div>
             <p>
-              Profiles and sessions are stored in browser localStorage. Entering the same contact number immediately loads your saved profile, points, and posts without data loss.
+              Profiles are synchronized across all browsers and devices. Logging in updates your last active date and resets the 180-day inactivity countdown. Accounts inactive for 180 consecutive days are automatically cleared.
             </p>
           </div>
         </div>

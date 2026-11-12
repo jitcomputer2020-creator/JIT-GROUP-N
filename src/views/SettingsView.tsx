@@ -29,7 +29,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onNavigate,
   onOpenAuth,
 }) => {
-  const { currentUser, logout, updateProfile } = useAuth();
+  const { currentUser, logout, updateProfile, daysRemaining } = useAuth();
   const { theme, setTheme } = useTheme();
 
   // Settings toggles
@@ -48,14 +48,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     });
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
-  };
-
-  const calculateDaysRemaining = () => {
-    if (!currentUser?.lastLoginAt) return 180;
-    const lastLogin = new Date(currentUser.lastLoginAt).getTime();
-    const now = Date.now();
-    const daysSince = Math.floor((now - lastLogin) / (1000 * 60 * 60 * 24));
-    return Math.max(0, 180 - daysSince);
   };
 
   return (
@@ -179,10 +171,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             {currentUser && (
               <div className="p-3 bg-slate-50 dark:bg-slate-800 rounded-2xl text-xs space-y-1">
                 <p className="text-slate-700 dark:text-slate-300">
-                  Last login recorded: <strong>{new Date(currentUser.lastLoginAt).toLocaleString()}</strong>
+                  Last login recorded: <strong>{new Date(currentUser.lastLoginAt || currentUser.lastLogin || currentUser.joinedAt).toLocaleString()}</strong>
                 </p>
                 <p className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                  Account status: Active ({calculateDaysRemaining()} days until inactivity threshold)
+                  Account status: Active ({daysRemaining} days until 180-day inactivity threshold)
                 </p>
               </div>
             )}
@@ -190,7 +182,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </section>
 
-      {/* 4. Architecture & Backend Readiness */}
+      {/* 4. Architecture & Cross-Browser Synchronization */}
       <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm">
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-2xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 shrink-0">
@@ -198,10 +190,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
           <div>
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-              Local Demo Storage Mode Active
+              Cross-Browser & Multi-Device Cloud Sync Active
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
-              All profiles, posts, reels, themes, and game states are managed in browser local storage. The complete Supabase PostgreSQL schema (30 tables), Row Level Security, and WebRTC calling modules are preserved in <code className="text-blue-600 dark:text-blue-400 font-mono text-[11px]">/supabase</code> ready for cloud deployment whenever you choose to connect credentials.
+              Your registered profile and virtual points are accessible across all mobile devices, tablets, and desktop browsers via the shared backend server. Inactive accounts exceeding 180 consecutive days without login are automatically purged by scheduled maintenance.
             </p>
           </div>
         </div>

@@ -31,6 +31,7 @@ import {
   UserCheck,
   Loader2,
   Trash2,
+  ShieldCheck,
 } from 'lucide-react';
 
 import { PhotoUploadModal } from '../components/modals/PhotoUploadModal';
@@ -346,6 +347,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                 <Calendar className="w-3.5 h-3.5 text-slate-400" />
                 <span>Joined {new Date(user.joinedAt).toLocaleDateString()}</span>
               </div>
+
+              {!isViewingOther && (
+                <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Active · 180-Day Auto-Retention</span>
+                </div>
+              )}
             </div>
           </div>
 
