@@ -25,7 +25,16 @@ interface RegisterViewProps {
 
 export const RegisterView: React.FC<RegisterViewProps> = ({ onNavigate }) => {
   const { registerUser } = useAuth();
-  const [contactNumber, setContactNumber] = useState('');
+  const [contactNumber, setContactNumber] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const pending = localStorage.getItem('jit_pending_phone');
+      if (pending) {
+        localStorage.removeItem('jit_pending_phone');
+        return pending;
+      }
+    }
+    return '';
+  });
   const [fullName, setFullName] = useState('');
   const [address, setAddress] = useState('');
   const [error, setError] = useState('');
@@ -42,7 +51,11 @@ export const RegisterView: React.FC<RegisterViewProps> = ({ onNavigate }) => {
     setLoading(false);
 
     if (res.success && res.user) {
-      setSuccess(`Welcome to JIT GROUP, ${res.user.fullName}! Permanent User ID: ${res.user.id}`);
+      if (res.isExisting) {
+        setSuccess(`Welcome back, ${res.user.fullName}! Your existing profile and ${res.user.stats.rewardPoints} reward points are preserved.`);
+      } else {
+        setSuccess(`Welcome to JIT GROUP, ${res.user.fullName}! Permanent User ID: ${res.user.id} (100 Welcome Points awarded)`);
+      }
       setTimeout(() => {
         onNavigate('profile');
       }, 1200);

@@ -58,7 +58,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, defaultTa
     setRegLoading(false);
 
     if (res.success) {
-      setRegSuccess('Profile created successfully! Welcome to JIT GROUP.');
+      if (res.isExisting) {
+        setRegSuccess(`Welcome back, ${res.user?.fullName || 'User'}! Profile recognized and restored without data loss.`);
+      } else {
+        setRegSuccess('Profile created successfully! Welcome to JIT GROUP (100 Welcome Points awarded).');
+      }
       setTimeout(() => {
         onClose();
       }, 1000);

@@ -95,10 +95,17 @@ export const LoginView: React.FC<LoginViewProps> = ({ onNavigate }) => {
                   <span>{error}</span>
                   <button
                     type="button"
-                    onClick={() => onNavigate('register')}
+                    onClick={() => {
+                      if (contactNumber.trim()) {
+                        try {
+                          localStorage.setItem('jit_pending_phone', contactNumber.trim());
+                        } catch (e) {}
+                      }
+                      onNavigate('register');
+                    }}
                     className="block text-blue-600 dark:text-blue-400 font-bold underline text-[11px] mt-1"
                   >
-                    Click here to Register New Profile
+                    Click here to Register New Profile with this number
                   </button>
                 </div>
               </div>
@@ -120,7 +127,14 @@ export const LoginView: React.FC<LoginViewProps> = ({ onNavigate }) => {
               Don't have an account yet?{' '}
               <button
                 type="button"
-                onClick={() => onNavigate('register')}
+                onClick={() => {
+                  if (contactNumber.trim()) {
+                    try {
+                      localStorage.setItem('jit_pending_phone', contactNumber.trim());
+                    } catch (e) {}
+                  }
+                  onNavigate('register');
+                }}
                 className="text-blue-600 dark:text-blue-400 font-bold hover:underline"
               >
                 Register New Profile
