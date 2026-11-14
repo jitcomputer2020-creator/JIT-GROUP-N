@@ -24,7 +24,7 @@ interface TournamentsViewProps {
 }
 
 export const TournamentsView: React.FC<TournamentsViewProps> = ({ onNavigate }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, spendRewardPoints } = useAuth();
   const [tournaments, setTournaments] = useState<Tournament[]>(INITIAL_TOURNAMENTS);
   const [registeredIds, setRegisteredIds] = useState<string[]>(['tour_001']);
   const [joinSuccess, setJoinSuccess] = useState<string | null>(null);
@@ -34,8 +34,13 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({ onNavigate }) 
     if (!currentUser) return;
     if (registeredIds.includes(tour.id)) return;
 
-    if (currentUser.stats.rewardPoints < tour.entryFeePoints) {
-      setJoinError(`Insufficient virtual points! Entry requires ${tour.entryFeePoints} points. Claim daily rewards to earn more.`);
+    const spendRes = spendRewardPoints(
+      tour.entryFeePoints,
+      `Tournament Entry: ${tour.title}`,
+      'tournament_entry'
+    );
+    if (!spendRes.success) {
+      setJoinError(`Insufficient virtual points! Entry requires ${tour.entryFeePoints} points. Claim daily rewards or play games to earn more.`);
       setTimeout(() => setJoinError(null), 4000);
       return;
     }
@@ -46,7 +51,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({ onNavigate }) 
       prev.map((t) => (t.id === tour.id ? { ...t, registeredCount: t.registeredCount + 1 } : t))
     );
 
-    setJoinSuccess(`Successfully registered for "${tour.title}"! Entry fee deducted from virtual points.`);
+    setJoinSuccess(`Successfully registered for "${tour.title}"! New balance: ${spendRes.newTotal} Points.`);
     setTimeout(() => setJoinSuccess(null), 4000);
   };
 

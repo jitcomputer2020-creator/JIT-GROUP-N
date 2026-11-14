@@ -4,7 +4,7 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
-import { UserProfile } from '../types';
+import { UserProfile, GameId, MatchHistoryRecord, WalletTransaction } from '../types';
 import { INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { getSupabaseClient } from '../lib/supabase';
 import {
@@ -15,6 +15,8 @@ import {
   updateCloudProfile,
   ensureCloudProfileSeeded,
   touchCloudLoginTimestamp,
+  syncLeaderboardEntry,
+  recordCloudMatchHistory,
 } from '../lib/firebase';
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
@@ -57,6 +59,15 @@ export function calculateDaysRemaining(profile: UserProfile | null | undefined):
   return Math.max(0, 180 - daysSince);
 }
 
+export interface AwardGameParams {
+  gameId: GameId;
+  gameName: string;
+  mode: 'ai' | 'friend' | 'random' | 'solo';
+  outcome: 'win' | 'loss' | 'draw' | 'spin';
+  pointsEarned: number;
+  scoreSummary: string;
+}
+
 interface AuthContextType {
   currentUser: UserProfile | null;
   isAuthenticated: boolean;
@@ -70,6 +81,12 @@ interface AuthContextType {
   logout: () => void;
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
   claimDailyReward: () => { success: boolean; pointsAdded: number; newTotal: number };
+  awardGameResult: (params: AwardGameParams) => Promise<{ success: boolean; newTotal: number; pointsAdded: number }>;
+  spendRewardPoints: (
+    amount: number,
+    description: string,
+    type?: WalletTransaction['type']
+  ) => { success: boolean; newTotal: number; error?: string };
   switchUser: (userId: string) => void;
   syncServerProfiles: () => Promise<void>;
   isExpired: (profile: UserProfile) => boolean;
@@ -81,6 +98,32 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const LS_CURRENT_USER = 'jit_current_user';
 const LS_PROFILES = 'jit_registered_profiles';
 const LS_LOGGED_OUT = 'jit_logged_out';
+export const LS_WALLET_TX = 'jit_wallet_transactions';
+export const LS_MATCH_HISTORY = 'jit_match_history';
+
+function appendWalletTransaction(tx: WalletTransaction) {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(LS_WALLET_TX);
+    const list: WalletTransaction[] = raw ? JSON.parse(raw) : [];
+    const updated = [tx, ...(Array.isArray(list) ? list : [])].slice(0, 60);
+    localStorage.setItem(LS_WALLET_TX, JSON.stringify(updated));
+  } catch {
+    // Non-fatal
+  }
+}
+
+function appendLocalMatchHistory(rec: MatchHistoryRecord) {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(LS_MATCH_HISTORY);
+    const list: MatchHistoryRecord[] = raw ? JSON.parse(raw) : [];
+    const updated = [rec, ...(Array.isArray(list) ? list : [])].slice(0, 40);
+    localStorage.setItem(LS_MATCH_HISTORY, JSON.stringify(updated));
+  } catch {
+    // Non-fatal
+  }
+}
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [registeredProfiles, setRegisteredProfiles] = useState<UserProfile[]>(() => {
@@ -757,6 +800,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     await Promise.all([
       updateCloudProfile(updated, updates).catch(() => {}),
+      syncLeaderboardEntry(updated).catch(() => {}),
       persistProfileRemotely(updated).catch(() => {}),
     ]);
   };
@@ -788,10 +832,133 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
     }
 
+    appendWalletTransaction({
+      id: `tx_${Date.now()}`,
+      userId: updated.id,
+      amount: pointsToAdd,
+      type: 'daily_reward',
+      description: `Daily Streak Bonus (Day ${newStreak})`,
+      createdAt: 'Just now',
+    });
+
     updateCloudProfile(updated, { stats: updated.stats }).catch(() => {});
+    syncLeaderboardEntry(updated).catch(() => {});
     persistProfileRemotely(updated).catch(() => {});
 
     return { success: true, pointsAdded: pointsToAdd, newTotal };
+  };
+
+  const awardGameResult = async (
+    params: AwardGameParams
+  ): Promise<{ success: boolean; newTotal: number; pointsAdded: number }> => {
+    if (!currentUser) {
+      return { success: false, newTotal: 0, pointsAdded: 0 };
+    }
+    const safePoints = Math.min(500, Math.max(0, Math.floor(params.pointsEarned)));
+    const newTotal = Math.min(1000000, (currentUser.stats.rewardPoints || 0) + safePoints);
+    const isCountedMatch = params.outcome !== 'spin';
+    const newGamesPlayed = (currentUser.stats.gamesPlayed || 0) + (isCountedMatch ? 1 : 0);
+    const newGamesWon = (currentUser.stats.gamesWon || 0) + (params.outcome === 'win' ? 1 : 0);
+    const nowIso = new Date().toISOString();
+
+    const updated: UserProfile = {
+      ...currentUser,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      stats: {
+        ...currentUser.stats,
+        rewardPoints: newTotal,
+        gamesPlayed: newGamesPlayed,
+        gamesWon: newGamesWon,
+      },
+    };
+
+    setCurrentUser(updated);
+    setRegisteredProfiles((prev) =>
+      prev.map((p) => (p.id === updated.id ? updated : p))
+    );
+
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
+    }
+
+    const matchRecord: MatchHistoryRecord = {
+      id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      profileId: updated.id,
+      playerName: updated.fullName,
+      gameId: params.gameId,
+      gameName: params.gameName,
+      mode: params.mode,
+      outcome: params.outcome,
+      pointsEarned: safePoints,
+      scoreSummary: params.scoreSummary,
+      createdAt: nowIso,
+    };
+
+    appendLocalMatchHistory(matchRecord);
+
+    if (safePoints > 0) {
+      appendWalletTransaction({
+        id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId: updated.id,
+        amount: safePoints,
+        type: params.gameId === 'quiz' ? 'quiz_reward' : 'game_reward',
+        description: `${params.gameName}: ${params.scoreSummary}`,
+        createdAt: 'Just now',
+      });
+    }
+
+    await Promise.all([
+      updateCloudProfile(updated, { stats: updated.stats }).catch(() => {}),
+      syncLeaderboardEntry(updated, params.gameId).catch(() => {}),
+      recordCloudMatchHistory(matchRecord).catch(() => {}),
+      persistProfileRemotely(updated).catch(() => {}),
+    ]);
+
+    return { success: true, newTotal, pointsAdded: safePoints };
+  };
+
+  const spendRewardPoints = (
+    amount: number,
+    description: string,
+    type: WalletTransaction['type'] = 'tournament_entry'
+  ): { success: boolean; newTotal: number; error?: string } => {
+    if (!currentUser) {
+      return { success: false, newTotal: 0, error: 'Sign in required.' };
+    }
+    const cost = Math.max(0, Math.floor(amount));
+    const current = currentUser.stats.rewardPoints || 0;
+    if (current < cost) {
+      return { success: false, newTotal: current, error: 'Insufficient virtual points.' };
+    }
+    const newTotal = current - cost;
+    const nowIso = new Date().toISOString();
+    const updated: UserProfile = {
+      ...currentUser,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      stats: {
+        ...currentUser.stats,
+        rewardPoints: newTotal,
+      },
+    };
+    setCurrentUser(updated);
+    setRegisteredProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
+    }
+    appendWalletTransaction({
+      id: `tx_${Date.now()}`,
+      userId: updated.id,
+      amount: -cost,
+      type,
+      description,
+      createdAt: 'Just now',
+    });
+    updateCloudProfile(updated, { stats: updated.stats }).catch(() => {});
+    syncLeaderboardEntry(updated).catch(() => {});
+    persistProfileRemotely(updated).catch(() => {});
+    return { success: true, newTotal };
   };
 
   const switchUser = (userId: string) => {
@@ -829,6 +996,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         logout,
         updateProfile,
         claimDailyReward,
+        awardGameResult,
+        spendRewardPoints,
         switchUser,
         syncServerProfiles,
         isExpired: isProfileExpired,

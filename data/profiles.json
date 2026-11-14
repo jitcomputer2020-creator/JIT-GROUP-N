@@ -32,8 +32,8 @@
     "avatarUrl": "/assets/aistudio/image_e64e54f2.png",
     "coverUrl": "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=1200&q=80",
     "joinedAt": "2026-01-15T08:30:00Z",
-    "lastLoginAt": "2026-11-14T04:33:35.611Z",
-    "lastLogin": "2026-11-14T04:33:35.611Z",
+    "lastLoginAt": "2026-11-14T05:00:35.146Z",
+    "lastLogin": "2026-11-14T05:00:35.146Z",
     "isContactNumberPublic": false,
     "isAddressPublic": false,
     "stats": {
@@ -47,5 +47,73 @@
       "rewardPoints": 1250,
       "streakDays": 7
     }
+  },
+  {
+    "id": "usr_jit_1793997636044_ifb0c",
+    "contactNumber": "9874492871",
+    "fullName": "rajdeep dhar",
+    "address": "barasat",
+    "bio": "Proud member of JIT GROUP campus community.",
+    "avatarUrl": "/assets/aistudio/image_e64e54f2.png",
+    "joinedAt": "2026-11-06T20:40:36.044Z",
+    "lastLoginAt": "2026-11-06T20:49:47.620Z",
+    "isContactNumberPublic": false,
+    "isAddressPublic": false,
+    "stats": {
+      "friendsCount": 0,
+      "followersCount": 0,
+      "followingCount": 0,
+      "postsCount": 0,
+      "reelsCount": 0,
+      "gamesPlayed": 0,
+      "gamesWon": 0,
+      "rewardPoints": 100,
+      "streakDays": 1
+    },
+    "lastLogin": "2026-11-06T20:49:47.620Z"
+  },
+  {
+    "id": "usr_jit_002",
+    "contactNumber": "+91 91234 56789",
+    "fullName": "Priya Mukherjee",
+    "address": "Faculty Enclave, JIT Campus",
+    "bio": "Computer Science Department | Ludo Master & AI Researcher",
+    "avatarUrl": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80",
+    "joinedAt": "2026-02-01T10:00:00Z",
+    "lastLoginAt": "2026-11-06T20:19:18.743Z",
+    "stats": {
+      "friendsCount": 89,
+      "followersCount": 210,
+      "followingCount": 140,
+      "postsCount": 15,
+      "reelsCount": 4,
+      "gamesPlayed": 42,
+      "gamesWon": 28,
+      "rewardPoints": 890,
+      "streakDays": 5
+    },
+    "lastLogin": "2026-11-06T20:19:18.743Z"
+  },
+  {
+    "id": "usr_jit_004",
+    "contactNumber": "+91 99887 76655",
+    "fullName": "Ananya Sen",
+    "address": "Jharna Research Park",
+    "bio": "Electronics & Robotics | Quiz Battler & Badminton lover",
+    "avatarUrl": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80",
+    "joinedAt": "2026-02-10T09:15:00Z",
+    "lastLoginAt": "2026-11-06T20:19:18.743Z",
+    "stats": {
+      "friendsCount": 95,
+      "followersCount": 180,
+      "followingCount": 110,
+      "postsCount": 9,
+      "reelsCount": 3,
+      "gamesPlayed": 30,
+      "gamesWon": 19,
+      "rewardPoints": 620,
+      "streakDays": 3
+    },
+    "lastLogin": "2026-11-06T20:19:18.743Z"
   }
 ]

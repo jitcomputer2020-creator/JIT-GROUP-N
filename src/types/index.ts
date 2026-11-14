@@ -165,7 +165,7 @@ export interface CallSession {
   durationSeconds?: number;
 }
 
-export type GameId = 'ludo' | 'tictactoe' | 'quiz' | 'chess' | 'snake_ladder' | 'carrom';
+export type GameId = 'ludo' | 'tictactoe' | 'quiz' | 'chess' | 'snake_ladder' | 'carrom' | 'spin_wheel';
 
 export interface GameMetadata {
   id: GameId;
@@ -175,6 +175,31 @@ export interface GameMetadata {
   description: string;
   instructions: string[];
   rulesSummary: string;
+}
+
+export interface LeaderboardEntry {
+  profileId: string;
+  fullName: string;
+  avatarUrl?: string;
+  rewardPoints: number;
+  gamesPlayed: number;
+  gamesWon: number;
+  streakDays: number;
+  lastGameId?: string;
+  updatedAt?: string;
+}
+
+export interface MatchHistoryRecord {
+  id: string;
+  profileId: string;
+  playerName: string;
+  gameId: GameId;
+  gameName: string;
+  mode: 'ai' | 'friend' | 'random' | 'solo';
+  outcome: 'win' | 'loss' | 'draw' | 'spin';
+  pointsEarned: number;
+  scoreSummary: string;
+  createdAt: string;
 }
 
 export interface GameRoom {

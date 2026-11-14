@@ -3,20 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useAuth, LS_WALLET_TX } from '../context/AuthContext';
 import { WalletTransaction, NavTab } from '../types';
 import {
   Sparkles,
   Flame,
-  Award,
   ArrowUpRight,
   ArrowDownLeft,
   CheckCircle2,
   ShieldCheck,
   Gamepad2,
-  HelpCircle,
-  Trophy,
 } from 'lucide-react';
 
 interface WalletViewProps {
@@ -27,55 +24,66 @@ export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
   const { currentUser, claimDailyReward } = useAuth();
   const [claimStatus, setClaimStatus] = useState<string | null>(null);
 
-  const [transactions, setTransactions] = useState<WalletTransaction[]>([
-    {
-      id: 'tx_001',
-      userId: currentUser?.id || 'usr_jit_primary_001',
-      amount: 50,
-      type: 'daily_reward',
-      description: 'Daily Streak Login Bonus (Day 7)',
-      createdAt: 'Today, 08:30 AM',
-    },
-    {
-      id: 'tx_002',
-      userId: currentUser?.id || 'usr_jit_primary_001',
-      amount: 250,
-      type: 'quiz_reward',
-      description: 'First Place Victory in JIT Tech Quiz Battle',
-      createdAt: 'Yesterday, 06:15 PM',
-    },
-    {
-      id: 'tx_003',
-      userId: currentUser?.id || 'usr_jit_primary_001',
-      amount: -50,
-      type: 'tournament_entry',
-      description: 'Entry Fee: JIT Grand Ludo Championship 2026',
-      createdAt: '2 days ago',
-    },
-    {
-      id: 'tx_004',
-      userId: currentUser?.id || 'usr_jit_primary_001',
-      amount: 100,
-      type: 'achievement',
-      description: 'Achievement Unlocked: "First Victory" in Gaming Hub',
-      createdAt: '3 days ago',
-    },
-  ]);
+  const loadTransactions = useCallback((): WalletTransaction[] => {
+    const defaultSeeds: WalletTransaction[] = [
+      {
+        id: 'tx_001',
+        userId: currentUser?.id || 'usr_jit_primary_001',
+        amount: 50,
+        type: 'daily_reward',
+        description: 'Daily Streak Login Bonus (Day 7)',
+        createdAt: 'Today, 08:30 AM',
+      },
+      {
+        id: 'tx_002',
+        userId: currentUser?.id || 'usr_jit_primary_001',
+        amount: 250,
+        type: 'quiz_reward',
+        description: 'First Place Victory in JIT Tech Quiz Battle',
+        createdAt: 'Yesterday, 06:15 PM',
+      },
+      {
+        id: 'tx_003',
+        userId: currentUser?.id || 'usr_jit_primary_001',
+        amount: -50,
+        type: 'tournament_entry',
+        description: 'Entry Fee: JIT Grand Ludo Championship 2026',
+        createdAt: '2 days ago',
+      },
+      {
+        id: 'tx_004',
+        userId: currentUser?.id || 'usr_jit_primary_001',
+        amount: 100,
+        type: 'achievement',
+        description: 'Achievement Unlocked: "First Victory" in Gaming Hub',
+        createdAt: '3 days ago',
+      },
+    ];
+
+    if (typeof window === 'undefined') return defaultSeeds;
+    try {
+      const raw = localStorage.getItem(LS_WALLET_TX);
+      const saved: WalletTransaction[] = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(saved) || saved.length === 0) return defaultSeeds;
+      const seen = new Set(saved.map((t) => t.id));
+      return [...saved, ...defaultSeeds.filter((d) => !seen.has(d.id))];
+    } catch {
+      return defaultSeeds;
+    }
+  }, [currentUser?.id]);
+
+  const [transactions, setTransactions] = useState<WalletTransaction[]>(loadTransactions);
+
+  useEffect(() => {
+    setTransactions(loadTransactions());
+  }, [loadTransactions, currentUser?.stats.rewardPoints]);
 
   const handleClaimDaily = () => {
     const res = claimDailyReward();
     if (res.success) {
-      const newTx: WalletTransaction = {
-        id: `tx_${Date.now()}`,
-        userId: currentUser?.id || '',
-        amount: res.pointsAdded,
-        type: 'daily_reward',
-        description: `Daily Streak Bonus (Day ${currentUser?.stats.streakDays || 1})`,
-        createdAt: 'Just now',
-      };
-      setTransactions([newTx, ...transactions]);
+      setTransactions(loadTransactions());
       setClaimStatus(`Claimed +${res.pointsAdded} Points! Total balance is now ${res.newTotal}.`);
-      setTimeout(() => setClaimStatus(null), 3000);
+      setTimeout(() => setClaimStatus(null), 3500);
     }
   };
 

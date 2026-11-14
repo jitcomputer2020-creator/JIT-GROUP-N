@@ -13,14 +13,21 @@ import {
   getFirestore,
   doc,
   getDoc,
+  getDocs,
   getDocFromServer,
+  setDoc,
   updateDoc,
   writeBatch,
+  collection,
+  query,
+  orderBy,
+  limit,
+  where,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { UserProfile } from '../types';
+import { UserProfile, LeaderboardEntry, MatchHistoryRecord, GameId } from '../types';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -397,6 +404,16 @@ export async function registerOrRecognizeCloudProfile(
       createdAt: serverTimestamp(),
       lastLoginAt: serverTimestamp(),
     });
+    batch.set(doc(db, 'leaderboard', newProfile.id), {
+      profileId: newProfile.id,
+      fullName: newProfile.fullName,
+      avatarUrl: newProfile.avatarUrl,
+      rewardPoints: newProfile.stats.rewardPoints,
+      gamesPlayed: newProfile.stats.gamesPlayed,
+      gamesWon: newProfile.stats.gamesWon,
+      streakDays: newProfile.stats.streakDays,
+      updatedAt: serverTimestamp(),
+    });
     await batch.commit();
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
@@ -516,6 +533,11 @@ export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<vo
         profile.address,
         profile
       );
+    } else {
+      const lbSnap = await fetchDocServerFirst(['leaderboard', profile.id]);
+      if (!lbSnap.exists()) {
+        await syncLeaderboardEntry(profile);
+      }
     }
   } catch (err) {
     console.warn('Cloud seed notice:', err);
@@ -542,3 +564,160 @@ export async function touchCloudLoginTimestamp(profile: UserProfile): Promise<vo
     // Best-effort
   }
 }
+
+/**
+ * Syncs non-PII public gaming stats to /leaderboard/{profileId}.
+ */
+export async function syncLeaderboardEntry(
+  profile: UserProfile,
+  lastGameId?: string
+): Promise<void> {
+  if (!profile?.id) return;
+  const stats = sanitizeStats(profile.stats);
+  const path = `leaderboard/${profile.id}`;
+  try {
+    await setDoc(doc(db, 'leaderboard', profile.id), {
+      profileId: profile.id,
+      fullName: (profile.fullName || 'JIT Member').trim().slice(0, 120),
+      avatarUrl: sanitizeAvatarUrl(profile.avatarUrl),
+      rewardPoints: stats.rewardPoints,
+      gamesPlayed: stats.gamesPlayed,
+      gamesWon: stats.gamesWon,
+      streakDays: stats.streakDays,
+      ...(lastGameId ? { lastGameId: String(lastGameId).slice(0, 32) } : {}),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, path);
+    }
+    console.warn('Leaderboard sync notice:', err);
+  }
+}
+
+/**
+ * Queries top global players sorted by JIT rewardPoints descending.
+ */
+export async function fetchGlobalLeaderboard(maxEntries = 20): Promise<LeaderboardEntry[]> {
+  try {
+    const q = query(
+      collection(db, 'leaderboard'),
+      orderBy('rewardPoints', 'desc'),
+      limit(maxEntries)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        profileId: String(data.profileId || d.id),
+        fullName: String(data.fullName || 'JIT Player'),
+        avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : '/assets/aistudio/image_e64e54f2.png',
+        rewardPoints: Number(data.rewardPoints || 0),
+        gamesPlayed: Number(data.gamesPlayed || 0),
+        gamesWon: Number(data.gamesWon || 0),
+        streakDays: Number(data.streakDays || 1),
+        lastGameId: typeof data.lastGameId === 'string' ? data.lastGameId : undefined,
+      };
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.LIST, 'leaderboard');
+    }
+    console.warn('Global leaderboard fetch notice:', err);
+    return [];
+  }
+}
+
+/**
+ * Records an immutable match outcome or daily spin event to /match_history/{matchId}.
+ */
+export async function recordCloudMatchHistory(
+  record: MatchHistoryRecord
+): Promise<void> {
+  const path = `match_history/${record.id}`;
+  try {
+    await setDoc(doc(db, 'match_history', record.id), {
+      id: record.id,
+      profileId: record.profileId,
+      playerName: (record.playerName || 'JIT Member').trim().slice(0, 120),
+      gameId: String(record.gameId).slice(0, 32),
+      gameName: String(record.gameName).slice(0, 64),
+      mode: record.mode,
+      outcome: record.outcome,
+      pointsEarned: Math.min(500, Math.max(0, Math.floor(Number(record.pointsEarned || 0)))),
+      scoreSummary: String(record.scoreSummary || 'Match completed').slice(0, 180),
+      createdAt: String(record.createdAt || new Date().toISOString()).slice(0, 40),
+      createdAtTs: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.CREATE, path);
+    }
+    console.warn('Match history write notice:', err);
+  }
+}
+
+/**
+ * Fetches recent match history entries (global or filtered to a profile).
+ */
+export async function fetchMatchHistory(
+  profileId?: string,
+  maxEntries = 20
+): Promise<MatchHistoryRecord[]> {
+  try {
+    const colRef = collection(db, 'match_history');
+    const q = profileId
+      ? query(colRef, where('profileId', '==', profileId), orderBy('createdAtTs', 'desc'), limit(maxEntries))
+      : query(colRef, orderBy('createdAtTs', 'desc'), limit(maxEntries));
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: String(data.id || d.id),
+        profileId: String(data.profileId || ''),
+        playerName: String(data.playerName || 'JIT Player'),
+        gameId: String(data.gameId || 'tictactoe') as GameId,
+        gameName: String(data.gameName || 'Game'),
+        mode: (data.mode || 'ai') as MatchHistoryRecord['mode'],
+        outcome: (data.outcome || 'win') as MatchHistoryRecord['outcome'],
+        pointsEarned: Number(data.pointsEarned || 0),
+        scoreSummary: String(data.scoreSummary || ''),
+        createdAt: String(data.createdAt || new Date().toISOString()),
+      };
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.LIST, 'match_history');
+    }
+    // Fallback without composite index if needed
+    if (profileId) {
+      try {
+        const snap = await getDocs(
+          query(collection(db, 'match_history'), orderBy('createdAtTs', 'desc'), limit(maxEntries * 2))
+        );
+        return snap.docs
+          .map((d) => {
+            const data = d.data();
+            return {
+              id: String(data.id || d.id),
+              profileId: String(data.profileId || ''),
+              playerName: String(data.playerName || 'JIT Player'),
+              gameId: String(data.gameId || 'tictactoe') as GameId,
+              gameName: String(data.gameName || 'Game'),
+              mode: (data.mode || 'ai') as MatchHistoryRecord['mode'],
+              outcome: (data.outcome || 'win') as MatchHistoryRecord['outcome'],
+              pointsEarned: Number(data.pointsEarned || 0),
+              scoreSummary: String(data.scoreSummary || ''),
+              createdAt: String(data.createdAt || new Date().toISOString()),
+            };
+          })
+          .filter((r) => r.profileId === profileId)
+          .slice(0, maxEntries);
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  }
+}
+

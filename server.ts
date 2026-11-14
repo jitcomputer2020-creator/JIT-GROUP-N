@@ -20,7 +20,9 @@ import {
   registerOrRecognizeCloudProfile,
   updateCloudProfile,
   ensureCloudProfileSeeded,
-} from './src/lib/firebase.ts';
+  fetchNodeLeaderboard,
+  fetchNodeMatchHistory,
+} from './src/lib/firebaseNode.ts';
 import { INITIAL_USER, INITIAL_FRIENDS } from './src/services/mockData.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -891,6 +893,40 @@ app.post('/api/profiles/cleanup', (req, res) => {
     purgedCount: Math.max(0, beforeCount - activeProfiles.length),
     inactivityThresholdDays: 180,
   });
+});
+
+// 7. Public Campus Gaming Leaderboard & Match History endpoints
+app.get('/api/games/leaderboard', async (req, res) => {
+  try {
+    const cloudEntries = await fetchNodeLeaderboard(25);
+    if (cloudEntries.length > 0) {
+      return res.json({ leaderboard: cloudEntries });
+    }
+  } catch (err) {
+    console.warn('Leaderboard route fallback notice:', err);
+  }
+  const fallbackProfiles = readProfiles()
+    .map((p: any) => ({
+      profileId: p.id,
+      fullName: p.fullName,
+      avatarUrl: p.avatarUrl,
+      rewardPoints: p.stats?.rewardPoints ?? 100,
+      gamesPlayed: p.stats?.gamesPlayed ?? 0,
+      gamesWon: p.stats?.gamesWon ?? 0,
+      streakDays: p.stats?.streakDays ?? 1,
+    }))
+    .sort((a: any, b: any) => b.rewardPoints - a.rewardPoints);
+  return res.json({ leaderboard: fallbackProfiles });
+});
+
+app.get('/api/games/history', async (req, res) => {
+  const profileId = typeof req.query.profileId === 'string' ? req.query.profileId : undefined;
+  try {
+    const history = await fetchNodeMatchHistory(profileId, 25);
+    return res.json({ history });
+  } catch {
+    return res.json({ history: [] });
+  }
 });
 
 // ----------------------------------------------------------------------------

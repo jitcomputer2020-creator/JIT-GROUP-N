@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { GameId } from '../../types';
 import { GameMode, AIDifficulty } from '../../types/multiplayer';
 import { APP_CONFIG } from '../../constants/branding';
+import { GameLogo } from './GameLogo';
 import {
   Users,
   UserPlus,
@@ -70,16 +71,19 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
       <div className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-7 shadow-2xl space-y-5 max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase font-bold tracking-wider text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-lg">
-                JIT Gaming Arena
-              </span>
-              <span className="text-xs text-slate-400">· {gameInfo?.category}</span>
+          <div className="flex items-center gap-3">
+            <GameLogo gameId={gameId} size="md" />
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase font-bold tracking-wider text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-lg">
+                  JIT Gaming Arena
+                </span>
+                <span className="text-xs text-slate-400">· {gameInfo?.category}</span>
+              </div>
+              <h3 className="text-lg font-black text-slate-900 dark:text-white mt-0.5">
+                Play {gameName}
+              </h3>
             </div>
-            <h3 className="text-lg font-black text-slate-900 dark:text-white mt-1">
-              Play {gameName}
-            </h3>
           </div>
           <button
             onClick={onClose}

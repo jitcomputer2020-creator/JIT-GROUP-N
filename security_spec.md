@@ -7,6 +7,8 @@ JIT GROUP uses passwordless, OTP-free Contact Number account lookup across all b
 - **180-Day Inactivity Expiration**: Both `/phone_index/{phoneKey}` and `/profiles/{profileId}` track server-verified timestamps (`lastLoginAt` / `lastActiveAt == request.time`). Deletion is ONLY permitted when `request.time > existing().lastActiveAt + duration.value(180, 'd')` (or `existing().lastLoginAt + duration.value(180, 'd')`).
 - **Atomic Registration Invariant**: Creating a `/phone_index/{phoneKey}` document requires `existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId))`, guaranteeing no orphaned phone index entries.
 - **Immutability Invariant**: On profile updates, `id`, `phoneKey`, and `joinedAt` are strictly immutable (`incoming().field == existing().field`).
+- **`/leaderboard/{profileId}`**: Public non-PII gaming scoreboard (excludes `contactNumber` and `address`). Bounded `rewardPoints` (`0..1000000`) and server `updatedAt == request.time`.
+- **`/match_history/{matchId}`**: Immutable match & spin reward log (`allow update, delete: if false;`) bounded to `0..500` points per event with `createdAtTs == request.time`.
 
 ## 2. The "Dirty Dozen" Adversarial Payloads
 Every write/read path must reject (`PERMISSION_DENIED`) the following 12 attack payloads:

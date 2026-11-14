@@ -132,4 +132,24 @@ export const DIRTY_DOZEN_PAYLOADS: DirtyDozenCase[] = [
     path: '/profiles/usr_jit_valid001',
     expectedOutcome: 'PERMISSION_DENIED',
   },
+  {
+    id: 13,
+    name: 'Leaderboard Point Inflation (> 1000000)',
+    operation: 'update',
+    path: '/leaderboard/usr_jit_valid001',
+    payload: {
+      rewardPoints: 9999999,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
+  {
+    id: 14,
+    name: 'Match History Tampering (immutable update denied)',
+    operation: 'update',
+    path: '/match_history/match_jit_001',
+    payload: {
+      pointsEarned: 500,
+    },
+    expectedOutcome: 'PERMISSION_DENIED',
+  },
 ];

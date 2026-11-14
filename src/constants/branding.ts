@@ -31,7 +31,8 @@ export const APP_CONFIG = {
     { id: 'tictactoe', name: 'Tic Tac Toe', players: '2 Players', category: 'Quick Match', icon: 'Grid3x3', color: 'from-blue-500 to-indigo-600' },
     { id: 'quiz', name: 'Quiz Battle', players: '1-4 Players', category: 'Trivia', icon: 'HelpCircle', color: 'from-purple-500 to-pink-500' },
     { id: 'chess', name: 'Chess', players: '2 Players', category: 'Strategy', icon: 'Crown', color: 'from-slate-700 to-slate-900' },
-    { id: 'snake_ladder', name: 'Snake & Ladder', players: '2-4 Players', category: 'Classic', icon: 'TrendingUp', color: 'from-emerald-500 to-teal-600' },
-    { id: 'carrom', name: 'Carrom', players: '2-4 Players', category: 'Arcade Physics', icon: 'Disc', color: 'from-yellow-600 to-amber-700' },
+    { id: 'snake_ladder', name: 'Snake & Ladder', players: '2 Players', category: 'Classic', icon: 'TrendingUp', color: 'from-emerald-500 to-teal-600' },
+    { id: 'carrom', name: 'Carrom', players: '2 Players', category: 'Arcade Physics', icon: 'Disc', color: 'from-yellow-600 to-amber-700' },
+    { id: 'spin_wheel', name: 'Lucky Spin', players: 'Daily Bonus', category: 'Rewards', icon: 'Disc3', color: 'from-rose-500 to-amber-500' },
   ],
 };

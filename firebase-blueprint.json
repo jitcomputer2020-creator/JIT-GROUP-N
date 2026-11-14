@@ -153,6 +153,148 @@
         }
       },
       "required": ["profileId", "createdAt", "lastLoginAt"]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Public non-PII gaming scoreboard entry for global rankings.",
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Reference to profile ID."
+        },
+        "fullName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Public player display name."
+        },
+        "avatarUrl": {
+          "type": "string",
+          "maxLength": 400000,
+          "description": "Player avatar URL."
+        },
+        "rewardPoints": {
+          "type": "integer",
+          "description": "Total virtual JIT points."
+        },
+        "gamesPlayed": {
+          "type": "integer",
+          "description": "Total games played."
+        },
+        "gamesWon": {
+          "type": "integer",
+          "description": "Total games won."
+        },
+        "streakDays": {
+          "type": "integer",
+          "description": "Daily activity streak."
+        },
+        "lastGameId": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Most recent game played."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": [
+        "profileId",
+        "fullName",
+        "rewardPoints",
+        "gamesPlayed",
+        "gamesWon",
+        "streakDays",
+        "updatedAt"
+      ]
+    },
+    "MatchRecord": {
+      "title": "MatchRecord",
+      "description": "Immutable game match or reward spin record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique match record ID."
+        },
+        "profileId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Player profile ID."
+        },
+        "playerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Player display name."
+        },
+        "gameId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 32,
+          "description": "Game identifier."
+        },
+        "gameName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "description": "Human-readable game name."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["ai", "friend", "random", "solo"],
+          "description": "Play mode."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["win", "loss", "draw", "spin"],
+          "description": "Match outcome."
+        },
+        "pointsEarned": {
+          "type": "integer",
+          "description": "Virtual points earned in this match."
+        },
+        "scoreSummary": {
+          "type": "string",
+          "maxLength": 180,
+          "description": "Short match result summary."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "description": "ISO timestamp string."
+        },
+        "createdAtTs": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of match completion."
+        }
+      },
+      "required": [
+        "id",
+        "profileId",
+        "playerName",
+        "gameId",
+        "gameName",
+        "mode",
+        "outcome",
+        "pointsEarned",
+        "scoreSummary",
+        "createdAt",
+        "createdAtTs"
+      ]
     }
   },
   "firestore": {
@@ -163,6 +305,14 @@
     "/phone_index/{phoneKey}": {
       "schema": { "$ref": "#/entities/PhoneIndex" },
       "description": "Normalized contact-number lookup index mapping phoneKey to profileId."
+    },
+    "/leaderboard/{profileId}": {
+      "schema": { "$ref": "#/entities/LeaderboardEntry" },
+      "description": "Public non-PII gaming leaderboard rankings sorted by reward points."
+    },
+    "/match_history/{matchId}": {
+      "schema": { "$ref": "#/entities/MatchRecord" },
+      "description": "Immutable match results and daily spin reward ledger."
     }
   }
 }

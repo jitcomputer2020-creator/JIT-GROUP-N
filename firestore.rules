@@ -116,6 +116,59 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt']);
     }
 
+    function isValidLeaderboardEntry(data, profileId) {
+      return data.keys().hasAll([
+          'profileId', 'fullName', 'rewardPoints',
+          'gamesPlayed', 'gamesWon', 'streakDays', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'profileId', 'fullName', 'avatarUrl', 'rewardPoints',
+          'gamesPlayed', 'gamesWon', 'streakDays', 'lastGameId', 'updatedAt'
+        ]) &&
+        isValidId(data.profileId) &&
+        data.profileId == profileId &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
+        data.rewardPoints is int && data.rewardPoints >= 0 && data.rewardPoints <= 1000000 &&
+        data.gamesPlayed is int && data.gamesPlayed >= 0 &&
+        data.gamesWon is int && data.gamesWon >= 0 &&
+        data.streakDays is int && data.streakDays >= 0 &&
+        (!('lastGameId' in data) || (data.lastGameId is string && data.lastGameId.size() <= 32)) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidLeaderboardUpdate(data, prev, profileId) {
+      return isValidLeaderboardEntry(data, profileId) &&
+        data.profileId == prev.profileId &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'fullName', 'avatarUrl', 'rewardPoints',
+          'gamesPlayed', 'gamesWon', 'streakDays', 'lastGameId', 'updatedAt'
+        ]);
+    }
+
+    function isValidMatchRecord(data, matchId) {
+      return data.keys().hasAll([
+          'id', 'profileId', 'playerName', 'gameId', 'gameName',
+          'mode', 'outcome', 'pointsEarned', 'scoreSummary', 'createdAt', 'createdAtTs'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'profileId', 'playerName', 'gameId', 'gameName',
+          'mode', 'outcome', 'pointsEarned', 'scoreSummary', 'createdAt', 'createdAtTs'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == matchId &&
+        isValidId(data.profileId) &&
+        data.playerName is string && data.playerName.size() >= 1 && data.playerName.size() <= 120 &&
+        data.gameId is string && data.gameId.size() >= 2 && data.gameId.size() <= 32 &&
+        data.gameName is string && data.gameName.size() >= 2 && data.gameName.size() <= 64 &&
+        data.mode in ['ai', 'friend', 'random', 'solo'] &&
+        data.outcome in ['win', 'loss', 'draw', 'spin'] &&
+        data.pointsEarned is int && data.pointsEarned >= 0 && data.pointsEarned <= 500 &&
+        data.scoreSummary is string && data.scoreSummary.size() >= 1 && data.scoreSummary.size() <= 180 &&
+        data.createdAt is string && data.createdAt.size() >= 10 && data.createdAt.size() <= 40 &&
+        data.createdAtTs == request.time;
+    }
+
     // 3. Profiles Collection: single-doc get by opaque profileId; listing strictly forbidden
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
@@ -136,6 +189,29 @@ service cloud.firestore {
         isValidPhoneIndexUpdate(incoming(), existing());
       allow delete: if isValidPhoneKey(phoneKey) &&
         isExpiredTimestamp(existing().lastLoginAt);
+    }
+
+    // 5. Public Campus Gaming Leaderboard (non-PII rankings only)
+    match /leaderboard/{profileId} {
+      allow get: if isValidId(profileId);
+      allow list: if existing().profileId is string && existing().rewardPoints >= 0;
+      allow create: if isValidId(profileId) &&
+        isValidLeaderboardEntry(incoming(), profileId) &&
+        existsAfter(/databases/$(database)/documents/profiles/$(profileId));
+      allow update: if isValidId(profileId) &&
+        isValidLeaderboardUpdate(incoming(), existing(), profileId);
+      allow delete: if false;
+    }
+
+    // 6. Immutable Match History & Reward Ledger (non-PII game results)
+    match /match_history/{matchId} {
+      allow get: if isValidId(matchId);
+      allow list: if existing().profileId is string && existing().pointsEarned >= 0;
+      allow create: if isValidId(matchId) &&
+        isValidMatchRecord(incoming(), matchId) &&
+        existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId));
+      allow update: if false;
+      allow delete: if false;
     }
   }
 }
