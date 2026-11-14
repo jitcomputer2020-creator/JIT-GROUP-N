@@ -295,6 +295,31 @@
         "createdAt",
         "createdAtTs"
       ]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Authorized administrator registry document keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the administrator."
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "Verified administrator email address."
+        },
+        "grantedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was granted."
+        }
+      },
+      "required": ["uid", "email", "grantedAt"]
     }
   },
   "firestore": {
@@ -313,6 +338,10 @@
     "/match_history/{matchId}": {
       "schema": { "$ref": "#/entities/MatchRecord" },
       "description": "Immutable match results and daily spin reward ledger."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRole" },
+      "description": "Authorized administrator accounts permitted to list user profiles."
     }
   }
 }

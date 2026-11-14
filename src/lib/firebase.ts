@@ -8,7 +8,7 @@
  */
 
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { getStorage, ref as storageRef, uploadString, getDownloadURL } from 'firebase/storage';
 import {
   getFirestore,
@@ -653,6 +653,7 @@ export async function fetchGlobalLeaderboard(maxEntries = 20): Promise<Leaderboa
   try {
     const q = query(
       collection(db, 'leaderboard'),
+      where('rewardPoints', '>=', 0),
       orderBy('rewardPoints', 'desc'),
       limit(maxEntries)
     );
@@ -718,8 +719,19 @@ export async function fetchMatchHistory(
   try {
     const colRef = collection(db, 'match_history');
     const q = profileId
-      ? query(colRef, where('profileId', '==', profileId), orderBy('createdAtTs', 'desc'), limit(maxEntries))
-      : query(colRef, orderBy('createdAtTs', 'desc'), limit(maxEntries));
+      ? query(
+          colRef,
+          where('profileId', '==', profileId),
+          where('pointsEarned', '>=', 0),
+          orderBy('createdAtTs', 'desc'),
+          limit(maxEntries)
+        )
+      : query(
+          colRef,
+          where('pointsEarned', '>=', 0),
+          orderBy('createdAtTs', 'desc'),
+          limit(maxEntries)
+        );
     const snap = await getDocs(q);
     return snap.docs.map((d) => {
       const data = d.data();
@@ -744,7 +756,12 @@ export async function fetchMatchHistory(
     if (profileId) {
       try {
         const snap = await getDocs(
-          query(collection(db, 'match_history'), orderBy('createdAtTs', 'desc'), limit(maxEntries * 2))
+          query(
+            collection(db, 'match_history'),
+            where('pointsEarned', '>=', 0),
+            orderBy('createdAtTs', 'desc'),
+            limit(maxEntries * 2)
+          )
         );
         return snap.docs
           .map((d) => {
@@ -769,6 +786,44 @@ export async function fetchMatchHistory(
       }
     }
     return [];
+  }
+}
+
+/**
+ * Signs in the verified Administrator via Google Auth (for direct Firestore /profiles list rule).
+ */
+export async function signInAdminWithGoogle(): Promise<{
+  email: string | null;
+  uid: string;
+}> {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  const cred = await signInWithPopup(auth, provider);
+  return {
+    email: cred.user.email,
+    uid: cred.user.uid,
+  };
+}
+
+export async function signOutAdminGoogle(): Promise<void> {
+  await signOut(auth);
+}
+
+/**
+ * Directly lists /profiles from Firestore when signed in as verified Google Admin.
+ */
+export async function fetchAllCloudProfilesAsAdmin(): Promise<UserProfile[]> {
+  if (!auth.currentUser) {
+    return [];
+  }
+  try {
+    const snap = await getDocs(collection(db, 'profiles'));
+    return snap.docs.map((d) => firestoreDocToUserProfile(d.data()));
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.LIST, 'profiles');
+    }
+    throw err;
   }
 }
 

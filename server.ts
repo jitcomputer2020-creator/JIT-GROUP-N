@@ -12,6 +12,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   testFirestoreConnection,
@@ -22,6 +23,7 @@ import {
   ensureCloudProfileSeeded,
   fetchNodeLeaderboard,
   fetchNodeMatchHistory,
+  fetchAllCloudProfilesForAdmin,
 } from './src/lib/firebaseNode.ts';
 import { INITIAL_USER, INITIAL_FRIENDS } from './src/services/mockData.ts';
 
@@ -953,6 +955,229 @@ app.get('/api/games/history', async (req, res) => {
     return res.json({ history });
   } catch {
     return res.json({ history: [] });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// Hidden Admin Panel Authentication & Firebase Directory APIs
+// ----------------------------------------------------------------------------
+
+const ADMIN_CONFIG_FILE = path.join(DATA_DIR, 'admin-config.json');
+const DEFAULT_ADMIN_PIN = process.env.ADMIN_PIN || 'ADMIN1234';
+const ADMIN_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+interface AdminConfig {
+  pinHash: string;
+  salt: string;
+  sessionSecret: string;
+  isDefaultPin: boolean;
+  updatedAt: string;
+}
+
+function hashPin(pin: string, salt: string): string {
+  return crypto.scryptSync(pin, salt, 64).toString('hex');
+}
+
+function readAdminConfig(): AdminConfig {
+  try {
+    if (fs.existsSync(ADMIN_CONFIG_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(ADMIN_CONFIG_FILE, 'utf-8'));
+      if (parsed?.pinHash && parsed?.salt && parsed?.sessionSecret) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Admin config read fallback:', err);
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const sessionSecret = crypto.randomBytes(32).toString('hex');
+  const initialConfig: AdminConfig = {
+    pinHash: hashPin(DEFAULT_ADMIN_PIN, salt),
+    salt,
+    sessionSecret,
+    isDefaultPin: true,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    fs.writeFileSync(ADMIN_CONFIG_FILE, JSON.stringify(initialConfig, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Admin config write notice:', err);
+  }
+  return initialConfig;
+}
+
+function writeAdminConfig(config: AdminConfig): void {
+  fs.writeFileSync(ADMIN_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+}
+
+function verifyPinMatch(candidatePin: string, config: AdminConfig): boolean {
+  const candidateHash = Buffer.from(hashPin(candidatePin, config.salt), 'hex');
+  const expectedHash = Buffer.from(config.pinHash, 'hex');
+  if (candidateHash.length !== expectedHash.length) return false;
+  return crypto.timingSafeEqual(candidateHash, expectedHash);
+}
+
+function signAdminToken(config: AdminConfig): { token: string; expiresAt: number } {
+  const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
+  const payloadB64 = Buffer.from(
+    JSON.stringify({ role: 'admin', exp: expiresAt, nonce: crypto.randomBytes(8).toString('hex') })
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', config.sessionSecret)
+    .update(payloadB64)
+    .digest('base64url');
+  return { token: `${payloadB64}.${sig}`, expiresAt };
+}
+
+function verifyAdminToken(token: string | undefined, config: AdminConfig): { valid: boolean; expiresAt?: number } {
+  if (!token || !token.includes('.')) return { valid: false };
+  const [payloadB64, sig] = token.split('.');
+  if (!payloadB64 || !sig) return { valid: false };
+  const expectedSig = crypto
+    .createHmac('sha256', config.sessionSecret)
+    .update(payloadB64)
+    .digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return { valid: false };
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8'));
+    if (payload?.role !== 'admin' || typeof payload.exp !== 'number' || payload.exp <= Date.now()) {
+      return { valid: false };
+    }
+    return { valid: true, expiresAt: payload.exp };
+  } catch {
+    return { valid: false };
+  }
+}
+
+function extractBearerToken(req: express.Request): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  return undefined;
+}
+
+const adminRateLimiter = new Map<string, { failures: number; lockedUntil: number }>();
+
+app.post('/api/admin/auth', (req, res) => {
+  const ip = req.ip || 'local';
+  const now = Date.now();
+  const limitEntry = adminRateLimiter.get(ip);
+  if (limitEntry && limitEntry.lockedUntil > now) {
+    const waitSec = Math.ceil((limitEntry.lockedUntil - now) / 1000);
+    return res.status(429).json({
+      success: false,
+      error: `Too many incorrect PIN attempts. Please wait ${waitSec}s before trying again.`,
+    });
+  }
+
+  const pin = typeof req.body?.pin === 'string' ? req.body.pin.trim() : '';
+  if (!pin) {
+    return res.status(400).json({ success: false, error: 'Administrator PIN is required.' });
+  }
+
+  const config = readAdminConfig();
+  if (!verifyPinMatch(pin, config)) {
+    const nextFailures = (limitEntry?.failures || 0) + 1;
+    adminRateLimiter.set(ip, {
+      failures: nextFailures >= 5 ? 0 : nextFailures,
+      lockedUntil: nextFailures >= 5 ? now + 30 * 1000 : 0,
+    });
+    return res.status(401).json({
+      success: false,
+      error: 'Access denied. Invalid administrator PIN.',
+    });
+  }
+
+  adminRateLimiter.delete(ip);
+  const { token, expiresAt } = signAdminToken(config);
+  return res.json({
+    success: true,
+    token,
+    expiresAt,
+    isDefaultPin: config.isDefaultPin,
+  });
+});
+
+app.get('/api/admin/session', (req, res) => {
+  const config = readAdminConfig();
+  const check = verifyAdminToken(extractBearerToken(req), config);
+  if (!check.valid) {
+    return res.status(401).json({ authenticated: false });
+  }
+  return res.json({
+    authenticated: true,
+    expiresAt: check.expiresAt,
+    isDefaultPin: config.isDefaultPin,
+  });
+});
+
+app.post('/api/admin/change-pin', (req, res) => {
+  const config = readAdminConfig();
+  const check = verifyAdminToken(extractBearerToken(req), config);
+  if (!check.valid) {
+    return res.status(401).json({ success: false, error: 'Unauthorized administrator session.' });
+  }
+
+  const currentPin = typeof req.body?.currentPin === 'string' ? req.body.currentPin.trim() : '';
+  const newPin = typeof req.body?.newPin === 'string' ? req.body.newPin.trim() : '';
+
+  if (!verifyPinMatch(currentPin, config)) {
+    return res.status(403).json({ success: false, error: 'Current administrator PIN is incorrect.' });
+  }
+  if (newPin.length < 4 || newPin.length > 64) {
+    return res.status(400).json({ success: false, error: 'New PIN must be between 4 and 64 characters.' });
+  }
+
+  const nextSalt = crypto.randomBytes(16).toString('hex');
+  const nextConfig: AdminConfig = {
+    pinHash: hashPin(newPin, nextSalt),
+    salt: nextSalt,
+    sessionSecret: config.sessionSecret,
+    isDefaultPin: newPin === DEFAULT_ADMIN_PIN,
+    updatedAt: new Date().toISOString(),
+  };
+  writeAdminConfig(nextConfig);
+  const { token, expiresAt } = signAdminToken(nextConfig);
+  return res.json({
+    success: true,
+    token,
+    expiresAt,
+    isDefaultPin: nextConfig.isDefaultPin,
+  });
+});
+
+app.get('/api/admin/users', async (req, res) => {
+  const config = readAdminConfig();
+  const check = verifyAdminToken(extractBearerToken(req), config);
+  if (!check.valid) {
+    return res.status(401).json({
+      success: false,
+      error: 'Administrator PIN authentication required.',
+    });
+  }
+
+  try {
+    const localMirror = readProfiles();
+    const { profiles, firebaseCount } = await fetchAllCloudProfilesForAdmin(localMirror);
+    return res.json({
+      success: true,
+      users: profiles,
+      totalCount: profiles.length,
+      firebaseCount,
+      syncedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('Admin users fetch error:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to load user records from Firebase.',
+    });
   }
 });
 

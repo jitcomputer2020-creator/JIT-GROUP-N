@@ -424,6 +424,7 @@ export async function fetchNodeLeaderboard(maxEntries = 20): Promise<Leaderboard
   try {
     const q = query(
       collection(dbLite, 'leaderboard'),
+      where('rewardPoints', '>=', 0),
       orderBy('rewardPoints', 'desc'),
       limit(maxEntries)
     );
@@ -451,8 +452,19 @@ export async function fetchNodeMatchHistory(profileId?: string, maxEntries = 20)
   try {
     const colRef = collection(dbLite, 'match_history');
     const q = profileId
-      ? query(colRef, where('profileId', '==', profileId), orderBy('createdAtTs', 'desc'), limit(maxEntries))
-      : query(colRef, orderBy('createdAtTs', 'desc'), limit(maxEntries));
+      ? query(
+          colRef,
+          where('profileId', '==', profileId),
+          where('pointsEarned', '>=', 0),
+          orderBy('createdAtTs', 'desc'),
+          limit(maxEntries)
+        )
+      : query(
+          colRef,
+          where('pointsEarned', '>=', 0),
+          orderBy('createdAtTs', 'desc'),
+          limit(maxEntries)
+        );
     const snap = await getDocs(q);
     return snap.docs.map((d) => {
       const data = d.data();
@@ -472,4 +484,121 @@ export async function fetchNodeMatchHistory(profileId?: string, maxEntries = 20)
   } catch {
     return [];
   }
+}
+
+/**
+ * Discovers and fetches all active Firebase user profiles via leaderboard index + single-doc profile reads,
+ * merged with local mirror profiles for complete administrative visibility.
+ */
+export async function fetchAllCloudProfilesForAdmin(
+  localMirrorProfiles: UserProfile[] = []
+): Promise<{ profiles: Array<UserProfile & { source: 'firebase' | 'local-mirror' }>; firebaseCount: number }> {
+  const leaderboardEntries = await fetchNodeLeaderboard(500);
+  const discoveredIds = new Set<string>();
+
+  for (const entry of leaderboardEntries) {
+    if (entry.profileId) {
+      discoveredIds.add(entry.profileId);
+    }
+  }
+
+  for (const local of localMirrorProfiles) {
+    if (local?.id) {
+      discoveredIds.add(local.id);
+    }
+  }
+
+  const profileMap = new Map<string, UserProfile & { source: 'firebase' | 'local-mirror' }>();
+  let firebaseCount = 0;
+
+  const ids = Array.from(discoveredIds);
+  const CONCURRENCY = 12;
+  for (let i = 0; i < ids.length; i += CONCURRENCY) {
+    const chunk = ids.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map(async (profileId) => {
+        try {
+          const snap = await getDoc(doc(dbLite, 'profiles', profileId));
+          if (snap.exists()) {
+            const data = snap.data();
+            if (
+              profileId !== 'usr_jit_primary_001' &&
+              isCloudTimestampExpired(data.lastActiveAt, data.lastLoginAt || data.lastLogin)
+            ) {
+              return null;
+            }
+            return { ...firestoreDocToUserProfile(data), source: 'firebase' as const };
+          }
+        } catch {
+          // Ignore single read failure
+        }
+        return null;
+      })
+    );
+    for (const item of results) {
+      if (item) {
+        profileMap.set(item.id, item);
+        firebaseCount++;
+      }
+    }
+  }
+
+  // Fallback check via phone_index for any local profiles whose ID might differ
+  for (const local of localMirrorProfiles) {
+    if (!local || profileMap.has(local.id)) continue;
+    const phoneKey = toCanonicalPhoneKey(local.contactNumber);
+    const existingByPhone = Array.from(profileMap.values()).find(
+      (p) => toCanonicalPhoneKey(p.contactNumber) === phoneKey
+    );
+    if (existingByPhone) continue;
+
+    try {
+      const lookup = await lookupCloudProfileByPhone(local.contactNumber);
+      if (lookup.found && lookup.profile) {
+        profileMap.set(lookup.profile.id, { ...lookup.profile, source: 'firebase' });
+        firebaseCount++;
+        continue;
+      }
+    } catch {
+      // Fallback to local mirror entry
+    }
+
+    profileMap.set(local.id, { ...local, source: 'local-mirror' });
+  }
+
+  // Ensure any leaderboard-only user without a readable profile doc is still represented
+  for (const entry of leaderboardEntries) {
+    if (!profileMap.has(entry.profileId)) {
+      const nowIso = new Date().toISOString();
+      profileMap.set(entry.profileId, {
+        id: entry.profileId,
+        contactNumber: 'Hidden / Unlinked',
+        fullName: entry.fullName,
+        address: '',
+        avatarUrl: entry.avatarUrl,
+        joinedAt: entry.updatedAt || nowIso,
+        lastLoginAt: entry.updatedAt || nowIso,
+        lastLogin: entry.updatedAt || nowIso,
+        stats: {
+          friendsCount: 0,
+          followersCount: 0,
+          followingCount: 0,
+          postsCount: 0,
+          reelsCount: 0,
+          gamesPlayed: entry.gamesPlayed,
+          gamesWon: entry.gamesWon,
+          rewardPoints: entry.rewardPoints,
+          streakDays: entry.streakDays,
+        },
+        source: 'firebase',
+      });
+      firebaseCount++;
+    }
+  }
+
+  const profiles = Array.from(profileMap.values()).sort(
+    (a, b) => new Date(b.joinedAt || 0).getTime() - new Date(a.joinedAt || 0).getTime()
+  );
+
+  return { profiles, firebaseCount };
 }

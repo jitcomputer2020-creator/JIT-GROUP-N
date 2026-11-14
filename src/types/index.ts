@@ -17,7 +17,8 @@ export type NavTab =
   | 'profile'
   | 'settings'
   | 'login'
-  | 'register';
+  | 'register'
+  | 'admin';
 
 export interface UserProfile {
   id: string; // Permanent UUID

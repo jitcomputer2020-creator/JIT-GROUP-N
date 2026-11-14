@@ -15,6 +15,19 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email_verified == true &&
+        (
+          request.auth.token.email == 'jitcomputer2020@gmail.com' ||
+          exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        );
+    }
+
     function isValidId(id) {
       return id is string && id.size() >= 8 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -169,13 +182,13 @@ service cloud.firestore {
         data.createdAtTs == request.time;
     }
 
-    // 3. Profiles Collection: single-doc get by opaque profileId; listing strictly forbidden
+    // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
-      allow list: if false;
+      allow list: if isAdmin();
       allow create: if isValidId(profileId) && isValidProfileCreate(incoming(), profileId);
       allow update: if isValidId(profileId) && isValidProfileUpdate(incoming(), existing(), profileId);
-      allow delete: if isValidId(profileId) && isExpiredTimestamp(existing().lastActiveAt);
+      allow delete: if isValidId(profileId) && (isExpiredTimestamp(existing().lastActiveAt) || isAdmin());
     }
 
     // 4. Phone Lookup Index: exact phoneKey lookup only; enumeration strictly forbidden
@@ -188,30 +201,37 @@ service cloud.firestore {
       allow update: if isValidPhoneKey(phoneKey) &&
         isValidPhoneIndexUpdate(incoming(), existing());
       allow delete: if isValidPhoneKey(phoneKey) &&
-        isExpiredTimestamp(existing().lastLoginAt);
+        (isExpiredTimestamp(existing().lastLoginAt) || isAdmin());
     }
 
     // 5. Public Campus Gaming Leaderboard (non-PII rankings only)
     match /leaderboard/{profileId} {
       allow get: if isValidId(profileId);
-      allow list: if existing().profileId is string && existing().rewardPoints >= 0;
+      allow list: if existing().rewardPoints >= 0;
       allow create: if isValidId(profileId) &&
         isValidLeaderboardEntry(incoming(), profileId) &&
         existsAfter(/databases/$(database)/documents/profiles/$(profileId));
       allow update: if isValidId(profileId) &&
         isValidLeaderboardUpdate(incoming(), existing(), profileId);
-      allow delete: if false;
+      allow delete: if isAdmin();
     }
 
     // 6. Immutable Match History & Reward Ledger (non-PII game results)
     match /match_history/{matchId} {
       allow get: if isValidId(matchId);
-      allow list: if existing().profileId is string && existing().pointsEarned >= 0;
+      allow list: if existing().pointsEarned >= 0;
       allow create: if isValidId(matchId) &&
         isValidMatchRecord(incoming(), matchId) &&
         existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId));
       allow update: if false;
       allow delete: if false;
+    }
+
+    // 7. Authorized Administrator Registry (read own role doc only)
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list: if false;
+      allow create, update, delete: if false;
     }
   }
 }

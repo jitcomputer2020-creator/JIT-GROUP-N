@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useRef } from 'react';
 import { NavTab } from '../../types';
 import { APP_CONFIG } from '../../constants/branding';
 import { useAuth } from '../../context/AuthContext';
@@ -23,6 +23,7 @@ interface NavbarProps {
   onOpenSearch: () => void;
   onOpenNotifications: () => void;
   onOpenAuth: () => void;
+  onOpenAdmin?: () => void;
   unreadCount?: number;
 }
 
@@ -32,10 +33,28 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSearch,
   onOpenNotifications,
   onOpenAuth,
+  onOpenAdmin,
   unreadCount = 2,
 }) => {
   const { currentUser, isAuthenticated } = useAuth();
   const { effectiveTheme, toggleTheme } = useTheme();
+  const logoTapTimesRef = useRef<number[]>([]);
+
+  const handleLogoTap = () => {
+    const now = Date.now();
+    const recentTaps = logoTapTimesRef.current.filter((t) => now - t < 1800);
+    recentTaps.push(now);
+    logoTapTimesRef.current = recentTaps;
+
+    if (recentTaps.length >= 5) {
+      logoTapTimesRef.current = [];
+      if (onOpenAdmin) {
+        onOpenAdmin();
+        return;
+      }
+    }
+    onNavigate('home');
+  };
 
   const navLinks: { id: NavTab; label: string }[] = [
     { id: 'home', label: 'Feed' },
@@ -53,8 +72,8 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Zone 1: Brand Mark & Identity */}
         <div className="flex items-center gap-2.5 shrink-0">
           <button
-            onClick={() => onNavigate('home')}
-            className="flex items-center gap-2 text-left group focus:outline-none"
+            onClick={handleLogoTap}
+            className="flex items-center gap-2 text-left group focus:outline-none touch-manipulate"
           >
             <img
               src={APP_CONFIG.logoUrl}
