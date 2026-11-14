@@ -131,6 +131,29 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     },
   ]);
 
+  // Load persisted conversations & messages from backend so DMs & chat logs persist across sessions
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const res = await fetch('/api/messages');
+        if (!res.ok || !active) return;
+        const data = await res.json();
+        if (Array.isArray(data.conversations) && data.conversations.length > 0) {
+          setConversations(data.conversations);
+        }
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          setMessages(data.messages);
+        }
+      } catch {
+        // Offline fallback keeps initial messages
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // WebRTC Call state
   const [activeCall, setActiveCall] = useState<{
     type: CallType;
@@ -215,18 +238,26 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         c.id === activeConvId
           ? {
               ...c,
+              participantIds: Array.from(new Set([...(c.participantIds || []), currentUser.id])),
               lastMessage: {
                 text: newMsg.content || (mediaUrl ? '[Image Attachment]' : ''),
                 senderId: currentUser.id,
                 createdAt: newMsg.createdAt,
                 isRead: true,
               },
+              updatedAt: newMsg.createdAt,
             }
           : c
       )
     );
     setMessageText('');
     clearAttachment();
+
+    fetch('/api/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: newMsg }),
+    }).catch(() => {});
   };
 
   const startCall = (type: CallType) => {
@@ -278,11 +309,18 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     setMobileThreadOpen(true);
     setNewGroupName('');
     setIsNewGroupModalOpen(false);
+
+    fetch('/api/conversations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation: newConv }),
+    }).catch(() => {});
   };
 
   const filteredConversations = conversations.filter((c) =>
     c.name?.toLowerCase().includes(searchQuery.toLowerCase())
   );
+  const activeMessages = messages.filter((m) => m.conversationId === activeConvId);
 
   return (
     <div className="relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-140px)] min-h-[460px] flex">
@@ -427,7 +465,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
             </span>
           </div>
 
-          {messages.map((msg) => {
+          {activeMessages.map((msg) => {
             const isMe = msg.senderId === currentUser?.id;
             return (
               <div

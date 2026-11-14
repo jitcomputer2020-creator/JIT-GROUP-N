@@ -72,7 +72,7 @@ service cloud.firestore {
           'id', 'contactNumber', 'phoneKey', 'fullName', 'address',
           'bio', 'avatarUrl', 'coverUrl', 'joinedAt', 'lastLoginAt',
           'lastLogin', 'lastActiveAt', 'isContactNumberPublic',
-          'isAddressPublic', 'stats'
+          'isAddressPublic', 'status', 'suspendedReason', 'suspendedAt', 'stats'
         ]) &&
         isValidId(data.id) &&
         data.id == profileId &&
@@ -89,6 +89,9 @@ service cloud.firestore {
         data.lastActiveAt == request.time &&
         (!('isContactNumberPublic' in data) || data.isContactNumberPublic is bool) &&
         (!('isAddressPublic' in data) || data.isAddressPublic is bool) &&
+        (!('status' in data) || (data.status is string && data.status in ['active', 'suspended', 'deleted'])) &&
+        (!('suspendedReason' in data) || (data.suspendedReason is string && data.suspendedReason.size() <= 300)) &&
+        (!('suspendedAt' in data) || (data.suspendedAt is string && data.suspendedAt.size() <= 40)) &&
         isValidStats(data.stats);
     }
 
@@ -108,6 +111,8 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'address', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'stats', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'suspendedReason', 'suspendedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt'])
         );
     }

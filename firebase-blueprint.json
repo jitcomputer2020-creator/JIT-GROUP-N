@@ -110,6 +110,22 @@
           "type": "boolean",
           "description": "Whether address is visible to others."
         },
+        "status": {
+          "type": "string",
+          "enum": ["active", "suspended", "deleted"],
+          "description": "Account moderation status."
+        },
+        "suspendedReason": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Administrative reason if suspended."
+        },
+        "suspendedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "description": "ISO timestamp when moderation action occurred."
+        },
         "stats": {
           "type": "object",
           "$ref": "#/entities/ProfileStats",

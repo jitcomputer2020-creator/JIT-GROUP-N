@@ -203,9 +203,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (currentUser && currentUser.contactNumber) {
         try {
           const cloudCurrent = await lookupCloudProfileByPhone(currentUser.contactNumber);
-          if (cloudCurrent.expired) {
+          if (cloudCurrent.expired || (cloudCurrent.found && cloudCurrent.profile?.status === 'deleted')) {
             setCurrentUser(null);
             setRegisteredProfiles((prev) => prev.filter((p) => p.id !== currentUser.id));
+            if (typeof window !== 'undefined') {
+              localStorage.removeItem(LS_CURRENT_USER);
+            }
+          } else if (cloudCurrent.found && cloudCurrent.profile?.status === 'suspended') {
+            setCurrentUser(null);
+            setRegisteredProfiles((prev) =>
+              prev.map((p) => (p.id === cloudCurrent.profile!.id ? cloudCurrent.profile! : p))
+            );
             if (typeof window !== 'undefined') {
               localStorage.removeItem(LS_CURRENT_USER);
             }
@@ -231,18 +239,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await fetch('/api/profiles');
       if (res.ok) {
         const data = await res.json();
-        const serverProfiles: UserProfile[] = data.profiles || [];
-        const activeServerProfiles = serverProfiles.filter((p) => !isProfileExpired(p));
+        const serverProfiles: Array<UserProfile & { adminPointsUpdatedAt?: string }> = data.profiles || [];
+        const activeServerProfiles = serverProfiles.filter(
+          (p) => !isProfileExpired(p) && p.status !== 'deleted'
+        );
 
         setRegisteredProfiles((prev) => {
           const map = new Map<string, UserProfile>();
           // Add existing local state first (excluding expired)
           for (const p of prev) {
-            if (!isProfileExpired(p)) {
+            if (!isProfileExpired(p) && p.status !== 'deleted') {
               map.set(p.id, p);
             }
           }
-          // Merge server profiles (preserving authoritative Firestore photos if already loaded)
+          // Merge server profiles (preserving authoritative Firestore photos/overrides if already loaded)
           for (const sp of activeServerProfiles) {
             const localExisting = Array.from(map.values()).find(
               (p) => isPhoneNumberMatch(p.contactNumber, sp.contactNumber) || p.id === sp.id
@@ -254,6 +264,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 new Date(localExisting.lastLoginAt || localExisting.joinedAt).getTime()
                   ? sp.lastLoginAt
                   : localExisting.lastLoginAt;
+              const adminPointsOverride =
+                sp.adminPointsUpdatedAt &&
+                new Date(sp.adminPointsUpdatedAt).getTime() >=
+                  new Date(localExisting.lastLoginAt || 0).getTime();
+
               map.set(localExisting.id, {
                 ...localExisting,
                 ...sp,
@@ -269,7 +284,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 stats: {
                   ...localExisting.stats,
                   ...sp.stats,
-                  rewardPoints: Math.max(localExisting.stats?.rewardPoints ?? 0, sp.stats?.rewardPoints ?? 0),
+                  rewardPoints: isCloudCurrent
+                    ? cloudResolvedProfile!.stats.rewardPoints
+                    : adminPointsOverride
+                    ? sp.stats?.rewardPoints ?? localExisting.stats?.rewardPoints ?? 0
+                    : Math.max(localExisting.stats?.rewardPoints ?? 0, sp.stats?.rewardPoints ?? 0),
                   gamesPlayed: Math.max(localExisting.stats?.gamesPlayed ?? 0, sp.stats?.gamesPlayed ?? 0),
                   gamesWon: Math.max(localExisting.stats?.gamesWon ?? 0, sp.stats?.gamesWon ?? 0),
                   streakDays: Math.max(localExisting.stats?.streakDays ?? 1, sp.stats?.streakDays ?? 1),
@@ -279,7 +298,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               map.set(sp.id, sp);
             }
           }
-          const merged = Array.from(map.values()).filter((p) => !isProfileExpired(p));
+          const merged = Array.from(map.values()).filter((p) => !isProfileExpired(p) && p.status !== 'deleted');
           if (typeof window !== 'undefined') {
             localStorage.setItem(LS_PROFILES, JSON.stringify(merged));
           }
@@ -292,22 +311,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             (p) => p.id === currentUser.id || isPhoneNumberMatch(p.contactNumber, currentUser.contactNumber)
           );
           if (matchedServer) {
-            setCurrentUser((prev) => {
-              if (!prev) return matchedServer;
-              const serverTs = new Date(matchedServer.lastLoginAt || matchedServer.joinedAt || 0).getTime();
-              const prevTs = new Date(prev.lastLoginAt || prev.joinedAt || 0).getTime();
-              const base = serverTs > prevTs ? { ...prev, ...matchedServer } : { ...matchedServer, ...prev };
-              return {
-                ...base,
-                stats: {
-                  ...base.stats,
-                  rewardPoints: Math.max(prev.stats?.rewardPoints ?? 0, matchedServer.stats?.rewardPoints ?? 0),
-                  gamesPlayed: Math.max(prev.stats?.gamesPlayed ?? 0, matchedServer.stats?.gamesPlayed ?? 0),
-                  gamesWon: Math.max(prev.stats?.gamesWon ?? 0, matchedServer.stats?.gamesWon ?? 0),
-                  streakDays: Math.max(prev.stats?.streakDays ?? 1, matchedServer.stats?.streakDays ?? 1),
-                },
-              };
-            });
+            if (matchedServer.status === 'suspended' || matchedServer.status === 'deleted') {
+              setCurrentUser(null);
+              if (typeof window !== 'undefined') {
+                localStorage.removeItem(LS_CURRENT_USER);
+              }
+            } else {
+              setCurrentUser((prev) => {
+                if (!prev) return matchedServer;
+                const serverTs = new Date(matchedServer.lastLoginAt || matchedServer.joinedAt || 0).getTime();
+                const prevTs = new Date(prev.lastLoginAt || prev.joinedAt || 0).getTime();
+                const base = serverTs >= prevTs ? { ...prev, ...matchedServer } : { ...matchedServer, ...prev };
+                const adminPointsOverride =
+                  matchedServer.adminPointsUpdatedAt &&
+                  new Date(matchedServer.adminPointsUpdatedAt).getTime() >= prevTs;
+                return {
+                  ...base,
+                  stats: {
+                    ...base.stats,
+                    rewardPoints: adminPointsOverride
+                      ? matchedServer.stats?.rewardPoints ?? prev.stats?.rewardPoints ?? 0
+                      : Math.max(prev.stats?.rewardPoints ?? 0, matchedServer.stats?.rewardPoints ?? 0),
+                    gamesPlayed: Math.max(prev.stats?.gamesPlayed ?? 0, matchedServer.stats?.gamesPlayed ?? 0),
+                    gamesWon: Math.max(prev.stats?.gamesWon ?? 0, matchedServer.stats?.gamesWon ?? 0),
+                    streakDays: Math.max(prev.stats?.streakDays ?? 1, matchedServer.stats?.streakDays ?? 1),
+                  },
+                };
+              });
+            }
           }
         }
       }
@@ -407,6 +438,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // 1. Check shared Firebase Firestore database first (cross-browser, cross-device, incognito-safe)
     try {
       const cloudRes = await loginCloudProfileByPhone(contactNumber);
+      if (cloudRes.suspended) {
+        return {
+          success: false,
+          error: `This account has been suspended by an administrator. ${
+            cloudRes.suspendedReason ? `Reason: ${cloudRes.suspendedReason}` : ''
+          }`.trim(),
+        };
+      }
       if (cloudRes.expired) {
         setRegisteredProfiles((prev) =>
           prev.filter((p) => !isPhoneNumberMatch(p.contactNumber, contactNumber))
@@ -446,6 +485,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contactNumber }),
       });
+      if (serverRes.status === 403) {
+        const errData = await serverRes.json().catch(() => ({}));
+        return {
+          success: false,
+          error: errData.error || 'This account has been suspended by an administrator.',
+        };
+      }
       if (serverRes.ok) {
         const data = await serverRes.json();
         if (data.success && data.profile) {
@@ -537,10 +583,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    if (!matched) {
+    if (!matched || matched.status === 'deleted') {
       return {
         success: false,
         error: `No active account found for "${contactNumber}". Please register a new profile below.`,
+      };
+    }
+
+    if (matched.status === 'suspended') {
+      return {
+        success: false,
+        error: `This account has been suspended by an administrator. ${
+          matched.suspendedReason ? `Reason: ${matched.suspendedReason}` : ''
+        }`.trim(),
       };
     }
 

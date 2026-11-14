@@ -7,8 +7,8 @@
  * with full local persistence across page refreshes.
  */
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { Post, Story, Reel, Comment, UserProfile } from '../types';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { Post, Story, Reel, Comment, UserProfile, GlobalAnnouncement } from '../types';
 import { INITIAL_POSTS, INITIAL_STORIES, INITIAL_REELS, INITIAL_FRIENDS, INITIAL_USER } from '../services/mockData';
 import { useAuth } from './AuthContext';
 import { APP_CONFIG } from '../constants/branding';
@@ -17,6 +17,8 @@ interface SocialContextType {
   posts: Post[];
   stories: Story[];
   reels: Reel[];
+  announcements: GlobalAnnouncement[];
+  refreshAnnouncements: () => Promise<void>;
   savedPostIds: string[];
   friendIds: string[];
   pendingIncomingRequestIds: string[];
@@ -117,6 +119,8 @@ const SEED_COMMENTS: Record<string, Comment[]> = {
 export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { currentUser, registeredProfiles } = useAuth();
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
+  const [announcements, setAnnouncements] = useState<GlobalAnnouncement[]>([]);
+  const postsHydratedRef = useRef(false);
 
   // 1. Posts state
   const [posts, setPosts] = useState<Post[]>(() => {
@@ -253,6 +257,73 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       localStorage.setItem(LS_PENDING_OUT, JSON.stringify(pendingOutgoingRequestIds));
     }
   }, [posts, stories, reels, savedPostIds, friendIds, pendingIncomingRequestIds, pendingOutgoingRequestIds]);
+
+  const refreshAnnouncements = useCallback(async () => {
+    try {
+      const [annRes, postsRes] = await Promise.all([
+        fetch('/api/announcements'),
+        fetch('/api/posts'),
+      ]);
+      if (annRes.ok) {
+        const annData = await annRes.json();
+        if (Array.isArray(annData.announcements)) {
+          setAnnouncements(annData.announcements);
+        }
+      }
+      if (postsRes.ok) {
+        const postsData = await postsRes.json();
+        if (Array.isArray(postsData.posts) && postsData.posts.length > 0) {
+          setPosts((prev) => {
+            const existingMap = new Map(prev.map((p) => [p.id, p]));
+            const merged: Post[] = [];
+            const seen = new Set<string>();
+            // Prefer official admin broadcasts & newly added server posts first
+            for (const sp of postsData.posts as Post[]) {
+              if (!seen.has(sp.id)) {
+                seen.add(sp.id);
+                const localMatch = existingMap.get(sp.id);
+                merged.push(
+                  localMatch && sp.authorId !== 'usr_jit_admin_system'
+                    ? localMatch
+                    : sp
+                );
+              }
+            }
+            for (const lp of prev) {
+              if (!seen.has(lp.id) && !lp.id.startsWith('post_ann_')) {
+                seen.add(lp.id);
+                merged.push(lp);
+              }
+            }
+            return merged;
+          });
+        }
+      }
+    } catch {
+      // Non-fatal offline fallback
+    } finally {
+      postsHydratedRef.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshAnnouncements();
+    const timer = setInterval(refreshAnnouncements, 60_000);
+    return () => clearInterval(timer);
+  }, [refreshAnnouncements]);
+
+  // Persist user post updates (new posts, edits, comments, likes) to backend store
+  useEffect(() => {
+    if (!postsHydratedRef.current) return;
+    const timeout = setTimeout(() => {
+      fetch('/api/posts/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ posts }),
+      }).catch(() => {});
+    }, 500);
+    return () => clearTimeout(timeout);
+  }, [posts]);
 
   // Keep posts, comments, stories, and reels author info in sync if currentUser updates profile
   useEffect(() => {
@@ -641,6 +712,8 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         posts,
         stories,
         reels,
+        announcements,
+        refreshAnnouncements,
         savedPostIds,
         friendIds,
         pendingIncomingRequestIds,

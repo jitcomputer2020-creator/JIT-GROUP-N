@@ -28,6 +28,7 @@ import {
   X,
   CornerDownRight,
   Loader2,
+  Megaphone,
 } from 'lucide-react';
 
 interface HomeViewProps {
@@ -40,6 +41,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
   const {
     posts,
     stories,
+    announcements,
     createPost,
     deletePost,
     toggleLikePost,
@@ -49,6 +51,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
     setViewingUserId,
   } = useSocial();
 
+  const [dismissedAnnouncementIds, setDismissedAnnouncementIds] = useState<string[]>([]);
   const [activeCategory, setActiveCategory] = useState<'all' | 'friends' | 'following' | 'popular'>('all');
 
   // New post state
@@ -164,8 +167,66 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
   const likersList = likedByPostId ? getPostLikers(likedByPostId) : [];
 
+  const visibleAnnouncements = announcements.filter(
+    (a) => !dismissedAnnouncementIds.includes(a.id)
+  );
+
   return (
     <div className="space-y-6 max-w-2xl mx-auto w-full">
+      {/* 0. Site-Wide Global Announcements */}
+      {visibleAnnouncements.length > 0 && (
+        <section className="space-y-2.5" aria-label="Site-wide announcements">
+          {visibleAnnouncements.map((ann) => {
+            const accentClass =
+              ann.priority === 'important'
+                ? 'border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30'
+                : ann.priority === 'event'
+                ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30'
+                : 'border-blue-200 dark:border-blue-900/60 bg-blue-50/70 dark:bg-blue-950/30';
+            const iconColor =
+              ann.priority === 'important'
+                ? 'text-amber-600 dark:text-amber-400'
+                : ann.priority === 'event'
+                ? 'text-emerald-600 dark:text-emerald-400'
+                : 'text-blue-600 dark:text-blue-400';
+
+            return (
+              <div
+                key={ann.id}
+                className={`border rounded-2xl p-4 flex items-start justify-between gap-3 ${accentClass}`}
+              >
+                <div className="flex items-start gap-3 min-w-0">
+                  <div className={`mt-0.5 shrink-0 ${iconColor}`}>
+                    <Megaphone className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <h3 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                        {ann.title}
+                      </h3>
+                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                        · {ann.authorName}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-700 dark:text-slate-300 mt-1 whitespace-pre-line break-words leading-relaxed">
+                      {ann.message}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDismissedAnnouncementIds((prev) => [...prev, ann.id])}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg shrink-0"
+                  aria-label="Dismiss announcement"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            );
+          })}
+        </section>
+      )}
+
       {/* 1. Stories Carousel */}
       <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 shadow-sm">
         <div className="flex items-center gap-3 overflow-x-auto no-scrollbar pb-1">

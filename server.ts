@@ -24,8 +24,10 @@ import {
   fetchNodeLeaderboard,
   fetchNodeMatchHistory,
   fetchAllCloudProfilesForAdmin,
+  adminOverrideCloudProfile,
+  adminModerateCloudProfile,
 } from './src/lib/firebaseNode.ts';
-import { INITIAL_USER, INITIAL_FRIENDS } from './src/services/mockData.ts';
+import { INITIAL_USER, INITIAL_FRIENDS, INITIAL_POSTS } from './src/services/mockData.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -647,14 +649,304 @@ app.get('/api/profiles', (req, res) => {
   res.json({ profiles });
 });
 
+// ----------------------------------------------------------------------------
+// Persistent Chats, Posts & Global Announcements Stores (data/*.json)
+// ----------------------------------------------------------------------------
+
+const CHATS_FILE = path.join(DATA_DIR, 'chats.json');
+const POSTS_FILE = path.join(DATA_DIR, 'posts.json');
+const ANNOUNCEMENTS_FILE = path.join(DATA_DIR, 'announcements.json');
+
+interface PersistedChatsData {
+  conversations: any[];
+  messages: any[];
+}
+
+function getDefaultChatsData(): PersistedChatsData {
+  const defaultConversations = [
+    {
+      id: 'conv_001',
+      type: 'direct',
+      name: 'Priya Mukherjee',
+      avatarUrl: INITIAL_FRIENDS[0]?.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
+      participantIds: ['usr_jit_primary_001', 'usr_jit_002'],
+      lastMessage: {
+        text: 'Are we still on for the Ludo tournament practice at 7 PM?',
+        senderId: 'usr_jit_002',
+        createdAt: '10:45 AM',
+        isRead: false,
+      },
+      unreadCount: 1,
+      updatedAt: '10:45 AM',
+    },
+    {
+      id: 'conv_002',
+      type: 'direct',
+      name: 'Arjun Verma',
+      avatarUrl: INITIAL_FRIENDS[1]?.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
+      participantIds: ['usr_jit_primary_001', 'usr_jit_003'],
+      lastMessage: {
+        text: 'Sent you the room code for Carrom: JIT-4491',
+        senderId: 'usr_jit_003',
+        createdAt: 'Yesterday',
+        isRead: true,
+      },
+      unreadCount: 0,
+      updatedAt: 'Yesterday',
+    },
+    {
+      id: 'conv_003',
+      type: 'group',
+      name: 'JIT Tech Club & Gamers',
+      avatarUrl: '/assets/aistudio/image_e64e54f2.png',
+      participantIds: ['usr_jit_primary_001', 'usr_jit_002', 'usr_jit_003', 'usr_jit_004'],
+      lastMessage: {
+        text: 'Ananya: Chess blitz registration closes tonight!',
+        senderId: 'usr_jit_004',
+        createdAt: '2 days ago',
+        isRead: true,
+      },
+      unreadCount: 0,
+      updatedAt: '2 days ago',
+    },
+  ];
+
+  const defaultMessages = [
+    {
+      id: 'msg_1',
+      conversationId: 'conv_001',
+      senderId: 'usr_jit_002',
+      senderName: 'Priya Mukherjee',
+      content: 'Hi! Have you checked out the new JIT GROUP gaming and calling features?',
+      createdAt: '10:30 AM',
+      status: 'read',
+    },
+    {
+      id: 'msg_2',
+      conversationId: 'conv_001',
+      senderId: 'usr_jit_primary_001',
+      senderName: 'Prof. Ramesh Sharma',
+      content: 'Yes! The WebRTC low-latency calling and real-time state synchronization work seamlessly.',
+      createdAt: '10:35 AM',
+      status: 'read',
+    },
+    {
+      id: 'msg_3',
+      conversationId: 'conv_001',
+      senderId: 'usr_jit_002',
+      senderName: 'Priya Mukherjee',
+      content: 'Are we still on for the Ludo tournament practice at 7 PM?',
+      createdAt: '10:45 AM',
+      status: 'delivered',
+    },
+    {
+      id: 'msg_4',
+      conversationId: 'conv_002',
+      senderId: 'usr_jit_003',
+      senderName: 'Arjun Verma',
+      content: 'Sent you the room code for Carrom: JIT-4491',
+      createdAt: 'Yesterday',
+      status: 'read',
+    },
+    {
+      id: 'msg_5',
+      conversationId: 'conv_003',
+      senderId: 'usr_jit_004',
+      senderName: 'Ananya Sen',
+      content: 'Chess blitz registration closes tonight! Join the tournament bracket before 9 PM.',
+      createdAt: '2 days ago',
+      status: 'read',
+    },
+  ];
+
+  return { conversations: defaultConversations, messages: defaultMessages };
+}
+
+function readChatsData(): PersistedChatsData {
+  try {
+    if (fs.existsSync(CHATS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(CHATS_FILE, 'utf-8'));
+      if (parsed && Array.isArray(parsed.conversations) && Array.isArray(parsed.messages)) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Error reading chats.json:', err);
+  }
+  const seeded = getDefaultChatsData();
+  writeChatsData(seeded);
+  return seeded;
+}
+
+function writeChatsData(data: PersistedChatsData) {
+  try {
+    fs.writeFileSync(CHATS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Error writing chats.json:', err);
+  }
+}
+
+function readPostsData(): any[] {
+  try {
+    if (fs.existsSync(POSTS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(POSTS_FILE, 'utf-8'));
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.warn('Error reading posts.json:', err);
+  }
+  const seeded = INITIAL_POSTS.map((p) => ({
+    ...p,
+    likedBy: p.isLiked ? ['usr_jit_primary_001', 'usr_jit_002', 'usr_jit_003'] : ['usr_jit_002', 'usr_jit_004'],
+    comments: [],
+  }));
+  writePostsData(seeded);
+  return seeded;
+}
+
+function writePostsData(posts: any[]) {
+  try {
+    fs.writeFileSync(POSTS_FILE, JSON.stringify(posts, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Error writing posts.json:', err);
+  }
+}
+
+function readAnnouncementsData(): any[] {
+  try {
+    if (fs.existsSync(ANNOUNCEMENTS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(ANNOUNCEMENTS_FILE, 'utf-8'));
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.warn('Error reading announcements.json:', err);
+  }
+  return [];
+}
+
+function writeAnnouncementsData(list: any[]) {
+  try {
+    fs.writeFileSync(ANNOUNCEMENTS_FILE, JSON.stringify(list, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Error writing announcements.json:', err);
+  }
+}
+
+// Public Chats & Messages Endpoints
+app.get('/api/messages', (req, res) => {
+  const chats = readChatsData();
+  const userId = typeof req.query.userId === 'string' ? req.query.userId : undefined;
+  if (!userId) {
+    return res.json(chats);
+  }
+  const conversations = chats.conversations.filter(
+    (c: any) => Array.isArray(c.participantIds) && c.participantIds.includes(userId)
+  );
+  const convIds = new Set(conversations.map((c: any) => c.id));
+  const messages = chats.messages.filter(
+    (m: any) => convIds.has(m.conversationId) || m.senderId === userId
+  );
+  return res.json({ conversations, messages });
+});
+
+app.post('/api/messages', (req, res) => {
+  const msg = req.body?.message;
+  if (!msg || !msg.conversationId || !msg.senderId) {
+    return res.status(400).json({ error: 'Invalid message payload' });
+  }
+  const chats = readChatsData();
+  const savedMsg = {
+    ...msg,
+    id: msg.id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    createdAt: msg.createdAt || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    timestampIso: msg.timestampIso || new Date().toISOString(),
+  };
+
+  if (!chats.messages.some((m: any) => m.id === savedMsg.id)) {
+    chats.messages.push(savedMsg);
+  }
+
+  const convIdx = chats.conversations.findIndex((c: any) => c.id === savedMsg.conversationId);
+  if (convIdx >= 0) {
+    const conv = chats.conversations[convIdx];
+    const participants = Array.isArray(conv.participantIds) ? [...conv.participantIds] : [];
+    if (!participants.includes(savedMsg.senderId)) {
+      participants.push(savedMsg.senderId);
+    }
+    chats.conversations[convIdx] = {
+      ...conv,
+      participantIds: participants,
+      lastMessage: {
+        text: savedMsg.content || (savedMsg.mediaUrl ? '[Image Attachment]' : ''),
+        senderId: savedMsg.senderId,
+        createdAt: savedMsg.createdAt,
+        isRead: true,
+      },
+      updatedAt: savedMsg.createdAt,
+    };
+  }
+
+  writeChatsData(chats);
+  return res.json({ success: true, message: savedMsg });
+});
+
+app.post('/api/conversations', (req, res) => {
+  const conv = req.body?.conversation;
+  if (!conv || !conv.id) {
+    return res.status(400).json({ error: 'Invalid conversation payload' });
+  }
+  const chats = readChatsData();
+  const idx = chats.conversations.findIndex((c: any) => c.id === conv.id);
+  if (idx >= 0) {
+    chats.conversations[idx] = { ...chats.conversations[idx], ...conv };
+  } else {
+    chats.conversations.unshift(conv);
+  }
+  writeChatsData(chats);
+  return res.json({ success: true, conversation: conv });
+});
+
+// Public Posts & Announcements Endpoints
+app.get('/api/posts', (req, res) => {
+  return res.json({ posts: readPostsData() });
+});
+
+app.post('/api/posts/sync', (req, res) => {
+  const clientPosts = Array.isArray(req.body?.posts) ? req.body.posts : null;
+  if (!clientPosts) {
+    return res.status(400).json({ error: 'posts array required' });
+  }
+  const serverPosts = readPostsData();
+  const adminBroadcastPosts = serverPosts.filter((p: any) => p.authorId === 'usr_jit_admin_system');
+  const clientIds = new Set(clientPosts.map((p: any) => p.id));
+  const merged = [
+    ...adminBroadcastPosts.filter((ap: any) => !clientIds.has(ap.id)),
+    ...clientPosts,
+  ];
+  writePostsData(merged);
+  return res.json({ success: true, posts: merged });
+});
+
+app.get('/api/announcements', (req, res) => {
+  return res.json({ announcements: readAnnouncementsData() });
+});
+
 // 2. Lookup profile by contact phone (checks shared Firestore cloud database first)
 app.get('/api/profiles/lookup/:phone', async (req, res) => {
   const phone = req.params.phone || '';
   try {
     const cloudLookup = await lookupCloudProfileByPhone(phone);
     if (cloudLookup.found && cloudLookup.profile) {
+      if (cloudLookup.profile.status === 'deleted') {
+        removeLocalMirror(phone, cloudLookup.profile.id);
+        return res.json({ found: false });
+      }
       upsertLocalMirror(cloudLookup.profile);
-      return res.json({ found: true, profile: cloudLookup.profile });
+      return res.json({
+        found: true,
+        profile: cloudLookup.profile,
+        suspended: cloudLookup.profile.status === 'suspended',
+      });
     }
     if (cloudLookup.expired) {
       removeLocalMirror(phone);
@@ -667,9 +959,15 @@ app.get('/api/profiles/lookup/:phone', async (req, res) => {
   const profiles = readProfiles();
   const matched = profiles.find((p: any) => isPhoneMatch(p.contactNumber, phone));
   if (matched) {
-    // Backfill to Firestore so future cross-browser lookups succeed
+    if (matched.status === 'deleted') {
+      return res.json({ found: false });
+    }
     ensureCloudProfileSeeded(matched).catch(() => {});
-    return res.json({ found: true, profile: matched });
+    return res.json({
+      found: true,
+      profile: matched,
+      suspended: matched.status === 'suspended',
+    });
   }
   return res.json({ found: false });
 });
@@ -683,6 +981,13 @@ app.post('/api/profiles/login', async (req, res) => {
 
   try {
     const cloudLogin = await loginCloudProfileByPhone(contactNumber);
+    if (cloudLogin.suspended) {
+      return res.status(403).json({
+        success: false,
+        suspended: true,
+        error: `Account suspended: ${cloudLogin.suspendedReason || 'Please contact an administrator.'}`,
+      });
+    }
     if (cloudLogin.success && cloudLogin.profile) {
       upsertLocalMirror(cloudLogin.profile);
       return res.json({
@@ -705,10 +1010,18 @@ app.post('/api/profiles/login', async (req, res) => {
   const profiles = readProfiles();
   const idx = profiles.findIndex((p: any) => isPhoneMatch(p.contactNumber, contactNumber));
 
-  if (idx === -1) {
+  if (idx === -1 || profiles[idx].status === 'deleted') {
     return res.status(404).json({
       success: false,
       error: 'Account not found or expired due to 180 consecutive days of inactivity.',
+    });
+  }
+
+  if (profiles[idx].status === 'suspended') {
+    return res.status(403).json({
+      success: false,
+      suspended: true,
+      error: `Account suspended: ${profiles[idx].suspendedReason || 'Please contact an administrator.'}`,
     });
   }
 
@@ -744,6 +1057,16 @@ app.post('/api/profiles', async (req, res) => {
   try {
     const existing = await lookupCloudProfileByPhone(payload.contactNumber);
     if (existing.found && existing.profile) {
+      if (existing.profile.status === 'deleted') {
+        return res.status(404).json({ success: false, error: 'Account has been deleted.' });
+      }
+      if (existing.profile.status === 'suspended') {
+        return res.status(403).json({
+          success: false,
+          suspended: true,
+          error: `Account suspended: ${existing.profile.suspendedReason || 'Contact administrator.'}`,
+        });
+      }
       const nextAvatarUrl = explicitAvatarUpdate
         ? payload.avatarUrl || '/assets/aistudio/image_e64e54f2.png'
         : payload.avatarUrl && !payload.avatarUrl.includes('image_e64e54f2.png')
@@ -877,7 +1200,7 @@ app.post('/api/profiles/sync', async (req, res) => {
   const map = new Map<string, any>();
 
   for (const sp of serverProfiles) {
-    if (sp && sp.contactNumber && !isProfileExpired(sp)) {
+    if (sp && sp.contactNumber && !isProfileExpired(sp) && sp.status !== 'deleted') {
       map.set(normalizeDigits(sp.contactNumber), sp);
     }
   }
@@ -886,25 +1209,40 @@ app.post('/api/profiles/sync', async (req, res) => {
     if (!cp || !cp.contactNumber || isProfileExpired(cp)) continue;
     const digits = normalizeDigits(cp.contactNumber);
     const existing = map.get(digits);
+    if (existing?.status === 'deleted') continue;
+
+    const adminOverrideNewer =
+      existing?.adminPointsUpdatedAt &&
+      new Date(existing.adminPointsUpdatedAt).getTime() >= new Date(cp.lastLoginAt || 0).getTime();
+
     const mergedOne = !existing
       ? cp
       : {
           ...existing,
           ...cp,
           id: existing.id || cp.id,
+          status: existing.status || cp.status || 'active',
+          suspendedReason: existing.suspendedReason || cp.suspendedReason,
+          suspendedAt: existing.suspendedAt || cp.suspendedAt,
+          adminPointsUpdatedAt: existing.adminPointsUpdatedAt,
           lastLoginAt: cp.lastLoginAt || existing.lastLoginAt || new Date().toISOString(),
           lastLogin: cp.lastLogin || existing.lastLogin || new Date().toISOString(),
           stats: {
             ...(existing.stats || {}),
             ...(cp.stats || {}),
-            rewardPoints: Math.max(existing.stats?.rewardPoints ?? 0, cp.stats?.rewardPoints ?? 0),
+            rewardPoints: adminOverrideNewer
+              ? existing.stats?.rewardPoints ?? cp.stats?.rewardPoints ?? 100
+              : Math.max(existing.stats?.rewardPoints ?? 0, cp.stats?.rewardPoints ?? 0),
             gamesPlayed: Math.max(existing.stats?.gamesPlayed ?? 0, cp.stats?.gamesPlayed ?? 0),
             gamesWon: Math.max(existing.stats?.gamesWon ?? 0, cp.stats?.gamesWon ?? 0),
             streakDays: Math.max(existing.stats?.streakDays ?? 1, cp.stats?.streakDays ?? 1),
           },
         };
     map.set(digits, mergedOne);
-    ensureCloudProfileSeeded(mergedOne).catch(() => {});
+    const cloudSeed = { ...mergedOne };
+    delete cloudSeed.adminPointsUpdatedAt;
+    delete cloudSeed.source;
+    ensureCloudProfileSeeded(cloudSeed).catch(() => {});
   }
 
   const merged = Array.from(map.values());
@@ -1152,24 +1490,51 @@ app.post('/api/admin/change-pin', (req, res) => {
   });
 });
 
-app.get('/api/admin/users', async (req, res) => {
+function requireAdminSession(req: express.Request, res: express.Response): boolean {
   const config = readAdminConfig();
   const check = verifyAdminToken(extractBearerToken(req), config);
   if (!check.valid) {
-    return res.status(401).json({
+    res.status(401).json({
       success: false,
       error: 'Administrator PIN authentication required.',
     });
+    return false;
   }
+  return true;
+}
+
+app.get('/api/admin/users', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
 
   try {
     const localMirror = readProfiles();
     const { profiles, firebaseCount } = await fetchAllCloudProfilesForAdmin(localMirror);
+
+    const nowMs = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const dailyActiveUsers = profiles.filter((u: any) => {
+      if (u.status === 'suspended' || u.status === 'deleted') return false;
+      const ts = Date.parse(u.lastLoginAt || u.lastLogin || u.joinedAt || '');
+      return !isNaN(ts) && nowMs - ts <= DAY_MS;
+    }).length;
+
+    const chats = readChatsData();
+    const posts = readPostsData();
+    const announcements = readAnnouncementsData();
+
     return res.json({
       success: true,
       users: profiles,
       totalCount: profiles.length,
       firebaseCount,
+      analytics: {
+        totalUsers: profiles.length,
+        dailyActiveUsers,
+        totalPosts: posts.length,
+        activeChatThreads: chats.conversations.length + rooms.size,
+        totalMessages: chats.messages.length,
+        activeAnnouncements: announcements.length,
+      },
       syncedAt: new Date().toISOString(),
     });
   } catch (err) {
@@ -1179,6 +1544,287 @@ app.get('/api/admin/users', async (req, res) => {
       error: 'Failed to load user records from Firebase.',
     });
   }
+});
+
+// Admin: Inspect full user profile, DMs, chat history, live game chats, posts & match history
+app.get('/api/admin/users/:userId/activity', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const userId = req.params.userId;
+
+  try {
+    const localMirror = readProfiles();
+    const { profiles } = await fetchAllCloudProfilesForAdmin(localMirror);
+    const targetUser = profiles.find((u) => u.id === userId) || localMirror.find((u) => u.id === userId);
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'User account not found.' });
+    }
+
+    const chats = readChatsData();
+    const lowerName = (targetUser.fullName || '').trim().toLowerCase();
+    const firstName = lowerName.split(' ')[0] || '';
+
+    const userConversations = chats.conversations.filter((c: any) => {
+      if (Array.isArray(c.participantIds) && c.participantIds.includes(userId)) return true;
+      if (chats.messages.some((m: any) => m.conversationId === c.id && m.senderId === userId)) return true;
+      if (lowerName && typeof c.name === 'string' && c.name.toLowerCase().includes(lowerName)) return true;
+      return false;
+    });
+
+    const convIdSet = new Set(userConversations.map((c: any) => c.id));
+    const userMessages = chats.messages.filter(
+      (m: any) =>
+        convIdSet.has(m.conversationId) ||
+        m.senderId === userId ||
+        (firstName.length > 2 &&
+          typeof m.content === 'string' &&
+          m.content.toLowerCase().includes(firstName))
+    );
+
+    const inGameMessages: Array<InGameMessage & { gameId: string }> = [];
+    for (const room of rooms.values()) {
+      const inRoom = room.players.some((p) => p.id === userId);
+      for (const gm of room.messages) {
+        if (inRoom || gm.senderId === userId) {
+          inGameMessages.push({ ...gm, gameId: room.gameId });
+        }
+      }
+    }
+
+    const allPosts = readPostsData();
+    const userPosts = allPosts.filter(
+      (p: any) =>
+        p.authorId === userId ||
+        (Array.isArray(p.comments) &&
+          p.comments.some(
+            (c: any) =>
+              c.authorId === userId ||
+              (Array.isArray(c.replies) && c.replies.some((r: any) => r.authorId === userId))
+          ))
+    );
+
+    const matchHistory = await fetchNodeMatchHistory(userId, 25).catch(() => []);
+
+    return res.json({
+      success: true,
+      user: targetUser,
+      conversations: userConversations,
+      messages: userMessages,
+      inGameMessages,
+      posts: userPosts,
+      matchHistory,
+    });
+  } catch (err) {
+    console.error('Admin user activity inspect error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to inspect user activity.' });
+  }
+});
+
+// Admin: Edit or override user's display name, profile picture, cover photo, bio, and JIT Points
+app.patch('/api/admin/users/:userId', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const userId = req.params.userId;
+
+  try {
+    const localMirror = readProfiles();
+    const { profiles } = await fetchAllCloudProfilesForAdmin(localMirror);
+    const baseProfile = profiles.find((u) => u.id === userId) || localMirror.find((u) => u.id === userId);
+    if (!baseProfile) {
+      return res.status(404).json({ success: false, error: 'User account not found.' });
+    }
+
+    const edits: {
+      fullName?: string;
+      bio?: string;
+      avatarUrl?: string;
+      coverUrl?: string;
+      rewardPoints?: number;
+    } = {};
+
+    if (typeof req.body?.fullName === 'string' && req.body.fullName.trim()) {
+      edits.fullName = req.body.fullName.trim();
+    }
+    if (typeof req.body?.bio === 'string') {
+      edits.bio = req.body.bio;
+    }
+    if (typeof req.body?.avatarUrl === 'string' && req.body.avatarUrl.trim()) {
+      edits.avatarUrl = req.body.avatarUrl.trim();
+    }
+    if (typeof req.body?.coverUrl === 'string') {
+      edits.coverUrl = req.body.coverUrl;
+    }
+    if (req.body?.rewardPoints !== undefined && !isNaN(Number(req.body.rewardPoints))) {
+      edits.rewardPoints = Math.min(1000000, Math.max(0, Math.floor(Number(req.body.rewardPoints))));
+    }
+
+    const updatedProfile = await adminOverrideCloudProfile(baseProfile, edits);
+    const nowIso = new Date().toISOString();
+    const mirrorRecord: any = {
+      ...updatedProfile,
+      ...(edits.rewardPoints !== undefined ? { adminPointsUpdatedAt: nowIso } : {}),
+    };
+    delete mirrorRecord.source;
+    upsertLocalMirror(mirrorRecord);
+
+    // Sync updated display name/avatar to persisted posts & chat sender labels
+    if (edits.fullName || edits.avatarUrl) {
+      const posts = readPostsData();
+      let postsChanged = false;
+      const nextPosts = posts.map((p: any) => {
+        if (p.authorId === userId) {
+          postsChanged = true;
+          return {
+            ...p,
+            authorName: updatedProfile.fullName,
+            authorAvatar: updatedProfile.avatarUrl,
+          };
+        }
+        return p;
+      });
+      if (postsChanged) writePostsData(nextPosts);
+    }
+
+    return res.json({
+      success: true,
+      user: updatedProfile,
+    });
+  } catch (err) {
+    console.error('Admin user edit error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update user profile.' });
+  }
+});
+
+// Admin: User moderation (suspend / unblock / delete)
+app.post('/api/admin/users/:userId/moderate', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const userId = req.params.userId;
+  const action = req.body?.action;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
+
+  if (!['suspend', 'unblock', 'delete'].includes(action)) {
+    return res.status(400).json({ success: false, error: 'Invalid moderation action.' });
+  }
+
+  try {
+    const localMirror = readProfiles();
+    const { profiles } = await fetchAllCloudProfilesForAdmin(localMirror);
+    const baseProfile = profiles.find((u) => u.id === userId) || localMirror.find((u) => u.id === userId);
+    if (!baseProfile) {
+      return res.status(404).json({ success: false, error: 'User account not found.' });
+    }
+
+    const moderated = await adminModerateCloudProfile(baseProfile, action, reason);
+
+    if (action === 'delete') {
+      removeLocalMirror(baseProfile.contactNumber || '', baseProfile.id);
+      const posts = readPostsData();
+      writePostsData(posts.filter((p: any) => p.authorId !== baseProfile.id));
+      const chats = readChatsData();
+      chats.conversations = chats.conversations.map((c: any) => ({
+        ...c,
+        participantIds: Array.isArray(c.participantIds)
+          ? c.participantIds.filter((pid: string) => pid !== baseProfile.id)
+          : [],
+      }));
+      writeChatsData(chats);
+    } else {
+      const cleanMirror: any = { ...moderated };
+      delete cleanMirror.source;
+      upsertLocalMirror(cleanMirror);
+    }
+
+    return res.json({
+      success: true,
+      action,
+      user: moderated,
+    });
+  } catch (err) {
+    console.error('Admin moderation error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to apply moderation action.' });
+  }
+});
+
+// Admin: Global Announcement Broadcast System
+app.get('/api/admin/announcements', (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  return res.json({ success: true, announcements: readAnnouncementsData() });
+});
+
+app.post('/api/admin/announcements', (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const priority = ['info', 'important', 'event'].includes(req.body?.priority)
+    ? req.body.priority
+    : 'important';
+  const alsoPostToFeed = req.body?.alsoPostToFeed !== false;
+
+  if (!title || !message) {
+    return res.status(400).json({
+      success: false,
+      error: 'Announcement title and message are required.',
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  const announcement = {
+    id: `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    title: title.slice(0, 140),
+    message: message.slice(0, 1000),
+    priority,
+    authorName: 'JIT GROUP Admin',
+    createdAt: nowIso,
+  };
+
+  const list = readAnnouncementsData();
+  list.unshift(announcement);
+  writeAnnouncementsData(list.slice(0, 50));
+
+  if (alsoPostToFeed) {
+    const posts = readPostsData();
+    posts.unshift({
+      id: `post_ann_${announcement.id}`,
+      authorId: 'usr_jit_admin_system',
+      authorName: 'JIT GROUP Official Notice',
+      authorAvatar: '/assets/aistudio/image_e64e54f2.png',
+      authorHandle: '@jit_announcement',
+      content: `${announcement.title}\n\n${announcement.message}`,
+      mediaUrls: [],
+      mediaType: 'none',
+      createdAt: 'Just now',
+      likesCount: 0,
+      commentsCount: 0,
+      sharesCount: 0,
+      isLiked: false,
+      isSaved: false,
+      likedBy: [],
+      comments: [],
+      category: 'all',
+    });
+    writePostsData(posts);
+  }
+
+  return res.json({
+    success: true,
+    announcement,
+    announcements: list.slice(0, 50),
+  });
+});
+
+app.delete('/api/admin/announcements/:id', (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const id = req.params.id;
+  const list = readAnnouncementsData();
+  const next = list.filter((a: any) => a.id !== id);
+  writeAnnouncementsData(next);
+
+  const posts = readPostsData();
+  const nextPosts = posts.filter((p: any) => p.id !== `post_ann_${id}`);
+  if (nextPosts.length !== posts.length) {
+    writePostsData(nextPosts);
+  }
+
+  return res.json({ success: true, announcements: next });
 });
 
 // ----------------------------------------------------------------------------

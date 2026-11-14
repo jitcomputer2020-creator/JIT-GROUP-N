@@ -1,0 +1,60 @@
+[
+  {
+    "id": "post_001",
+    "authorId": "usr_jit_primary_001",
+    "authorName": "Prof. Ramesh Sharma",
+    "authorAvatar": "/assets/aistudio/image_e64e54f2.png",
+    "authorHandle": "@ramesh_jit",
+    "content": "Welcome to the new JIT GROUP social & gaming platform! Jharna Institute of Technology is proud to launch this unified hub combining real-time messaging, WebRTC calling, and competitive tournaments. Looking forward to our campus Ludo & Chess championships this weekend!",
+    "createdAt": "2 hours ago",
+    "likesCount": 38,
+    "commentsCount": 9,
+    "sharesCount": 4,
+    "isLiked": false,
+    "category": "all",
+    "likedBy": [
+      "usr_jit_002",
+      "usr_jit_004"
+    ],
+    "comments": []
+  },
+  {
+    "id": "post_002",
+    "authorId": "usr_jit_003",
+    "authorName": "Arjun Verma",
+    "authorAvatar": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=200&q=80",
+    "authorHandle": "@arjun_v",
+    "content": "Just set up a private room for Snake & Ladder! Who is up for a quick 4-player game during the break? Room Code: JIT-8842",
+    "createdAt": "4 hours ago",
+    "likesCount": 19,
+    "commentsCount": 6,
+    "sharesCount": 2,
+    "isLiked": true,
+    "category": "friends",
+    "likedBy": [
+      "usr_jit_primary_001",
+      "usr_jit_002",
+      "usr_jit_003"
+    ],
+    "comments": []
+  },
+  {
+    "id": "post_003",
+    "authorId": "usr_jit_002",
+    "authorName": "Priya Mukherjee",
+    "authorAvatar": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80",
+    "authorHandle": "@priya_m",
+    "content": "Completed the JIT Tech Quiz Battle with 95% accuracy! The algorithm and computer networks section was super intense. Earned 250 JIT Reward Points!",
+    "createdAt": "6 hours ago",
+    "likesCount": 45,
+    "commentsCount": 14,
+    "sharesCount": 5,
+    "isLiked": false,
+    "category": "popular",
+    "likedBy": [
+      "usr_jit_002",
+      "usr_jit_004"
+    ],
+    "comments": []
+  }
+]

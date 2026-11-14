@@ -219,6 +219,9 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     lastLogin: String(data.lastLogin || data.lastLoginAt || lastLoginIso),
     isContactNumberPublic: Boolean(data.isContactNumberPublic),
     isAddressPublic: Boolean(data.isAddressPublic),
+    status: (data.status as UserProfile['status']) || 'active',
+    suspendedReason: typeof data.suspendedReason === 'string' && data.suspendedReason ? data.suspendedReason : undefined,
+    suspendedAt: typeof data.suspendedAt === 'string' && data.suspendedAt ? data.suspendedAt : undefined,
     stats: sanitizeStats(data.stats),
   };
 }
@@ -293,6 +296,9 @@ export async function lookupCloudProfileByPhone(
   }
 
   const profileData = profileSnap.data();
+  if (profileData.status === 'deleted') {
+    return { found: false };
+  }
   if (
     profileId !== 'usr_jit_primary_001' &&
     isCloudTimestampExpired(profileData.lastActiveAt, profileData.lastLoginAt || profileData.lastLogin)
@@ -312,13 +318,20 @@ export async function lookupCloudProfileByPhone(
  */
 export async function loginCloudProfileByPhone(
   contactNumber: string
-): Promise<{ success: boolean; profile?: UserProfile; expired?: boolean }> {
+): Promise<{ success: boolean; profile?: UserProfile; expired?: boolean; suspended?: boolean; suspendedReason?: string }> {
   const lookup = await lookupCloudProfileByPhone(contactNumber);
   if (!lookup.found || !lookup.profile) {
     return { success: false, expired: lookup.expired };
   }
 
   const profile = lookup.profile;
+  if (profile.status === 'suspended') {
+    return {
+      success: false,
+      suspended: true,
+      suspendedReason: profile.suspendedReason || 'Suspended by administrator.',
+    };
+  }
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber || contactNumber);
   const nowIso = new Date().toISOString();
 
@@ -818,10 +831,34 @@ export async function fetchAllCloudProfilesAsAdmin(): Promise<UserProfile[]> {
   }
   try {
     const snap = await getDocs(collection(db, 'profiles'));
-    return snap.docs.map((d) => firestoreDocToUserProfile(d.data()));
+    return snap.docs
+      .map((d) => firestoreDocToUserProfile(d.data()))
+      .filter((p) => p.status !== 'deleted');
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.LIST, 'profiles');
+    }
+    throw err;
+  }
+}
+
+/**
+ * Hard-deletes a user profile, phone_index, and leaderboard entry when signed in as Google Admin.
+ */
+export async function deleteCloudProfileAsAdmin(profile: UserProfile): Promise<void> {
+  if (!auth.currentUser || !profile?.id) return;
+  const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
+  try {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'profiles', profile.id));
+    if (phoneKey && phoneKey.length >= 7) {
+      batch.delete(doc(db, 'phone_index', phoneKey));
+    }
+    batch.delete(doc(db, 'leaderboard', profile.id));
+    await batch.commit();
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.DELETE, `profiles/${profile.id}`);
     }
     throw err;
   }

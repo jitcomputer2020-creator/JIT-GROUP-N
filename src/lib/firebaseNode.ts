@@ -103,6 +103,9 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     lastLogin: String(data.lastLogin || data.lastLoginAt || lastLoginIso),
     isContactNumberPublic: Boolean(data.isContactNumberPublic),
     isAddressPublic: Boolean(data.isAddressPublic),
+    status: (data.status as UserProfile['status']) || 'active',
+    suspendedReason: typeof data.suspendedReason === 'string' && data.suspendedReason ? data.suspendedReason : undefined,
+    suspendedAt: typeof data.suspendedAt === 'string' && data.suspendedAt ? data.suspendedAt : undefined,
     stats: sanitizeStats(data.stats),
   };
 }
@@ -148,6 +151,9 @@ export async function lookupCloudProfileByPhone(
   if (!profileSnap.exists()) return { found: false };
 
   const profileData = profileSnap.data();
+  if (profileData.status === 'deleted') {
+    return { found: false };
+  }
   if (
     profileId !== 'usr_jit_primary_001' &&
     isCloudTimestampExpired(profileData.lastActiveAt, profileData.lastLoginAt || profileData.lastLogin)
@@ -161,13 +167,20 @@ export async function lookupCloudProfileByPhone(
 
 export async function loginCloudProfileByPhone(
   contactNumber: string
-): Promise<{ success: boolean; profile?: UserProfile; expired?: boolean }> {
+): Promise<{ success: boolean; profile?: UserProfile; expired?: boolean; suspended?: boolean; suspendedReason?: string }> {
   const lookup = await lookupCloudProfileByPhone(contactNumber);
   if (!lookup.found || !lookup.profile) {
     return { success: false, expired: lookup.expired };
   }
 
   const profile = lookup.profile;
+  if (profile.status === 'suspended') {
+    return {
+      success: false,
+      suspended: true,
+      suspendedReason: profile.suspendedReason || 'Suspended by administrator.',
+    };
+  }
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber || contactNumber);
   const nowIso = new Date().toISOString();
 
@@ -521,6 +534,9 @@ export async function fetchAllCloudProfilesForAdmin(
           const snap = await getDoc(doc(dbLite, 'profiles', profileId));
           if (snap.exists()) {
             const data = snap.data();
+            if (data.status === 'deleted') {
+              return null;
+            }
             if (
               profileId !== 'usr_jit_primary_001' &&
               isCloudTimestampExpired(data.lastActiveAt, data.lastLoginAt || data.lastLogin)
@@ -545,7 +561,7 @@ export async function fetchAllCloudProfilesForAdmin(
 
   // Fallback check via phone_index for any local profiles whose ID might differ
   for (const local of localMirrorProfiles) {
-    if (!local || profileMap.has(local.id)) continue;
+    if (!local || local.status === 'deleted' || profileMap.has(local.id)) continue;
     const phoneKey = toCanonicalPhoneKey(local.contactNumber);
     const existingByPhone = Array.from(profileMap.values()).find(
       (p) => toCanonicalPhoneKey(p.contactNumber) === phoneKey
@@ -569,6 +585,14 @@ export async function fetchAllCloudProfilesForAdmin(
   // Ensure any leaderboard-only user without a readable profile doc is still represented
   for (const entry of leaderboardEntries) {
     if (!profileMap.has(entry.profileId)) {
+      try {
+        const deletedCheck = await getDoc(doc(dbLite, 'profiles', entry.profileId));
+        if (deletedCheck.exists() && deletedCheck.data()?.status === 'deleted') {
+          continue;
+        }
+      } catch {
+        // Ignore
+      }
       const nowIso = new Date().toISOString();
       profileMap.set(entry.profileId, {
         id: entry.profileId,
@@ -579,6 +603,7 @@ export async function fetchAllCloudProfilesForAdmin(
         joinedAt: entry.updatedAt || nowIso,
         lastLoginAt: entry.updatedAt || nowIso,
         lastLogin: entry.updatedAt || nowIso,
+        status: 'active',
         stats: {
           friendsCount: 0,
           followersCount: 0,
@@ -601,4 +626,118 @@ export async function fetchAllCloudProfilesForAdmin(
   );
 
   return { profiles, firebaseCount };
+}
+
+/**
+ * Admin direct override for profile fields and JIT Points balance in Firestore.
+ */
+export async function adminOverrideCloudProfile(
+  baseProfile: UserProfile,
+  edits: {
+    fullName?: string;
+    bio?: string;
+    avatarUrl?: string;
+    coverUrl?: string;
+    rewardPoints?: number;
+  }
+): Promise<UserProfile> {
+  const nowIso = new Date().toISOString();
+  const nextStats = sanitizeStats({
+    ...baseProfile.stats,
+    ...(edits.rewardPoints !== undefined ? { rewardPoints: edits.rewardPoints } : {}),
+  });
+
+  const nextProfile: UserProfile = {
+    ...baseProfile,
+    fullName: edits.fullName !== undefined ? edits.fullName.trim().slice(0, 120) || baseProfile.fullName : baseProfile.fullName,
+    bio: edits.bio !== undefined ? edits.bio.slice(0, 500) : baseProfile.bio || '',
+    avatarUrl:
+      edits.avatarUrl !== undefined
+        ? sanitizeAvatarUrl(edits.avatarUrl)
+        : baseProfile.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
+    coverUrl:
+      edits.coverUrl === ''
+        ? undefined
+        : edits.coverUrl !== undefined && edits.coverUrl.length <= 395000
+        ? edits.coverUrl
+        : baseProfile.coverUrl,
+    lastLoginAt: nowIso,
+    lastLogin: nowIso,
+    stats: nextStats,
+  };
+
+  try {
+    const profileRef = doc(dbLite, 'profiles', baseProfile.id);
+    const snap = await getDoc(profileRef);
+    if (snap.exists()) {
+      const patch: Record<string, any> = {
+        fullName: nextProfile.fullName,
+        bio: nextProfile.bio || '',
+        avatarUrl: nextProfile.avatarUrl,
+        stats: nextStats,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+      };
+      if (edits.coverUrl === '') {
+        patch.coverUrl = '';
+      } else if (nextProfile.coverUrl !== undefined) {
+        patch.coverUrl = nextProfile.coverUrl;
+      }
+      await updateDoc(profileRef, patch);
+    } else {
+      await ensureCloudProfileSeeded(nextProfile);
+    }
+    await syncNodeLeaderboardEntry(nextProfile);
+  } catch (err) {
+    console.warn('Admin Firestore profile override notice:', err);
+  }
+
+  return nextProfile;
+}
+
+/**
+ * Admin moderation action (suspend / unblock / delete) synced to Firestore.
+ */
+export async function adminModerateCloudProfile(
+  profile: UserProfile,
+  action: 'suspend' | 'unblock' | 'delete',
+  reason?: string
+): Promise<UserProfile> {
+  const nowIso = new Date().toISOString();
+  const nextStatus: UserProfile['status'] =
+    action === 'suspend' ? 'suspended' : action === 'delete' ? 'deleted' : 'active';
+  const cleanReason =
+    action === 'suspend'
+      ? (reason || 'Account suspended by administrator.').trim().slice(0, 300)
+      : action === 'delete'
+      ? 'Account deleted by administrator.'
+      : '';
+  const suspendedAt = action === 'unblock' ? '' : nowIso;
+
+  try {
+    const profileRef = doc(dbLite, 'profiles', profile.id);
+    const snap = await getDoc(profileRef);
+    if (snap.exists()) {
+      await updateDoc(profileRef, {
+        status: nextStatus,
+        suspendedReason: cleanReason,
+        suspendedAt,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    console.warn('Admin Firestore moderation notice:', err);
+  }
+
+  return {
+    ...profile,
+    status: nextStatus,
+    suspendedReason: cleanReason || undefined,
+    suspendedAt: suspendedAt || undefined,
+    lastLoginAt: nowIso,
+    lastLogin: nowIso,
+  };
 }

@@ -33,6 +33,9 @@ export interface UserProfile {
   lastLogin?: string; // Standard timestamp alias for account retention tracking
   isContactNumberPublic?: boolean;
   isAddressPublic?: boolean;
+  status?: 'active' | 'suspended' | 'deleted';
+  suspendedReason?: string;
+  suspendedAt?: string;
   stats: {
     friendsCount: number;
     followersCount: number;
@@ -44,6 +47,15 @@ export interface UserProfile {
     rewardPoints: number;
     streakDays: number;
   };
+}
+
+export interface GlobalAnnouncement {
+  id: string;
+  title: string;
+  message: string;
+  priority: 'info' | 'important' | 'event';
+  authorName: string;
+  createdAt: string;
 }
 
 export interface Post {

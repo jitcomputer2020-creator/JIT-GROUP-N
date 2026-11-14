@@ -56,8 +56,8 @@
     "bio": "Proud member of JIT GROUP campus community.",
     "avatarUrl": "/assets/aistudio/image_e64e54f2.png",
     "joinedAt": "2026-11-06T20:40:36.044Z",
-    "lastLoginAt": "2026-11-14T05:28:51.172Z",
-    "lastLogin": "2026-11-14T05:28:51.172Z",
+    "lastLoginAt": "2026-11-14T05:28:51.351Z",
+    "lastLogin": "2026-11-14T05:28:51.351Z",
     "isContactNumberPublic": false,
     "isAddressPublic": false,
     "stats": {
@@ -102,7 +102,11 @@
     "bio": "Electronics & Robotics | Quiz Battler & Badminton lover",
     "avatarUrl": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80",
     "joinedAt": "2026-02-10T09:15:00Z",
-    "lastLoginAt": "2026-11-06T20:19:18.743Z",
+    "lastLoginAt": "2026-11-14T05:54:58.846Z",
+    "lastLogin": "2026-11-14T05:54:58.846Z",
+    "isContactNumberPublic": false,
+    "isAddressPublic": false,
+    "status": "active",
     "stats": {
       "friendsCount": 95,
       "followersCount": 180,
@@ -113,7 +117,6 @@
       "gamesWon": 19,
       "rewardPoints": 620,
       "streakDays": 3
-    },
-    "lastLogin": "2026-11-06T20:19:18.743Z"
+    }
   }
 ]
