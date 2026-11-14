@@ -13,6 +13,15 @@ import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import {
+  testFirestoreConnection,
+  lookupCloudProfileByPhone,
+  loginCloudProfileByPhone,
+  registerOrRecognizeCloudProfile,
+  updateCloudProfile,
+  ensureCloudProfileSeeded,
+} from './src/lib/firebase.ts';
+import { INITIAL_USER, INITIAL_FRIENDS } from './src/services/mockData.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -598,31 +607,98 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
-// 1. Get all registered profiles (shared cloud data store for all browsers & devices)
+// Seed initial demo users into Firestore and test connection on boot
+testFirestoreConnection().catch(() => {});
+Promise.all([INITIAL_USER, ...INITIAL_FRIENDS].map((u) => ensureCloudProfileSeeded(u))).catch((err) =>
+  console.warn('Initial Firestore seed notice:', err)
+);
+
+function upsertLocalMirror(profile: any) {
+  if (!profile || !profile.contactNumber) return;
+  const profiles = readProfiles();
+  const idx = profiles.findIndex(
+    (p: any) => isPhoneMatch(p.contactNumber, profile.contactNumber) || (profile.id && p.id === profile.id)
+  );
+  if (idx >= 0) {
+    profiles[idx] = profile;
+  } else {
+    profiles.unshift(profile);
+  }
+  writeProfiles(profiles);
+}
+
+function removeLocalMirror(contactNumber: string, profileId?: string) {
+  const profiles = readProfiles();
+  const filtered = profiles.filter(
+    (p: any) => !isPhoneMatch(p.contactNumber, contactNumber) && (!profileId || p.id !== profileId)
+  );
+  if (filtered.length !== profiles.length) {
+    writeProfiles(filtered);
+  }
+}
+
+// 1. Get all registered profiles (merges local cache with active demo seeds)
 app.get('/api/profiles', (req, res) => {
   const profiles = readProfiles();
   res.json({ profiles });
 });
 
-// 2. Lookup profile by contact phone
-app.get('/api/profiles/lookup/:phone', (req, res) => {
+// 2. Lookup profile by contact phone (checks shared Firestore cloud database first)
+app.get('/api/profiles/lookup/:phone', async (req, res) => {
   const phone = req.params.phone || '';
-  const profiles = readProfiles(); // Automatically cleans expired profiles first
+  try {
+    const cloudLookup = await lookupCloudProfileByPhone(phone);
+    if (cloudLookup.found && cloudLookup.profile) {
+      upsertLocalMirror(cloudLookup.profile);
+      return res.json({ found: true, profile: cloudLookup.profile });
+    }
+    if (cloudLookup.expired) {
+      removeLocalMirror(phone);
+      return res.json({ found: false, expired: true });
+    }
+  } catch (err) {
+    console.warn('Firestore lookup fallback notice:', err);
+  }
+
+  const profiles = readProfiles();
   const matched = profiles.find((p: any) => isPhoneMatch(p.contactNumber, phone));
   if (matched) {
+    // Backfill to Firestore so future cross-browser lookups succeed
+    ensureCloudProfileSeeded(matched).catch(() => {});
     return res.json({ found: true, profile: matched });
   }
   return res.json({ found: false });
 });
 
-// 3. User Login route: updates lastLogin and lastLoginAt timestamp so account stays active
-app.post('/api/profiles/login', (req, res) => {
+// 3. User Login route: validates against Firestore cloud database & refreshes lastLogin timestamp
+app.post('/api/profiles/login', async (req, res) => {
   const { contactNumber } = req.body;
   if (!contactNumber) {
     return res.status(400).json({ error: 'contactNumber is required' });
   }
 
-  const profiles = readProfiles(); // Auto-cleans expired profiles first
+  try {
+    const cloudLogin = await loginCloudProfileByPhone(contactNumber);
+    if (cloudLogin.success && cloudLogin.profile) {
+      upsertLocalMirror(cloudLogin.profile);
+      return res.json({
+        success: true,
+        profile: cloudLogin.profile,
+        message: 'Login successful. 180-day inactivity timer refreshed.',
+      });
+    }
+    if (cloudLogin.expired) {
+      removeLocalMirror(contactNumber);
+      return res.status(404).json({
+        success: false,
+        error: 'Account expired due to 180 consecutive days of inactivity.',
+      });
+    }
+  } catch (err) {
+    console.warn('Firestore login fallback notice:', err);
+  }
+
+  const profiles = readProfiles();
   const idx = profiles.findIndex((p: any) => isPhoneMatch(p.contactNumber, contactNumber));
 
   if (idx === -1) {
@@ -637,6 +713,9 @@ app.post('/api/profiles/login', (req, res) => {
   profiles[idx].lastLogin = nowIso;
   writeProfiles(profiles);
 
+  // Sync backfilled local profile to Firestore
+  ensureCloudProfileSeeded(profiles[idx]).catch(() => {});
+
   return res.json({
     success: true,
     profile: profiles[idx],
@@ -644,11 +723,56 @@ app.post('/api/profiles/login', (req, res) => {
   });
 });
 
-// 4. Register or update profile (preserves existing state, rewards, and stats)
-app.post('/api/profiles', (req, res) => {
+// 4. Register or update profile (persists atomically to Firestore + local mirror)
+app.post('/api/profiles', async (req, res) => {
   const payload = req.body;
   if (!payload || !payload.contactNumber) {
     return res.status(400).json({ error: 'contactNumber is required' });
+  }
+
+  const nowIso = new Date().toISOString();
+  try {
+    const existing = await lookupCloudProfileByPhone(payload.contactNumber);
+    if (existing.found && existing.profile) {
+      const mergedProfile = {
+        ...existing.profile,
+        ...payload,
+        id: existing.profile.id,
+        joinedAt: existing.profile.joinedAt || payload.joinedAt || nowIso,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        stats: {
+          friendsCount: existing.profile.stats?.friendsCount ?? payload.stats?.friendsCount ?? 0,
+          followersCount: existing.profile.stats?.followersCount ?? payload.stats?.followersCount ?? 0,
+          followingCount: existing.profile.stats?.followingCount ?? payload.stats?.followingCount ?? 0,
+          postsCount: existing.profile.stats?.postsCount ?? payload.stats?.postsCount ?? 0,
+          reelsCount: existing.profile.stats?.reelsCount ?? payload.stats?.reelsCount ?? 0,
+          gamesPlayed: Math.max(existing.profile.stats?.gamesPlayed ?? 0, payload.stats?.gamesPlayed ?? 0),
+          gamesWon: Math.max(existing.profile.stats?.gamesWon ?? 0, payload.stats?.gamesWon ?? 0),
+          rewardPoints: Math.max(existing.profile.stats?.rewardPoints ?? 0, payload.stats?.rewardPoints ?? 0),
+          streakDays: Math.max(existing.profile.stats?.streakDays ?? 1, payload.stats?.streakDays ?? 1),
+        },
+        avatarUrl:
+          payload.avatarUrl && !payload.avatarUrl.includes('image_e64e54f2.png')
+            ? payload.avatarUrl
+            : existing.profile.avatarUrl || payload.avatarUrl,
+        coverUrl: payload.coverUrl || existing.profile.coverUrl,
+      };
+      await updateCloudProfile(mergedProfile, mergedProfile);
+      upsertLocalMirror(mergedProfile);
+      return res.json({ success: true, profile: mergedProfile, isExisting: true });
+    }
+
+    const reg = await registerOrRecognizeCloudProfile(
+      payload.contactNumber,
+      payload.fullName || 'JIT Member',
+      payload.address || 'JIT Campus',
+      payload
+    );
+    upsertLocalMirror(reg.profile);
+    return res.json({ success: true, profile: reg.profile, isExisting: reg.isExisting });
+  } catch (err) {
+    console.warn('Firestore register/update fallback notice:', err);
   }
 
   const profiles = readProfiles();
@@ -658,10 +782,8 @@ app.post('/api/profiles', (req, res) => {
 
   let resultProfile: any;
   let isExisting = false;
-  const nowIso = new Date().toISOString();
 
   if (existingIdx >= 0) {
-    // Existing user recognized: do NOT reset or wipe user data, points or stats
     const existing = profiles[existingIdx];
     resultProfile = {
       ...existing,
@@ -670,7 +792,6 @@ app.post('/api/profiles', (req, res) => {
       joinedAt: existing.joinedAt || payload.joinedAt || nowIso,
       lastLoginAt: nowIso,
       lastLogin: nowIso,
-      // Retain max stats & points
       stats: {
         friendsCount: existing.stats?.friendsCount ?? payload.stats?.friendsCount ?? 0,
         followersCount: existing.stats?.followersCount ?? payload.stats?.followersCount ?? 0,
@@ -691,7 +812,6 @@ app.post('/api/profiles', (req, res) => {
     profiles[existingIdx] = resultProfile;
     isExisting = true;
   } else {
-    // New profile registration
     resultProfile = {
       ...payload,
       id: payload.id || `usr_jit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -706,7 +826,7 @@ app.post('/api/profiles', (req, res) => {
         reelsCount: 0,
         gamesPlayed: 0,
         gamesWon: 0,
-        rewardPoints: 100, // Welcome reward points
+        rewardPoints: 100,
         streakDays: 1,
         ...(payload.stats || {}),
       },
@@ -719,43 +839,41 @@ app.post('/api/profiles', (req, res) => {
   return res.json({ success: true, profile: resultProfile, isExisting });
 });
 
-// 5. Bulk sync client profiles with server storage
-app.post('/api/profiles/sync', (req, res) => {
+// 5. Bulk sync client profiles with server & Firestore cloud storage
+app.post('/api/profiles/sync', async (req, res) => {
   const clientProfiles = Array.isArray(req.body.profiles) ? req.body.profiles : [];
-  const serverProfiles = readProfiles(); // Auto-cleans expired profiles first
+  const serverProfiles = readProfiles();
   const map = new Map<string, any>();
 
-  // Load server profiles
   for (const sp of serverProfiles) {
     if (sp && sp.contactNumber && !isProfileExpired(sp)) {
       map.set(normalizeDigits(sp.contactNumber), sp);
     }
   }
 
-  // Merge client profiles (exclude expired profiles)
   for (const cp of clientProfiles) {
     if (!cp || !cp.contactNumber || isProfileExpired(cp)) continue;
     const digits = normalizeDigits(cp.contactNumber);
     const existing = map.get(digits);
-    if (!existing) {
-      map.set(digits, cp);
-    } else {
-      map.set(digits, {
-        ...existing,
-        ...cp,
-        id: existing.id || cp.id,
-        lastLoginAt: cp.lastLoginAt || existing.lastLoginAt || new Date().toISOString(),
-        lastLogin: cp.lastLogin || existing.lastLogin || new Date().toISOString(),
-        stats: {
-          ...(existing.stats || {}),
-          ...(cp.stats || {}),
-          rewardPoints: Math.max(existing.stats?.rewardPoints ?? 0, cp.stats?.rewardPoints ?? 0),
-          gamesPlayed: Math.max(existing.stats?.gamesPlayed ?? 0, cp.stats?.gamesPlayed ?? 0),
-          gamesWon: Math.max(existing.stats?.gamesWon ?? 0, cp.stats?.gamesWon ?? 0),
-          streakDays: Math.max(existing.stats?.streakDays ?? 1, cp.stats?.streakDays ?? 1),
-        },
-      });
-    }
+    const mergedOne = !existing
+      ? cp
+      : {
+          ...existing,
+          ...cp,
+          id: existing.id || cp.id,
+          lastLoginAt: cp.lastLoginAt || existing.lastLoginAt || new Date().toISOString(),
+          lastLogin: cp.lastLogin || existing.lastLogin || new Date().toISOString(),
+          stats: {
+            ...(existing.stats || {}),
+            ...(cp.stats || {}),
+            rewardPoints: Math.max(existing.stats?.rewardPoints ?? 0, cp.stats?.rewardPoints ?? 0),
+            gamesPlayed: Math.max(existing.stats?.gamesPlayed ?? 0, cp.stats?.gamesPlayed ?? 0),
+            gamesWon: Math.max(existing.stats?.gamesWon ?? 0, cp.stats?.gamesWon ?? 0),
+            streakDays: Math.max(existing.stats?.streakDays ?? 1, cp.stats?.streakDays ?? 1),
+          },
+        };
+    map.set(digits, mergedOne);
+    ensureCloudProfileSeeded(mergedOne).catch(() => {});
   }
 
   const merged = Array.from(map.values());

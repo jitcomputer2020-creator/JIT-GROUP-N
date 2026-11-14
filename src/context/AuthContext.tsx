@@ -7,6 +7,15 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import { UserProfile } from '../types';
 import { INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { getSupabaseClient } from '../lib/supabase';
+import {
+  testFirestoreConnection,
+  lookupCloudProfileByPhone,
+  loginCloudProfileByPhone,
+  registerOrRecognizeCloudProfile,
+  updateCloudProfile,
+  ensureCloudProfileSeeded,
+  touchCloudLoginTimestamp,
+} from '../lib/firebase';
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
 
@@ -139,9 +148,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [currentUser, registeredProfiles]);
 
-  // Sync profiles with shared backend server on startup and restore any server-saved accounts
+  // Sync profiles with shared cloud Firestore & backend server on startup
   const syncServerProfiles = useCallback(async () => {
     try {
+      await testFirestoreConnection();
+
+      // Verify & refresh current user directly from Firestore so edits/logins sync across devices
+      if (currentUser && currentUser.contactNumber) {
+        try {
+          const cloudCurrent = await lookupCloudProfileByPhone(currentUser.contactNumber);
+          if (cloudCurrent.expired) {
+            setCurrentUser(null);
+            setRegisteredProfiles((prev) => prev.filter((p) => p.id !== currentUser.id));
+            if (typeof window !== 'undefined') {
+              localStorage.removeItem(LS_CURRENT_USER);
+            }
+          } else if (cloudCurrent.found && cloudCurrent.profile) {
+            const cloudProfile = cloudCurrent.profile;
+            setCurrentUser((prev) =>
+              prev ? { ...prev, ...cloudProfile } : cloudProfile
+            );
+          } else if (!isProfileExpired(currentUser)) {
+            await ensureCloudProfileSeeded(currentUser);
+          }
+        } catch (cloudErr) {
+          console.warn('Firestore current user sync notice:', cloudErr);
+        }
+      }
+
       // 1. Fetch server profiles from shared backend (accessible across all browsers/devices)
       const res = await fetch('/api/profiles');
       if (res.ok) {
@@ -195,20 +229,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return merged;
         });
 
-        // If current user is recognized on server, sync up
+        // If current user is recognized on server and server copy is fresher, merge without losing cloud edits
         if (currentUser) {
           const matchedServer = activeServerProfiles.find(
             (p) => p.id === currentUser.id || isPhoneNumberMatch(p.contactNumber, currentUser.contactNumber)
           );
           if (matchedServer) {
-            setCurrentUser((prev) => (prev ? { ...prev, ...matchedServer } : matchedServer));
+            setCurrentUser((prev) => {
+              if (!prev) return matchedServer;
+              const serverTs = new Date(matchedServer.lastLoginAt || matchedServer.joinedAt || 0).getTime();
+              const prevTs = new Date(prev.lastLoginAt || prev.joinedAt || 0).getTime();
+              const base = serverTs > prevTs ? { ...prev, ...matchedServer } : { ...matchedServer, ...prev };
+              return {
+                ...base,
+                stats: {
+                  ...base.stats,
+                  rewardPoints: Math.max(prev.stats?.rewardPoints ?? 0, matchedServer.stats?.rewardPoints ?? 0),
+                  gamesPlayed: Math.max(prev.stats?.gamesPlayed ?? 0, matchedServer.stats?.gamesPlayed ?? 0),
+                  gamesWon: Math.max(prev.stats?.gamesWon ?? 0, matchedServer.stats?.gamesWon ?? 0),
+                  streakDays: Math.max(prev.stats?.streakDays ?? 1, matchedServer.stats?.streakDays ?? 1),
+                },
+              };
+            });
           }
         }
       }
 
-      // 2. Also backup valid local profiles to shared cloud backend
+      // 2. Backup valid local profiles to shared cloud backend & Firestore
       const nonExpired = registeredProfiles.filter((p) => !isProfileExpired(p));
       if (nonExpired.length > 0) {
+        for (const p of nonExpired) {
+          ensureCloudProfileSeeded(p).catch(() => {});
+        }
         await fetch('/api/profiles/sync', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -229,7 +281,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => clearInterval(interval);
   }, []); // Run on mount
 
-  // Helper to persist profile both to shared backend server and Supabase (if configured)
+  // Helper to persist profile to shared backend server and Supabase (if configured)
   const persistProfileRemotely = async (profile: UserProfile) => {
     const nowIso = new Date().toISOString();
     const profileToPersist: UserProfile = {
@@ -238,7 +290,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLogin: profile.lastLogin || profile.lastLoginAt || nowIso,
     };
 
-    // 1. Backend Server Persistence (shared cloud datastore across all devices)
+    // 1. Backend Server Persistence (shared mirror)
     try {
       await fetch('/api/profiles', {
         method: 'POST',
@@ -275,7 +327,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   // Login via Contact Number lookup
-  // Requirement 3: If a user logs in within 6 months, update their "lastLogin" timestamp so their account stays active.
+  // Checks shared Firestore cloud DB first so any browser/device/incognito tab recognizes accounts immediately.
   const loginWithContact = async (
     contactNumber: string
   ): Promise<{ success: boolean; error?: string; user?: UserProfile }> => {
@@ -286,7 +338,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const nowIso = new Date().toISOString();
 
-    // 1. Try server login endpoint first to ensure shared cross-browser persistence & lastLogin update
+    // 1. Check shared Firebase Firestore database first (cross-browser, cross-device, incognito-safe)
+    try {
+      const cloudRes = await loginCloudProfileByPhone(contactNumber);
+      if (cloudRes.expired) {
+        setRegisteredProfiles((prev) =>
+          prev.filter((p) => !isPhoneNumberMatch(p.contactNumber, contactNumber))
+        );
+        return {
+          success: false,
+          error:
+            'This account was inactive for over 180 consecutive days and has been automatically cleared per our retention policy. Please register a new profile.',
+        };
+      }
+      if (cloudRes.success && cloudRes.profile) {
+        const activeUser = cloudRes.profile;
+        setCurrentUser(activeUser);
+        setRegisteredProfiles((prev) => {
+          const withoutExpired = prev.filter((p) => !isProfileExpired(p));
+          const exists = withoutExpired.some((p) => p.id === activeUser.id);
+          if (exists) {
+            return withoutExpired.map((p) => (p.id === activeUser.id ? activeUser : p));
+          }
+          return [activeUser, ...withoutExpired];
+        });
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem(LS_LOGGED_OUT);
+          localStorage.setItem(LS_CURRENT_USER, JSON.stringify(activeUser));
+        }
+        persistProfileRemotely(activeUser).catch(() => {});
+        return { success: true, user: activeUser };
+      }
+    } catch (cloudErr) {
+      console.warn('Firestore login lookup notice, falling back to server/local:', cloudErr);
+    }
+
+    // 2. Try server login endpoint
     try {
       const serverRes = await fetch('/api/profiles/login', {
         method: 'POST',
@@ -314,6 +401,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             localStorage.removeItem(LS_LOGGED_OUT);
             localStorage.setItem(LS_CURRENT_USER, JSON.stringify(activeUser));
           }
+          await ensureCloudProfileSeeded(activeUser).catch(() => {});
           return { success: true, user: activeUser };
         }
       }
@@ -321,10 +409,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.warn('Backend login endpoint notice, attempting lookup:', e);
     }
 
-    // 2. Check local registered profiles
+    // 3. Check local registered profiles
     let matched = registeredProfiles.find((p) => isPhoneNumberMatch(p.contactNumber, contactNumber));
 
-    // 3. If not found locally, query server API
+    // 4. If not found locally, query server API
     if (!matched) {
       try {
         const res = await fetch(`/api/profiles/lookup/${encodeURIComponent(contactNumber.trim())}`);
@@ -339,7 +427,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // 4. If not found on server, query Supabase if available
+    // 5. If not found on server, query Supabase if available
     if (!matched) {
       const supabase = getSupabaseClient();
       if (supabase) {
@@ -392,7 +480,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // Check if account has exceeded 180 days of inactivity
     if (isProfileExpired(matched)) {
-      // Auto-cleanup: remove locally and inform user
       setRegisteredProfiles((prev) => prev.filter((p) => p.id !== matched?.id));
       return {
         success: false,
@@ -421,14 +508,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updatedUser));
     }
 
-    // Persist login timestamp asynchronously across shared backend & Supabase
-    persistProfileRemotely(updatedUser);
+    // Sync to shared Firestore cloud DB & backend server immediately
+    await Promise.all([
+      ensureCloudProfileSeeded(updatedUser).then(() => touchCloudLoginTimestamp(updatedUser)).catch(() => {}),
+      persistProfileRemotely(updatedUser).catch(() => {}),
+    ]);
 
     return { success: true, user: updatedUser };
   };
 
   // Register via Contact Number
-  // Recognizes existing users if already registered without clearing data; or registers brand new profile
+  // Recognizes existing users across all browsers/devices without clearing data; or creates a permanent cloud profile
   const registerUser = async (
     contactNumber: string,
     fullName: string,
@@ -447,17 +537,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const nowIso = new Date().toISOString();
 
-    // 1. Check if user already exists locally
-    let existingProfile = registeredProfiles.find((p) => isPhoneNumberMatch(p.contactNumber, contactNumber));
+    // Check any local/backend/Supabase active candidate in case account was created earlier before Firestore migration
+    let seedCandidate = registeredProfiles.find(
+      (p) => isPhoneNumberMatch(p.contactNumber, contactNumber) && !isProfileExpired(p)
+    );
 
-    // 2. Check if user exists on shared backend
-    if (!existingProfile) {
+    if (!seedCandidate) {
       try {
         const res = await fetch(`/api/profiles/lookup/${encodeURIComponent(contactNumber.trim())}`);
         if (res.ok) {
           const data = await res.json();
-          if (data.found && data.profile) {
-            existingProfile = data.profile;
+          if (data.found && data.profile && !isProfileExpired(data.profile)) {
+            seedCandidate = data.profile;
           }
         }
       } catch (e) {
@@ -465,8 +556,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // 3. Check Supabase
-    if (!existingProfile) {
+    if (!seedCandidate) {
       const supabase = getSupabaseClient();
       if (supabase) {
         try {
@@ -476,7 +566,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             .eq('contact_number', digits)
             .maybeSingle();
           if (data) {
-            existingProfile = {
+            const candidate: UserProfile = {
               id: data.id,
               contactNumber: data.contact_number,
               fullName: data.full_name,
@@ -501,6 +591,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 streakDays: data.streak_days || 1,
               },
             };
+            if (!isProfileExpired(candidate)) {
+              seedCandidate = candidate;
+            }
           }
         } catch (e) {
           console.warn('Supabase lookup error during register:', e);
@@ -508,21 +601,59 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     }
 
-    // If account was expired (>180 days), treat registration as a fresh renewal!
-    if (existingProfile && !isProfileExpired(existingProfile)) {
-      // EXISTING ACTIVE USER RECOGNIZED:
-      // Do NOT delete, wipe, or overwrite existing earned points, games won, or profile ID!
+    // Persist atomically to shared Firestore database (recognizing existing active cloud accounts automatically)
+    try {
+      const cloudReg = await registerOrRecognizeCloudProfile(
+        contactNumber,
+        fullName,
+        address,
+        seedCandidate
+      );
+
+      const finalUser = cloudReg.profile;
+      const isExisting = cloudReg.isExisting || Boolean(seedCandidate);
+
+      setCurrentUser(finalUser);
+      setRegisteredProfiles((prev) => {
+        const withoutExpired = prev.filter((p) => !isProfileExpired(p));
+        const exists = withoutExpired.some((p) => p.id === finalUser.id);
+        if (exists) {
+          return withoutExpired.map((p) => (p.id === finalUser.id ? finalUser : p));
+        }
+        return [finalUser, ...withoutExpired];
+      });
+
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(LS_LOGGED_OUT);
+        localStorage.setItem(LS_CURRENT_USER, JSON.stringify(finalUser));
+      }
+
+      await persistProfileRemotely(finalUser);
+
+      return {
+        success: true,
+        user: finalUser,
+        isExisting,
+        message: isExisting
+          ? `Welcome back, ${finalUser.fullName}! Existing profile recognized without data loss. 180-day retention timer refreshed.`
+          : `Welcome to JIT GROUP, ${finalUser.fullName}! Account created with 100 Welcome Points.`,
+      };
+    } catch (cloudErr) {
+      console.warn('Firestore register fallback notice:', cloudErr);
+    }
+
+    // Fallback path if Firestore is unreachable offline
+    if (seedCandidate && !isProfileExpired(seedCandidate)) {
       const recognizedUser: UserProfile = {
-        ...existingProfile,
-        fullName: fullName.trim() || existingProfile.fullName,
-        address: address.trim() || existingProfile.address,
+        ...seedCandidate,
+        fullName: fullName.trim() || seedCandidate.fullName,
+        address: address.trim() || seedCandidate.address,
         lastLoginAt: nowIso,
         lastLogin: nowIso,
-        // Safeguard points and stats:
         stats: {
-          ...existingProfile.stats,
-          rewardPoints: Math.max(existingProfile.stats?.rewardPoints ?? 100, 100),
-          streakDays: Math.max(existingProfile.stats?.streakDays ?? 1, 1),
+          ...seedCandidate.stats,
+          rewardPoints: Math.max(seedCandidate.stats?.rewardPoints ?? 100, 100),
+          streakDays: Math.max(seedCandidate.stats?.streakDays ?? 1, 1),
         },
       };
 
@@ -536,7 +667,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.setItem(LS_CURRENT_USER, JSON.stringify(recognizedUser));
       }
 
-      persistProfileRemotely(recognizedUser);
+      await persistProfileRemotely(recognizedUser);
 
       return {
         success: true,
@@ -546,7 +677,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     }
 
-    // BRAND NEW USER REGISTRATION (or expired account renewal):
     const newId = `usr_jit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
     const newProfile: UserProfile = {
@@ -582,7 +712,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_CURRENT_USER, JSON.stringify(newProfile));
     }
 
-    persistProfileRemotely(newProfile);
+    await persistProfileRemotely(newProfile);
 
     return {
       success: true,
@@ -625,7 +755,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
     }
 
-    persistProfileRemotely(updated);
+    await Promise.all([
+      updateCloudProfile(updated, updates).catch(() => {}),
+      persistProfileRemotely(updated).catch(() => {}),
+    ]);
   };
 
   const claimDailyReward = (): { success: boolean; pointsAdded: number; newTotal: number } => {
@@ -655,7 +788,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
     }
 
-    persistProfileRemotely(updated);
+    updateCloudProfile(updated, { stats: updated.stats }).catch(() => {});
+    persistProfileRemotely(updated).catch(() => {});
 
     return { success: true, pointsAdded: pointsToAdd, newTotal };
   };
@@ -675,7 +809,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem(LS_LOGGED_OUT);
         localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
       }
-      persistProfileRemotely(updated);
+      ensureCloudProfileSeeded(updated)
+        .then(() => touchCloudLoginTimestamp(updated))
+        .catch(() => {});
+      persistProfileRemotely(updated).catch(() => {});
     }
   };
 

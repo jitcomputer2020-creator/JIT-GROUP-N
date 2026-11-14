@@ -1,0 +1,168 @@
+{
+  "entities": {
+    "ProfileStats": {
+      "title": "ProfileStats",
+      "description": "User social and gaming activity metrics.",
+      "type": "object",
+      "properties": {
+        "friendsCount": { "type": "integer", "description": "Number of friends." },
+        "followersCount": { "type": "integer", "description": "Number of followers." },
+        "followingCount": { "type": "integer", "description": "Number of accounts followed." },
+        "postsCount": { "type": "integer", "description": "Total posts published." },
+        "reelsCount": { "type": "integer", "description": "Total reels published." },
+        "gamesPlayed": { "type": "integer", "description": "Total multiplayer games played." },
+        "gamesWon": { "type": "integer", "description": "Total multiplayer games won." },
+        "rewardPoints": { "type": "integer", "description": "Virtual reward points balance." },
+        "streakDays": { "type": "integer", "description": "Consecutive active login streak days." }
+      },
+      "required": [
+        "friendsCount",
+        "followersCount",
+        "followingCount",
+        "postsCount",
+        "reelsCount",
+        "gamesPlayed",
+        "gamesWon",
+        "rewardPoints",
+        "streakDays"
+      ]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Registered JIT GROUP user profile persisted across browsers and devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Permanent unique user ID."
+        },
+        "contactNumber": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 30,
+          "description": "User contact number as entered."
+        },
+        "phoneKey": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 15,
+          "pattern": "^[0-9]{7,15}$",
+          "description": "Normalized digit key for cross-browser phone lookup."
+        },
+        "fullName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "User display name."
+        },
+        "address": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "User campus location or address."
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Short profile biography."
+        },
+        "avatarUrl": {
+          "type": "string",
+          "maxLength": 400000,
+          "description": "Profile avatar URL or asset path."
+        },
+        "coverUrl": {
+          "type": "string",
+          "maxLength": 400000,
+          "description": "Profile cover photo URL."
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "description": "ISO timestamp when account was created."
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "description": "ISO timestamp of most recent login."
+        },
+        "lastLogin": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 40,
+          "description": "Standard lastLogin ISO timestamp alias."
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp used for 180-day inactivity expiration."
+        },
+        "isContactNumberPublic": {
+          "type": "boolean",
+          "description": "Whether contact number is visible to others."
+        },
+        "isAddressPublic": {
+          "type": "boolean",
+          "description": "Whether address is visible to others."
+        },
+        "stats": {
+          "type": "object",
+          "$ref": "#/entities/ProfileStats",
+          "description": "User activity and reward statistics."
+        }
+      },
+      "required": [
+        "id",
+        "contactNumber",
+        "phoneKey",
+        "fullName",
+        "address",
+        "joinedAt",
+        "lastLoginAt",
+        "lastLogin",
+        "lastActiveAt",
+        "stats"
+      ]
+    },
+    "PhoneIndex": {
+      "title": "PhoneIndex",
+      "description": "Lookup index mapping normalized phone digits to profile ID without exposing PII.",
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Target document ID in profiles collection."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of initial registration."
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest login for 180-day auto-cleanup."
+        }
+      },
+      "required": ["profileId", "createdAt", "lastLoginAt"]
+    }
+  },
+  "firestore": {
+    "/profiles/{profileId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Persistent user profile documents accessible across browsers and devices."
+    },
+    "/phone_index/{phoneKey}": {
+      "schema": { "$ref": "#/entities/PhoneIndex" },
+      "description": "Normalized contact-number lookup index mapping phoneKey to profileId."
+    }
+  }
+}

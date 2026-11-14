@@ -1,0 +1,141 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 8 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPhoneKey(phoneKey) {
+      return phoneKey is string && phoneKey.size() >= 7 && phoneKey.size() <= 15 && phoneKey.matches('^[0-9]{7,15}$');
+    }
+
+    function isExpiredTimestamp(ts) {
+      return ts is timestamp && request.time > ts + duration.value(180, 'd');
+    }
+
+    function isValidStats(stats) {
+      return stats is map &&
+        stats.keys().hasAll([
+          'friendsCount', 'followersCount', 'followingCount',
+          'postsCount', 'reelsCount', 'gamesPlayed',
+          'gamesWon', 'rewardPoints', 'streakDays'
+        ]) &&
+        stats.keys().hasOnly([
+          'friendsCount', 'followersCount', 'followingCount',
+          'postsCount', 'reelsCount', 'gamesPlayed',
+          'gamesWon', 'rewardPoints', 'streakDays'
+        ]) &&
+        stats.friendsCount is int && stats.friendsCount >= 0 &&
+        stats.followersCount is int && stats.followersCount >= 0 &&
+        stats.followingCount is int && stats.followingCount >= 0 &&
+        stats.postsCount is int && stats.postsCount >= 0 &&
+        stats.reelsCount is int && stats.reelsCount >= 0 &&
+        stats.gamesPlayed is int && stats.gamesPlayed >= 0 &&
+        stats.gamesWon is int && stats.gamesWon >= 0 &&
+        stats.rewardPoints is int && stats.rewardPoints >= 0 && stats.rewardPoints <= 1000000 &&
+        stats.streakDays is int && stats.streakDays >= 0;
+    }
+
+    function isValidProfileSchema(data, profileId) {
+      return data.keys().hasAll([
+          'id', 'contactNumber', 'phoneKey', 'fullName', 'address',
+          'joinedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt', 'stats'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'contactNumber', 'phoneKey', 'fullName', 'address',
+          'bio', 'avatarUrl', 'coverUrl', 'joinedAt', 'lastLoginAt',
+          'lastLogin', 'lastActiveAt', 'isContactNumberPublic',
+          'isAddressPublic', 'stats'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == profileId &&
+        data.contactNumber is string && data.contactNumber.size() >= 7 && data.contactNumber.size() <= 30 &&
+        isValidPhoneKey(data.phoneKey) &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.address is string && data.address.size() >= 1 && data.address.size() <= 300 &&
+        (!('bio' in data) || (data.bio is string && data.bio.size() <= 500)) &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
+        (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 400000)) &&
+        data.joinedAt is string && data.joinedAt.size() >= 10 && data.joinedAt.size() <= 40 &&
+        data.lastLoginAt is string && data.lastLoginAt.size() >= 10 && data.lastLoginAt.size() <= 40 &&
+        data.lastLogin is string && data.lastLogin.size() >= 10 && data.lastLogin.size() <= 40 &&
+        data.lastActiveAt == request.time &&
+        (!('isContactNumberPublic' in data) || data.isContactNumberPublic is bool) &&
+        (!('isAddressPublic' in data) || data.isAddressPublic is bool) &&
+        isValidStats(data.stats);
+    }
+
+    function isValidProfileCreate(data, profileId) {
+      return isValidProfileSchema(data, profileId);
+    }
+
+    function isValidProfileUpdate(data, prev, profileId) {
+      return isValidProfileSchema(data, profileId) &&
+        // Immortal identity fields
+        data.id == prev.id &&
+        data.phoneKey == prev.phoneKey &&
+        data.joinedAt == prev.joinedAt &&
+        data.contactNumber == prev.contactNumber &&
+        // Action-based update branches
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'address', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt'])
+        );
+    }
+
+    function isValidPhoneIndex(data) {
+      return data.keys().hasAll(['profileId', 'createdAt', 'lastLoginAt']) &&
+        data.keys().hasOnly(['profileId', 'createdAt', 'lastLoginAt']) &&
+        isValidId(data.profileId) &&
+        data.createdAt == request.time &&
+        data.lastLoginAt == request.time;
+    }
+
+    function isValidPhoneIndexUpdate(data, prev) {
+      return data.keys().hasAll(['profileId', 'createdAt', 'lastLoginAt']) &&
+        data.keys().hasOnly(['profileId', 'createdAt', 'lastLoginAt']) &&
+        data.profileId == prev.profileId &&
+        data.createdAt == prev.createdAt &&
+        data.lastLoginAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt']);
+    }
+
+    // 3. Profiles Collection: single-doc get by opaque profileId; listing strictly forbidden
+    match /profiles/{profileId} {
+      allow get: if isValidId(profileId);
+      allow list: if false;
+      allow create: if isValidId(profileId) && isValidProfileCreate(incoming(), profileId);
+      allow update: if isValidId(profileId) && isValidProfileUpdate(incoming(), existing(), profileId);
+      allow delete: if isValidId(profileId) && isExpiredTimestamp(existing().lastActiveAt);
+    }
+
+    // 4. Phone Lookup Index: exact phoneKey lookup only; enumeration strictly forbidden
+    match /phone_index/{phoneKey} {
+      allow get: if isValidPhoneKey(phoneKey);
+      allow list: if false;
+      allow create: if isValidPhoneKey(phoneKey) &&
+        isValidPhoneIndex(incoming()) &&
+        existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId));
+      allow update: if isValidPhoneKey(phoneKey) &&
+        isValidPhoneIndexUpdate(incoming(), existing());
+      allow delete: if isValidPhoneKey(phoneKey) &&
+        isExpiredTimestamp(existing().lastLoginAt);
+    }
+  }
+}

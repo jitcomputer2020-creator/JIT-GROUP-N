@@ -1,1 +1,51 @@
-[]
+[
+  {
+    "id": "usr_jit_003",
+    "contactNumber": "+91 98765 11223",
+    "fullName": "Arjun Verma",
+    "address": "Hostel 3, Block B, JIT Campus",
+    "bio": "Final Year CSE | Carrom Champion & Full Stack Coder",
+    "avatarUrl": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=200&q=80",
+    "joinedAt": "2026-01-20T12:00:00Z",
+    "lastLoginAt": "2026-11-14T04:36:45.228Z",
+    "lastLogin": "2026-11-14T04:36:45.228Z",
+    "isContactNumberPublic": false,
+    "isAddressPublic": false,
+    "stats": {
+      "friendsCount": 178,
+      "followersCount": 450,
+      "followingCount": 220,
+      "postsCount": 31,
+      "reelsCount": 12,
+      "gamesPlayed": 85,
+      "gamesWon": 52,
+      "rewardPoints": 1680,
+      "streakDays": 14
+    }
+  },
+  {
+    "id": "usr_jit_primary_001",
+    "contactNumber": "+91 98765 43210",
+    "fullName": "Prof. Ramesh Sharma",
+    "address": "JIT Campus, Tech Tower 4, Sector 12",
+    "bio": "Dean of Technology & Innovation at JIT GROUP. Enthusiastic chess player, tech mentor, and community builder.",
+    "avatarUrl": "/assets/aistudio/image_e64e54f2.png",
+    "coverUrl": "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=1200&q=80",
+    "joinedAt": "2026-01-15T08:30:00Z",
+    "lastLoginAt": "2026-11-14T04:33:35.611Z",
+    "lastLogin": "2026-11-14T04:33:35.611Z",
+    "isContactNumberPublic": false,
+    "isAddressPublic": false,
+    "stats": {
+      "friendsCount": 142,
+      "followersCount": 388,
+      "followingCount": 195,
+      "postsCount": 24,
+      "reelsCount": 8,
+      "gamesPlayed": 56,
+      "gamesWon": 34,
+      "rewardPoints": 1250,
+      "streakDays": 7
+    }
+  }
+]
