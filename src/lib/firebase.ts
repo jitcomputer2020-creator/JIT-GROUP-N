@@ -9,6 +9,7 @@
 
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
+import { getStorage, ref as storageRef, uploadString, getDownloadURL } from 'firebase/storage';
 import {
   getFirestore,
   doc,
@@ -32,6 +33,7 @@ import { UserProfile, LeaderboardEntry, MatchHistoryRecord, GameId } from '../ty
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
+export const storage = getStorage(app);
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
 
@@ -131,8 +133,50 @@ function isCloudTimestampExpired(ts: unknown, fallbackIso?: string): boolean {
 
 function sanitizeAvatarUrl(url?: string): string {
   if (!url) return '/assets/aistudio/image_e64e54f2.png';
-  if (url.length > 380000) return '/assets/aistudio/image_e64e54f2.png';
+  if (url.length > 395000) return '/assets/aistudio/image_e64e54f2.png';
   return url;
+}
+
+/**
+ * Attempts to upload a compressed profile/cover Data URL to Firebase Storage
+ * to obtain a short permanent CDN download URL. If Storage is unavailable or
+ * restricted, gracefully falls back to the compressed Data URL for direct Firestore storage.
+ */
+export async function uploadProfilePhotoToCloud(
+  profileId: string,
+  mode: 'avatar' | 'cover',
+  dataUrl: string
+): Promise<string> {
+  if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+    return dataUrl;
+  }
+
+  try {
+    const ext = dataUrl.startsWith('data:image/webp')
+      ? 'webp'
+      : dataUrl.startsWith('data:image/png')
+      ? 'png'
+      : 'jpg';
+    const fileRef = storageRef(storage, `profile_media/${profileId}/${mode}_${Date.now()}.${ext}`);
+
+    const downloadUrl = await Promise.race<string>([
+      (async () => {
+        await uploadString(fileRef, dataUrl, 'data_url');
+        return await getDownloadURL(fileRef);
+      })(),
+      new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('Storage upload timeout')), 3500)
+      ),
+    ]);
+
+    if (downloadUrl && downloadUrl.startsWith('http')) {
+      return downloadUrl;
+    }
+  } catch (err) {
+    console.info('Firebase Storage upload skipped, storing compressed photo directly in Firestore:', err);
+  }
+
+  return dataUrl;
 }
 
 function sanitizeStats(stats?: Partial<UserProfile['stats']>): UserProfile['stats'] {
@@ -165,8 +209,11 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     fullName: String(data.fullName || 'JIT Member'),
     address: String(data.address || ''),
     bio: typeof data.bio === 'string' ? data.bio : '',
-    avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : '/assets/aistudio/image_e64e54f2.png',
-    coverUrl: typeof data.coverUrl === 'string' ? data.coverUrl : undefined,
+    avatarUrl:
+      typeof data.avatarUrl === 'string' && data.avatarUrl.length > 0
+        ? data.avatarUrl
+        : '/assets/aistudio/image_e64e54f2.png',
+    coverUrl: typeof data.coverUrl === 'string' && data.coverUrl.length > 0 ? data.coverUrl : undefined,
     joinedAt: String(data.joinedAt || lastLoginIso),
     lastLoginAt: String(data.lastLoginAt || lastLoginIso),
     lastLogin: String(data.lastLogin || data.lastLoginAt || lastLoginIso),
@@ -365,7 +412,7 @@ export async function registerOrRecognizeCloudProfile(
     address: (seedProfile?.address || address).trim().slice(0, 300),
     bio: (seedProfile?.bio || 'Proud member of JIT GROUP campus community.').slice(0, 500),
     avatarUrl: sanitizeAvatarUrl(seedProfile?.avatarUrl),
-    ...(seedProfile?.coverUrl && seedProfile.coverUrl.length <= 380000
+    ...(seedProfile?.coverUrl && seedProfile.coverUrl.length <= 395000
       ? { coverUrl: seedProfile.coverUrl }
       : {}),
     joinedAt: seedProfile?.joinedAt || nowIso,
@@ -483,8 +530,12 @@ export async function updateCloudProfile(
       if (updates.bio !== undefined) detailPatch.bio = updates.bio.slice(0, 500);
       if (updates.address !== undefined) detailPatch.address = updates.address.trim().slice(0, 300);
       if (updates.avatarUrl !== undefined) detailPatch.avatarUrl = sanitizeAvatarUrl(updates.avatarUrl);
-      if (updates.coverUrl !== undefined && updates.coverUrl.length <= 380000) {
-        detailPatch.coverUrl = updates.coverUrl;
+      if (updates.coverUrl !== undefined) {
+        if (updates.coverUrl === '') {
+          detailPatch.coverUrl = '';
+        } else if (updates.coverUrl.length <= 395000) {
+          detailPatch.coverUrl = updates.coverUrl;
+        }
       }
       if (updates.isContactNumberPublic !== undefined) {
         detailPatch.isContactNumberPublic = Boolean(updates.isContactNumberPublic);

@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Camera, Image as ImageIcon, X, Check, Trash2, AlertCircle, Loader2, Upload } from 'lucide-react';
-import { saveMediaFile, validateMediaFile } from '../../services/mediaStorage';
+import { saveCompressedProfileMediaFile, validateMediaFile } from '../../services/mediaStorage';
 import { APP_CONFIG } from '../../constants/branding';
 
 interface PhotoUploadModalProps {
@@ -122,10 +122,10 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
       }
 
       if (selectedFile) {
-        // Save permanently to IndexedDB
-        const { dataUrl } = await saveMediaFile(selectedFile);
+        // Compress & save persistently to IndexedDB + pass cloud-ready Data URL to Firebase
+        const { dataUrl } = await saveCompressedProfileMediaFile(selectedFile, mode);
         await onSavePhoto(dataUrl);
-        setSuccessMessage('Photo updated and saved persistently.');
+        setSuccessMessage('Photo saved to Firebase & browser storage.');
         setTimeout(() => {
           onClose();
         }, 600);
@@ -135,7 +135,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
       // No changes
       onClose();
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to save photo to browser storage.';
+      const msg = err instanceof Error ? err.message : 'Failed to save photo to cloud storage.';
       setErrorMessage(msg);
     } finally {
       setIsSaving(false);
@@ -145,8 +145,8 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
   const hasChanges = selectedFile !== null || isRemoving;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
-      <div className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 sm:p-7 shadow-2xl flex flex-col space-y-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 backdrop-blur-sm animate-in fade-in">
+      <div className="w-full max-w-lg max-h-[92dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-7 shadow-2xl flex flex-col space-y-4 sm:space-y-5">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-center gap-3">
@@ -220,6 +220,14 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
                 <Camera className="w-6 h-6 mb-1" />
                 <span>Change</span>
               </button>
+              <button
+                type="button"
+                onClick={handleTriggerFileInput}
+                className="sm:hidden absolute bottom-1 right-1 p-2.5 rounded-full bg-blue-600 text-white shadow-lg border-2 border-white dark:border-slate-900 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                aria-label="Choose profile photo"
+              >
+                <Camera className="w-4 h-4" />
+              </button>
             </div>
           ) : (
             <div className="w-full relative group">
@@ -245,6 +253,14 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
                 <Camera className="w-6 h-6 mb-1" />
                 <span>Change Cover</span>
               </button>
+              <button
+                type="button"
+                onClick={handleTriggerFileInput}
+                className="sm:hidden absolute bottom-2 right-2 px-3 py-1.5 rounded-xl bg-black/70 text-white text-[11px] font-semibold flex items-center gap-1.5 shadow-md"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Tap to pick</span>
+              </button>
             </div>
           )}
 
@@ -255,7 +271,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
           )}
 
           {selectedFile && (
-            <p className="mt-3 text-xs text-slate-600 dark:text-slate-300">
+            <p className="mt-3 text-xs text-slate-600 dark:text-slate-300 text-center break-all">
               Selected: <span className="font-semibold text-slate-900 dark:text-white">{selectedFile.name}</span> ({(selectedFile.size / (1024 * 1024)).toFixed(2)} MB)
             </p>
           )}
@@ -266,7 +282,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
           <button
             type="button"
             onClick={handleTriggerFileInput}
-            className="flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors shadow-sm"
+            className="flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] text-xs font-bold rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors shadow-sm"
           >
             <Upload className="w-3.5 h-3.5" />
             <span>{selectedFile ? 'Choose Different Image' : 'Select From Device'}</span>
@@ -276,7 +292,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
             <button
               type="button"
               onClick={handleMarkRemove}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-2xl bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 transition-colors shadow-sm"
+              className="flex items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] text-xs font-bold rounded-2xl bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 transition-colors shadow-sm"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>{isAvatar ? 'Reset to Default' : 'Remove Photo'}</span>
@@ -286,7 +302,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
 
         {/* Guidance Notice */}
         <div className="text-[11px] text-slate-400 dark:text-slate-500 text-center leading-relaxed">
-          Supports JPG, PNG, WEBP, and GIF up to {isAvatar ? '15MB' : '20MB'}. Photos are stored securely in browser IndexedDB and persist across refreshes.
+          Supports JPG, PNG, WEBP, and GIF up to {isAvatar ? '15MB' : '20MB'}. Images are automatically optimized and synced to your Firebase profile so they persist across refreshes and devices.
         </div>
 
         {/* Footer Actions: Cancel and Save */}
@@ -295,7 +311,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
             type="button"
             onClick={handleCancel}
             disabled={isSaving}
-            className="px-5 py-2.5 text-xs font-bold rounded-2xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50"
+            className="px-5 py-2.5 min-h-[44px] text-xs font-bold rounded-2xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors disabled:opacity-50"
           >
             Cancel
           </button>
@@ -303,7 +319,7 @@ export const PhotoUploadModal: React.FC<PhotoUploadModalProps> = ({
             type="button"
             onClick={handleSave}
             disabled={!hasChanges || isSaving}
-            className="flex items-center gap-2 px-6 py-2.5 text-xs font-bold rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white transition-all shadow-md shadow-blue-500/20 disabled:opacity-50 disabled:pointer-events-none"
+            className="flex items-center justify-center gap-2 px-6 py-2.5 min-h-[44px] text-xs font-bold rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 text-white transition-all shadow-md shadow-blue-500/20 disabled:opacity-50 disabled:pointer-events-none"
           >
             {isSaving ? (
               <>

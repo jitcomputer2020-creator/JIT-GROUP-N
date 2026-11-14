@@ -417,7 +417,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     [aiDifficulty, drawBoard, gameMode, isSimulating, onMatchFinish]
   );
 
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (isSimulating || finishedRef.current || (gameMode === 'ai' && turn === 'opponent')) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = ((e.clientX - rect.left) / rect.width) * SIZE;
@@ -474,8 +474,8 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
         ref={canvasRef}
         width={SIZE}
         height={SIZE}
-        onClick={handleCanvasClick}
-        className="w-full max-w-[min(320px,100%)] aspect-square rounded-3xl shadow-2xl cursor-crosshair touch-manipulation select-none border border-amber-900/40"
+        onPointerDown={handleCanvasPointer}
+        className="w-full max-w-[min(320px,100%)] aspect-square rounded-3xl shadow-2xl cursor-crosshair game-surface border border-amber-900/40"
       />
 
       {winnerMsg && (

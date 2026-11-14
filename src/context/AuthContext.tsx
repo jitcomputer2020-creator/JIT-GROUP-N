@@ -13,6 +13,7 @@ import {
   loginCloudProfileByPhone,
   registerOrRecognizeCloudProfile,
   updateCloudProfile,
+  uploadProfilePhotoToCloud,
   ensureCloudProfileSeeded,
   touchCloudLoginTimestamp,
   syncLeaderboardEntry,
@@ -196,7 +197,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       await testFirestoreConnection();
 
-      // Verify & refresh current user directly from Firestore so edits/logins sync across devices
+      let cloudResolvedProfile: UserProfile | null = null;
+
+      // Verify & refresh current user directly from Firestore so edits/photos/logins sync across devices
       if (currentUser && currentUser.contactNumber) {
         try {
           const cloudCurrent = await lookupCloudProfileByPhone(currentUser.contactNumber);
@@ -207,10 +210,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               localStorage.removeItem(LS_CURRENT_USER);
             }
           } else if (cloudCurrent.found && cloudCurrent.profile) {
+            cloudResolvedProfile = cloudCurrent.profile;
             const cloudProfile = cloudCurrent.profile;
             setCurrentUser((prev) =>
               prev ? { ...prev, ...cloudProfile } : cloudProfile
             );
+            setRegisteredProfiles((prev) => {
+              const without = prev.filter((p) => p.id !== cloudProfile.id);
+              return [cloudProfile, ...without];
+            });
           } else if (!isProfileExpired(currentUser)) {
             await ensureCloudProfileSeeded(currentUser);
           }
@@ -234,13 +242,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               map.set(p.id, p);
             }
           }
-          // Merge server profiles
+          // Merge server profiles (preserving authoritative Firestore photos if already loaded)
           for (const sp of activeServerProfiles) {
             const localExisting = Array.from(map.values()).find(
               (p) => isPhoneNumberMatch(p.contactNumber, sp.contactNumber) || p.id === sp.id
             );
             if (localExisting) {
-              // Keep max points and stats, and freshest login timestamp
+              const isCloudCurrent = cloudResolvedProfile && localExisting.id === cloudResolvedProfile.id;
               const freshestLoginAt =
                 new Date(sp.lastLoginAt || sp.joinedAt).getTime() >
                 new Date(localExisting.lastLoginAt || localExisting.joinedAt).getTime()
@@ -250,6 +258,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 ...localExisting,
                 ...sp,
                 id: localExisting.id,
+                avatarUrl: isCloudCurrent
+                  ? cloudResolvedProfile!.avatarUrl
+                  : sp.avatarUrl || localExisting.avatarUrl,
+                coverUrl: isCloudCurrent
+                  ? cloudResolvedProfile!.coverUrl
+                  : sp.coverUrl ?? localExisting.coverUrl,
                 lastLoginAt: freshestLoginAt,
                 lastLogin: freshestLoginAt,
                 stats: {
@@ -272,8 +286,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           return merged;
         });
 
-        // If current user is recognized on server and server copy is fresher, merge without losing cloud edits
-        if (currentUser) {
+        // If current user wasn't refreshed from Firestore, merge fresher server data carefully
+        if (currentUser && !cloudResolvedProfile) {
           const matchedServer = activeServerProfiles.find(
             (p) => p.id === currentUser.id || isPhoneNumberMatch(p.contactNumber, currentUser.contactNumber)
           );
@@ -325,10 +339,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []); // Run on mount
 
   // Helper to persist profile to shared backend server and Supabase (if configured)
-  const persistProfileRemotely = async (profile: UserProfile) => {
+  const persistProfileRemotely = async (
+    profile: UserProfile,
+    flags?: { explicitAvatarUpdate?: boolean; explicitCoverRemoval?: boolean }
+  ) => {
     const nowIso = new Date().toISOString();
-    const profileToPersist: UserProfile = {
+    const profileToPersist: UserProfile & {
+      explicitAvatarUpdate?: boolean;
+      explicitCoverRemoval?: boolean;
+    } = {
       ...profile,
+      ...(flags?.explicitCoverRemoval ? { coverUrl: '' } : {}),
+      ...(flags?.explicitAvatarUpdate ? { explicitAvatarUpdate: true } : {}),
+      ...(flags?.explicitCoverRemoval ? { explicitCoverRemoval: true } : {}),
       lastLoginAt: profile.lastLoginAt || nowIso,
       lastLogin: profile.lastLogin || profile.lastLoginAt || nowIso,
     };
@@ -776,16 +799,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const updateProfile = async (updates: Partial<UserProfile>) => {
     if (!currentUser) return;
     const nowIso = new Date().toISOString();
+    const resolvedUpdates: Partial<UserProfile> = { ...updates };
+
+    // Attempt Firebase Storage upload for new photo uploads (gracefully falls back to compressed Data URL)
+    if (resolvedUpdates.avatarUrl && resolvedUpdates.avatarUrl.startsWith('data:image/')) {
+      resolvedUpdates.avatarUrl = await uploadProfilePhotoToCloud(
+        currentUser.id,
+        'avatar',
+        resolvedUpdates.avatarUrl
+      );
+    }
+    if (resolvedUpdates.coverUrl && resolvedUpdates.coverUrl.startsWith('data:image/')) {
+      resolvedUpdates.coverUrl = await uploadProfilePhotoToCloud(
+        currentUser.id,
+        'cover',
+        resolvedUpdates.coverUrl
+      );
+    }
+
+    const normalizedCoverUrl =
+      resolvedUpdates.coverUrl === ''
+        ? undefined
+        : resolvedUpdates.coverUrl ?? currentUser.coverUrl;
+
     const updated: UserProfile = {
       ...currentUser,
-      ...updates,
+      ...resolvedUpdates,
+      coverUrl: normalizedCoverUrl,
       lastLoginAt: nowIso,
       lastLogin: nowIso,
       // Retain max stats & points
       stats: {
         ...currentUser.stats,
-        ...(updates.stats || {}),
-        rewardPoints: updates.stats?.rewardPoints ?? currentUser.stats.rewardPoints,
+        ...(resolvedUpdates.stats || {}),
+        rewardPoints: resolvedUpdates.stats?.rewardPoints ?? currentUser.stats.rewardPoints,
       },
     };
 
@@ -799,9 +846,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     await Promise.all([
-      updateCloudProfile(updated, updates).catch(() => {}),
+      updateCloudProfile(updated, resolvedUpdates).catch((err) => {
+        console.warn('Cloud profile update notice:', err);
+      }),
       syncLeaderboardEntry(updated).catch(() => {}),
-      persistProfileRemotely(updated).catch(() => {}),
+      persistProfileRemotely(updated, {
+        explicitAvatarUpdate: resolvedUpdates.avatarUrl !== undefined,
+        explicitCoverRemoval: resolvedUpdates.coverUrl === '',
+      }).catch(() => {}),
     ]);
   };
 

@@ -83,7 +83,7 @@ const MainLayout: React.FC = () => {
   const isAuthScreen = activeTab === 'login' || activeTab === 'register';
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200 overflow-x-clip">
       {/* 1. Universal Top Bar */}
       <Navbar
         activeTab={activeTab}
@@ -94,7 +94,7 @@ const MainLayout: React.FC = () => {
       />
 
       {/* 2. Responsive 3-Column Layout Container */}
-      <div className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 flex gap-6 pb-24 sm:pb-28 lg:pb-8">
+      <div className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 flex gap-6 pb-20 sm:pb-24 lg:pb-8">
         {/* Left Desktop Sidebar (Desktop only) */}
         {!isAuthScreen && (
           <div className="hidden lg:block">
@@ -107,7 +107,7 @@ const MainLayout: React.FC = () => {
         )}
 
         {/* Center Main Viewport */}
-        <main className="flex-1 py-6 min-w-0">
+        <main className="flex-1 py-4 sm:py-6 min-w-0">
           {renderActiveView()}
         </main>
 

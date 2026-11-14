@@ -196,7 +196,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
           {!isViewingOther && (
             <button
               onClick={() => handleOpenPhotoModal('cover')}
-              className="absolute bottom-3 right-3 px-3.5 py-1.5 bg-black/60 hover:bg-black/80 active:scale-95 backdrop-blur-md text-white text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-all shadow-md"
+              className="absolute bottom-3 right-3 px-3.5 py-2 min-h-[40px] bg-black/65 hover:bg-black/80 active:scale-95 backdrop-blur-md text-white text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-all shadow-md"
             >
               <Camera className="w-3.5 h-3.5" />
               <span>Update Cover</span>
@@ -207,7 +207,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
         {/* Profile Info Bar */}
         <div className="p-4 sm:p-6 relative">
           <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 -mt-12 sm:-mt-20 mb-4">
-            <div className="relative">
+            <div className="relative w-fit">
               <img
                 src={user.avatarUrl || APP_CONFIG.logoUrl}
                 alt={user.fullName}
@@ -218,8 +218,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
               {!isViewingOther && (
                 <button
                   onClick={() => handleOpenPhotoModal('avatar')}
-                  className="absolute bottom-1 right-1 p-2 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 active:scale-95 transition-all"
+                  className="absolute -bottom-1 -right-1 p-2.5 bg-blue-600 text-white rounded-xl shadow-lg hover:bg-blue-700 active:scale-95 transition-all min-w-[36px] min-h-[36px] flex items-center justify-center"
                   title="Change Profile Photo"
+                  aria-label="Change Profile Photo"
                 >
                   <Camera className="w-4 h-4" />
                 </button>
@@ -227,12 +228,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
             </div>
 
             {/* Actions: Edit Profile (Own) OR Friend / Message (Other) */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {!isViewingOther ? (
                 <>
                   <button
                     onClick={handleOpenEdit}
-                    className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                    className="px-4 py-2 min-h-[44px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                   >
                     <Edit3 className="w-3.5 h-3.5" />
                     <span>Edit Profile</span>
@@ -242,7 +243,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                       logout();
                       onNavigate('login');
                     }}
-                    className="px-3.5 py-2 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                    className="px-3.5 py-2 min-h-[44px] bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                   >
                     <LogOut className="w-3.5 h-3.5" />
                     <span>Log Out</span>
@@ -253,7 +254,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                   {isFriend(user.id) ? (
                     <button
                       onClick={() => removeFriend(user.id)}
-                      className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-red-50 hover:text-red-600 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                      className="px-4 py-2 min-h-[44px] bg-slate-100 dark:bg-slate-800 hover:bg-red-50 hover:text-red-600 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                     >
                       <UserCheck className="w-3.5 h-3.5 text-emerald-500" />
                       <span>Friends (Remove)</span>
@@ -261,14 +262,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                   ) : hasPendingOutgoing(user.id) ? (
                     <button
                       disabled
-                      className="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-500 text-xs font-bold rounded-xl"
+                      className="px-4 py-2 min-h-[44px] bg-slate-100 dark:bg-slate-800 text-slate-500 text-xs font-bold rounded-xl"
                     >
                       <span>Request Sent</span>
                     </button>
                   ) : (
                     <button
                       onClick={() => sendFriendRequest(user.id)}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                      className="px-4 py-2 min-h-[44px] bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
                       <span>Add Friend</span>
@@ -277,7 +278,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
 
                   <button
                     onClick={() => onNavigate('messages')}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                    className="px-4 py-2 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
                     <span>Message</span>
@@ -298,13 +299,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
             </div>
 
             {/* Permanent Unique User ID with Copy */}
-            <div className="flex items-center gap-2 mt-1">
-              <p className="text-xs text-slate-500 font-mono">
-                Permanent User ID: <code className="text-blue-600 dark:text-blue-400 font-bold">{user.id}</code>
+            <div className="flex flex-wrap items-center gap-2 mt-1">
+              <p className="text-xs text-slate-500 font-mono break-all">
+                Permanent User ID: <code className="text-blue-600 dark:text-blue-400 font-bold break-all">{user.id}</code>
               </p>
               <button
                 onClick={handleCopyId}
-                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors shrink-0"
                 title="Copy User ID"
               >
                 {copiedId ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
@@ -388,10 +389,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
       </div>
 
       {/* 2. Sub-tabs: Posts / Reels / Achievements */}
-      <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+      <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2 overflow-x-auto no-scrollbar">
         <button
           onClick={() => setActiveTab('posts')}
-          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl transition-all ${
+          className={`flex items-center gap-1.5 px-4 py-2 min-h-[40px] whitespace-nowrap text-xs font-bold rounded-xl transition-all shrink-0 ${
             activeTab === 'posts'
               ? 'bg-blue-600 text-white shadow-sm'
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -402,7 +403,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
         </button>
         <button
           onClick={() => setActiveTab('reels')}
-          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl transition-all ${
+          className={`flex items-center gap-1.5 px-4 py-2 min-h-[40px] whitespace-nowrap text-xs font-bold rounded-xl transition-all shrink-0 ${
             activeTab === 'reels'
               ? 'bg-blue-600 text-white shadow-sm'
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -413,7 +414,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
         </button>
         <button
           onClick={() => setActiveTab('achievements')}
-          className={`flex items-center gap-1.5 px-4 py-2 text-xs font-bold rounded-xl transition-all ${
+          className={`flex items-center gap-1.5 px-4 py-2 min-h-[40px] whitespace-nowrap text-xs font-bold rounded-xl transition-all shrink-0 ${
             activeTab === 'achievements'
               ? 'bg-blue-600 text-white shadow-sm'
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'

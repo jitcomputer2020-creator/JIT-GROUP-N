@@ -59,7 +59,7 @@ function isCloudTimestampExpired(ts: unknown, fallbackIso?: string): boolean {
 
 function sanitizeAvatarUrl(url?: string): string {
   if (!url) return '/assets/aistudio/image_e64e54f2.png';
-  if (url.length > 380000) return '/assets/aistudio/image_e64e54f2.png';
+  if (url.length > 395000) return '/assets/aistudio/image_e64e54f2.png';
   return url;
 }
 
@@ -93,8 +93,11 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     fullName: String(data.fullName || 'JIT Member'),
     address: String(data.address || ''),
     bio: typeof data.bio === 'string' ? data.bio : '',
-    avatarUrl: typeof data.avatarUrl === 'string' ? data.avatarUrl : '/assets/aistudio/image_e64e54f2.png',
-    coverUrl: typeof data.coverUrl === 'string' ? data.coverUrl : undefined,
+    avatarUrl:
+      typeof data.avatarUrl === 'string' && data.avatarUrl.length > 0
+        ? data.avatarUrl
+        : '/assets/aistudio/image_e64e54f2.png',
+    coverUrl: typeof data.coverUrl === 'string' && data.coverUrl.length > 0 ? data.coverUrl : undefined,
     joinedAt: String(data.joinedAt || lastLoginIso),
     lastLoginAt: String(data.lastLoginAt || lastLoginIso),
     lastLogin: String(data.lastLogin || data.lastLoginAt || lastLoginIso),
@@ -254,7 +257,7 @@ export async function registerOrRecognizeCloudProfile(
     address: (seedProfile?.address || address).trim().slice(0, 300),
     bio: (seedProfile?.bio || 'Proud member of JIT GROUP campus community.').slice(0, 500),
     avatarUrl: sanitizeAvatarUrl(seedProfile?.avatarUrl),
-    ...(seedProfile?.coverUrl && seedProfile.coverUrl.length <= 380000
+    ...(seedProfile?.coverUrl && seedProfile.coverUrl.length <= 395000
       ? { coverUrl: seedProfile.coverUrl }
       : {}),
     joinedAt: seedProfile?.joinedAt || nowIso,
@@ -359,8 +362,12 @@ export async function updateCloudProfile(
     if (updates.bio !== undefined) detailPatch.bio = updates.bio.slice(0, 500);
     if (updates.address !== undefined) detailPatch.address = updates.address.trim().slice(0, 300);
     if (updates.avatarUrl !== undefined) detailPatch.avatarUrl = sanitizeAvatarUrl(updates.avatarUrl);
-    if (updates.coverUrl !== undefined && updates.coverUrl.length <= 380000) {
-      detailPatch.coverUrl = updates.coverUrl;
+    if (updates.coverUrl !== undefined) {
+      if (updates.coverUrl === '') {
+        detailPatch.coverUrl = '';
+      } else if (updates.coverUrl.length <= 395000) {
+        detailPatch.coverUrl = updates.coverUrl;
+      }
     }
     if (updates.isContactNumberPublic !== undefined) {
       detailPatch.isContactNumberPublic = Boolean(updates.isContactNumberPublic);

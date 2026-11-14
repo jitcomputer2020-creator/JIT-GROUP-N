@@ -78,7 +78,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Choose your interface theme. Your preference is automatically remembered.
         </p>
 
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-3 gap-2 sm:gap-3">
           {(
             [
               { id: 'dark', label: 'Dark Theme', icon: Moon },
@@ -92,14 +92,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <button
                 key={item.id}
                 onClick={() => setTheme(item.id as ThemeMode)}
-                className={`p-3.5 rounded-2xl border flex flex-col items-center justify-center gap-2 transition-all ${
+                className={`p-2.5 sm:p-3.5 min-h-[72px] rounded-2xl border flex flex-col items-center justify-center gap-1.5 sm:gap-2 text-center transition-all ${
                   isSelected
                     ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-600 text-blue-600 dark:text-blue-400 font-bold shadow-sm'
                     : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700'
                 }`}
               >
                 <Icon className="w-5 h-5" />
-                <span className="text-xs">{item.label}</span>
+                <span className="text-[11px] sm:text-xs leading-tight">{item.label}</span>
               </button>
             );
           })}
@@ -148,19 +148,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
         <button
           onClick={handleSavePrivacy}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
+          className="px-4 py-2.5 min-h-[44px] bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors"
         >
           Save Privacy Settings
         </button>
       </section>
 
       {/* 3. Mandatory 180-Day Automated Account Deletion Policy */}
-      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm">
+      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-sm">
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 shrink-0">
             <Clock className="w-5 h-5" />
           </div>
-          <div className="space-y-2 flex-1">
+          <div className="space-y-2 flex-1 min-w-0">
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Automated 180-Day Inactive Account Deletion
             </h3>
@@ -183,12 +183,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </section>
 
       {/* 4. Architecture & Cross-Browser Synchronization */}
-      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm">
+      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-sm">
         <div className="flex items-start gap-3">
           <div className="p-2.5 rounded-2xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 shrink-0">
             <Layers className="w-5 h-5" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Cross-Browser & Multi-Device Cloud Sync Active
             </h3>
@@ -200,7 +200,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </section>
 
       {/* 5. Account Switch & Logout */}
-      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm flex items-center justify-between">
+      <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h3 className="text-sm font-bold text-slate-900 dark:text-white">Account Session</h3>
           <p className="text-xs text-slate-500">
@@ -208,16 +208,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             onClick={onOpenAuth}
-            className="px-4 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors"
+            className="flex-1 sm:flex-initial px-4 py-2.5 min-h-[44px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors"
           >
             Switch Profile
           </button>
           <button
             onClick={logout}
-            className="px-4 py-2 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5"
+            className="flex-1 sm:flex-initial px-4 py-2.5 min-h-[44px] bg-red-50 dark:bg-red-950/40 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5"
           >
             <LogOut className="w-3.5 h-3.5" />
             <span>Sign Out</span>

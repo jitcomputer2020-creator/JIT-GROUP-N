@@ -426,7 +426,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
               </div>
 
               {/* Content text */}
-              <p className="text-sm text-slate-800 dark:text-slate-200 leading-relaxed mb-4 whitespace-pre-line">
+              <p className="text-sm text-slate-800 dark:text-slate-200 leading-relaxed mb-4 whitespace-pre-line break-words">
                 {post.content}
               </p>
 

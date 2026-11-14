@@ -285,7 +285,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   );
 
   return (
-    <div className="relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-140px)] sm:h-[calc(100vh-140px)] min-h-[520px] flex">
+    <div className="relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-140px)] min-h-[460px] flex">
       {/* 1. Left Conversation List */}
       <div className={`w-full sm:w-80 md:w-96 border-r border-slate-100 dark:border-slate-800 ${mobileThreadOpen ? 'hidden sm:flex' : 'flex'} flex-col shrink-0`}>
         <div className="p-4 border-b border-slate-100 dark:border-slate-800">
@@ -435,7 +435,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                 className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
               >
                 <div
-                  className={`max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed ${
+                  className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed break-words ${
                     isMe
                       ? 'bg-blue-600 text-white rounded-tr-sm shadow-sm'
                       : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-sm border border-slate-200 dark:border-slate-700 shadow-sm'
@@ -458,7 +458,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                     </div>
                   )}
 
-                  {msg.content && <p className="whitespace-pre-wrap">{msg.content}</p>}
+                  {msg.content && <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
                 </div>
                 <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
                   <span>{msg.createdAt}</span>
@@ -542,8 +542,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
       {/* 3. WebRTC Active Calling Modal Screen */}
       {activeCall && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
-          <div className="relative w-full max-w-md bg-slate-900 text-white rounded-3xl p-6 flex flex-col items-center justify-between min-h-[460px] border border-slate-800 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
+          <div className="relative w-full max-w-md max-h-[90dvh] overflow-y-auto bg-slate-900 text-white rounded-3xl p-5 sm:p-6 flex flex-col items-center justify-between min-h-[400px] sm:min-h-[460px] border border-slate-800 shadow-2xl">
             {/* Top info */}
             <div className="flex flex-col items-center mt-4">
               <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 mb-1">
@@ -617,8 +617,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
       {/* Create New Group Chat Modal */}
       {isNewGroupModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
-          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-2">
                 <div className="p-1.5 bg-blue-50 dark:bg-blue-950/50 text-blue-600 rounded-xl">

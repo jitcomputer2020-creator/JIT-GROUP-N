@@ -29,7 +29,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
 
   return (
     <nav className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-lg border-t border-slate-200 dark:border-slate-800 pb-safe">
-      <div className="grid grid-cols-6 items-center h-16 max-w-lg mx-auto px-1">
+      <div className="grid grid-cols-6 items-center h-14 max-w-lg mx-auto px-1">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isActive = activeTab === tab.id;
@@ -37,7 +37,7 @@ export const BottomNav: React.FC<BottomNavProps> = ({
             <button
               key={tab.id}
               onClick={() => onNavigate(tab.id)}
-              className="relative flex flex-col items-center justify-center min-h-[44px] min-w-[44px] py-1 text-center transition-colors group"
+              className="relative flex flex-col items-center justify-center min-h-[44px] min-w-[44px] py-1 text-center transition-colors group touch-manipulate"
               aria-label={tab.label}
             >
               <div className="relative">

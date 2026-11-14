@@ -118,14 +118,14 @@ export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
           <div className="flex flex-col sm:flex-row gap-3">
             <button
               onClick={handleClaimDaily}
-              className="px-5 py-3 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-2xl text-xs shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2"
+              className="px-5 py-3 min-h-[44px] bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-2xl text-xs shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2"
             >
               <Sparkles className="w-4 h-4" />
               <span>Claim Today (+50 Pts)</span>
             </button>
             <button
               onClick={() => onNavigate('games')}
-              className="px-4 py-3 bg-white/20 hover:bg-white/30 text-white font-semibold rounded-2xl text-xs backdrop-blur-md transition-colors flex items-center justify-center gap-2"
+              className="px-4 py-3 min-h-[44px] bg-white/20 hover:bg-white/30 text-white font-semibold rounded-2xl text-xs backdrop-blur-md transition-colors flex items-center justify-center gap-2"
             >
               <Gamepad2 className="w-4 h-4" />
               <span>Play to Earn</span>
@@ -171,14 +171,14 @@ export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
             return (
               <div
                 key={tx.id}
-                className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-4"
+                className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-3 sm:gap-4"
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 min-w-0">
                   <div className={`p-2.5 rounded-xl shrink-0 ${isCredit ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400' : 'bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400'}`}>
                     {isCredit ? <ArrowDownLeft className="w-4 h-4" /> : <ArrowUpRight className="w-4 h-4" />}
                   </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-slate-900 dark:text-white">
+                  <div className="min-w-0">
+                    <h4 className="text-xs font-bold text-slate-900 dark:text-white break-words">
                       {tx.description}
                     </h4>
                     <span className="text-[10px] text-slate-400">

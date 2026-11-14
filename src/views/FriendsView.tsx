@@ -165,7 +165,7 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
             filteredRequests.map((req) => (
               <div
                 key={req.id}
-                className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl flex items-center justify-between gap-4 shadow-sm"
+                className="p-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 shadow-sm"
               >
                 <div
                   onClick={() => handleUserClick(req.id)}
@@ -188,17 +188,17 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
                 <div className="flex items-center gap-2 shrink-0">
                   <button
                     onClick={() => acceptFriendRequest(req.id)}
-                    className="p-2 sm:px-3 sm:py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition-colors"
+                    className="flex-1 sm:flex-initial px-3.5 py-2 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm transition-colors"
                   >
                     <Check className="w-4 h-4" />
-                    <span className="hidden sm:inline">Confirm</span>
+                    <span>Confirm</span>
                   </button>
                   <button
                     onClick={() => rejectFriendRequest(req.id)}
-                    className="p-2 sm:px-3 sm:py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                    className="flex-1 sm:flex-initial px-3.5 py-2 min-h-[44px] bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <X className="w-4 h-4" />
-                    <span className="hidden sm:inline">Delete</span>
+                    <span>Delete</span>
                   </button>
                 </div>
               </div>

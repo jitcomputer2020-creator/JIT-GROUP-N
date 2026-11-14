@@ -96,12 +96,12 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
       </div>
 
       {/* Communications & Room Controls Bar */}
-      <div className="flex items-center gap-1.5 sm:gap-2">
+      <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
         {/* Live Chat */}
         <button
           type="button"
           onClick={onOpenChat}
-          className="relative px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+          className="relative px-2.5 py-2 min-h-[38px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
           title="Open In-Game Live Chat"
         >
           <MessageSquare className="w-3.5 h-3.5 text-blue-500" />
@@ -117,7 +117,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
         <button
           type="button"
           onClick={onStartVoiceCall}
-          className="px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+          className="px-2.5 py-2 min-h-[38px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
           title="Start In-Game Voice Call"
         >
           <Phone className="w-3.5 h-3.5 text-emerald-500" />
@@ -128,7 +128,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
         <button
           type="button"
           onClick={onStartVideoCall}
-          className="px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+          className="px-2.5 py-2 min-h-[38px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
           title="Start In-Game Video Call"
         >
           <Video className="w-3.5 h-3.5 text-purple-500" />
@@ -140,7 +140,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
           <button
             type="button"
             onClick={onOpenMembers}
-            className="px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+            className="px-2.5 py-2 min-h-[38px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
             title="View Room Members"
           >
             <Users className="w-3.5 h-3.5 text-amber-500" />
@@ -153,7 +153,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
           <button
             type="button"
             onClick={onInviteFriend}
-            className="px-2.5 py-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+            className="px-2.5 py-2 min-h-[38px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
             title="Invite Friend"
           >
             <Share2 className="w-3.5 h-3.5 text-blue-500" />
@@ -165,7 +165,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
         <button
           type="button"
           onClick={onLeaveRoom}
-          className="px-2.5 py-1.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl hover:bg-red-100 dark:hover:bg-red-900/60 text-red-600 dark:text-red-400 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
+          className="px-2.5 py-2 min-h-[38px] bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl hover:bg-red-100 dark:hover:bg-red-900/60 text-red-600 dark:text-red-400 text-xs font-bold flex items-center gap-1.5 transition-colors shadow-xs"
           title="Leave Game / Resign"
         >
           <LogOut className="w-3.5 h-3.5" />

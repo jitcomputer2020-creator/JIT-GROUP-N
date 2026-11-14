@@ -49,6 +49,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   const [isAddReelOpen, setIsAddReelOpen] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  const touchStartYRef = useRef<number | null>(null);
 
   const safeIndex = Math.min(currentIndex, Math.max(0, reels.length - 1));
   const currentReel = reels[safeIndex] || reels[0];
@@ -64,6 +65,21 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   const handlePrevReel = () => {
     if (currentIndex > 0) {
       setCurrentIndex(currentIndex - 1);
+    }
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartYRef.current = e.touches[0]?.clientY ?? null;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartYRef.current === null) return;
+    const endY = e.changedTouches[0]?.clientY ?? touchStartYRef.current;
+    const deltaY = touchStartYRef.current - endY;
+    touchStartYRef.current = null;
+    if (Math.abs(deltaY) > 48) {
+      if (deltaY > 0) handleNextReel();
+      else handlePrevReel();
     }
   };
 
@@ -123,8 +139,12 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   const commentsList = currentReel.comments || [];
 
   return (
-    <div className="flex justify-center items-center h-[calc(100dvh-150px)] sm:h-[calc(100vh-140px)] min-h-[460px] px-1 sm:px-0">
-      <div className="relative w-full max-w-[min(380px,100%)] h-full max-h-[680px] rounded-3xl overflow-hidden bg-black shadow-2xl border border-slate-800 flex flex-col justify-between">
+    <div className="flex justify-center items-center h-[calc(100dvh-132px)] sm:h-[calc(100vh-140px)] min-h-[440px] px-1 sm:px-0">
+      <div
+        onTouchStart={handleTouchStart}
+        onTouchEnd={handleTouchEnd}
+        className="relative w-full max-w-[min(380px,100%)] h-full max-h-[680px] rounded-3xl overflow-hidden bg-black shadow-2xl border border-slate-800 flex flex-col justify-between"
+      >
         {/* Top Floating Bar */}
         <div className="absolute top-4 inset-x-3 sm:inset-x-4 z-20 flex items-center justify-between text-white drop-shadow-md">
           <div className="flex items-center gap-1.5 sm:gap-2">
@@ -230,6 +250,27 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
             </div>
             <span className="text-[10px] font-bold font-mono">{copied ? 'Copied' : currentReel.sharesCount}</span>
           </button>
+
+          {/* Compact Mobile Prev/Next Reel Controls */}
+          <div className="flex sm:hidden flex-col gap-1.5 pt-1">
+            <button
+              type="button"
+              onClick={handlePrevReel}
+              disabled={currentIndex === 0}
+              className="p-2 rounded-full bg-black/50 backdrop-blur-md text-white disabled:opacity-30 active:scale-95"
+              aria-label="Previous Reel"
+            >
+              <ChevronUp className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={handleNextReel}
+              className="p-2 rounded-full bg-black/50 backdrop-blur-md text-white active:scale-95"
+              aria-label="Next Reel"
+            >
+              <ChevronDown className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Bottom Caption & Music Details */}

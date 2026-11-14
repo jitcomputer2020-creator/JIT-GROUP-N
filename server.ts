@@ -727,15 +727,33 @@ app.post('/api/profiles/login', async (req, res) => {
 
 // 4. Register or update profile (persists atomically to Firestore + local mirror)
 app.post('/api/profiles', async (req, res) => {
-  const payload = req.body;
-  if (!payload || !payload.contactNumber) {
+  const rawPayload = req.body;
+  if (!rawPayload || !rawPayload.contactNumber) {
     return res.status(400).json({ error: 'contactNumber is required' });
   }
+
+  const explicitAvatarUpdate = Boolean(rawPayload.explicitAvatarUpdate);
+  const explicitCoverRemoval = Boolean(rawPayload.explicitCoverRemoval) || rawPayload.coverUrl === '';
+  const payload = { ...rawPayload };
+  delete payload.explicitAvatarUpdate;
+  delete payload.explicitCoverRemoval;
 
   const nowIso = new Date().toISOString();
   try {
     const existing = await lookupCloudProfileByPhone(payload.contactNumber);
     if (existing.found && existing.profile) {
+      const nextAvatarUrl = explicitAvatarUpdate
+        ? payload.avatarUrl || '/assets/aistudio/image_e64e54f2.png'
+        : payload.avatarUrl && !payload.avatarUrl.includes('image_e64e54f2.png')
+        ? payload.avatarUrl
+        : existing.profile.avatarUrl || payload.avatarUrl;
+
+      const nextCoverUrl = explicitCoverRemoval
+        ? undefined
+        : payload.coverUrl !== undefined
+        ? payload.coverUrl
+        : existing.profile.coverUrl;
+
       const mergedProfile = {
         ...existing.profile,
         ...payload,
@@ -754,13 +772,14 @@ app.post('/api/profiles', async (req, res) => {
           rewardPoints: Math.max(existing.profile.stats?.rewardPoints ?? 0, payload.stats?.rewardPoints ?? 0),
           streakDays: Math.max(existing.profile.stats?.streakDays ?? 1, payload.stats?.streakDays ?? 1),
         },
-        avatarUrl:
-          payload.avatarUrl && !payload.avatarUrl.includes('image_e64e54f2.png')
-            ? payload.avatarUrl
-            : existing.profile.avatarUrl || payload.avatarUrl,
-        coverUrl: payload.coverUrl || existing.profile.coverUrl,
+        avatarUrl: nextAvatarUrl,
+        coverUrl: nextCoverUrl,
       };
-      await updateCloudProfile(mergedProfile, mergedProfile);
+      const cloudUpdates = {
+        ...mergedProfile,
+        ...(explicitCoverRemoval ? { coverUrl: '' } : {}),
+      };
+      await updateCloudProfile(mergedProfile, cloudUpdates);
       upsertLocalMirror(mergedProfile);
       return res.json({ success: true, profile: mergedProfile, isExisting: true });
     }
@@ -787,6 +806,17 @@ app.post('/api/profiles', async (req, res) => {
 
   if (existingIdx >= 0) {
     const existing = profiles[existingIdx];
+    const nextAvatarUrl = explicitAvatarUpdate
+      ? payload.avatarUrl || '/assets/aistudio/image_e64e54f2.png'
+      : payload.avatarUrl && !payload.avatarUrl.includes('image_e64e54f2.png')
+      ? payload.avatarUrl
+      : existing.avatarUrl || payload.avatarUrl;
+    const nextCoverUrl = explicitCoverRemoval
+      ? undefined
+      : payload.coverUrl !== undefined
+      ? payload.coverUrl
+      : existing.coverUrl;
+
     resultProfile = {
       ...existing,
       ...payload,
@@ -805,11 +835,8 @@ app.post('/api/profiles', async (req, res) => {
         rewardPoints: Math.max(existing.stats?.rewardPoints ?? 0, payload.stats?.rewardPoints ?? 0),
         streakDays: Math.max(existing.stats?.streakDays ?? 1, payload.stats?.streakDays ?? 1),
       },
-      avatarUrl:
-        payload.avatarUrl && !payload.avatarUrl.includes('image_e64e54f2.png')
-          ? payload.avatarUrl
-          : (existing.avatarUrl || payload.avatarUrl),
-      coverUrl: payload.coverUrl || existing.coverUrl,
+      avatarUrl: nextAvatarUrl,
+      coverUrl: nextCoverUrl,
     };
     profiles[existingIdx] = resultProfile;
     isExisting = true;

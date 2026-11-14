@@ -254,32 +254,59 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   }, [posts, stories, reels, savedPostIds, friendIds, pendingIncomingRequestIds, pendingOutgoingRequestIds]);
 
-  // Keep posts author info in sync if currentUser updates profile
+  // Keep posts, comments, stories, and reels author info in sync if currentUser updates profile
   useEffect(() => {
     if (currentUser) {
       setPosts((prev) =>
-        prev.map((p) =>
-          p.authorId === currentUser.id
-            ? {
-                ...p,
-                authorName: currentUser.fullName,
-                authorAvatar: currentUser.avatarUrl,
-              }
-            : p
-        )
+        prev.map((p) => {
+          const updatedComments = (p.comments || []).map((c) => ({
+            ...c,
+            ...(c.authorId === currentUser.id
+              ? { authorName: currentUser.fullName, authorAvatar: currentUser.avatarUrl }
+              : {}),
+            replies: (c.replies || []).map((r) =>
+              r.authorId === currentUser.id
+                ? { ...r, authorName: currentUser.fullName, authorAvatar: currentUser.avatarUrl }
+                : r
+            ),
+          }));
+
+          return {
+            ...p,
+            ...(p.authorId === currentUser.id
+              ? {
+                  authorName: currentUser.fullName,
+                  authorAvatar: currentUser.avatarUrl,
+                }
+              : {}),
+            comments: updatedComments,
+          };
+        })
       );
       setStories((prev) =>
         prev.map((s) =>
           s.authorId === currentUser.id
             ? {
                 ...s,
+                authorName: currentUser.fullName,
                 authorAvatar: currentUser.avatarUrl,
               }
             : s
         )
       );
+      setReels((prev) =>
+        prev.map((r) =>
+          r.creatorId === currentUser.id
+            ? {
+                ...r,
+                creatorName: currentUser.fullName,
+                creatorAvatar: currentUser.avatarUrl,
+              }
+            : r
+        )
+      );
     }
-  }, [currentUser?.avatarUrl, currentUser?.fullName]);
+  }, [currentUser?.id, currentUser?.avatarUrl, currentUser?.fullName]);
 
   // Helpers
   const createPost = ({
