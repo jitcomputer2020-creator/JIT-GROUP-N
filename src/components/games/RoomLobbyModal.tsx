@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { MultiplayerRoom } from '../../types/multiplayer';
 import { APP_CONFIG } from '../../constants/branding';
 import {
@@ -17,6 +17,8 @@ import {
   Shield,
   Loader2,
   Sparkles,
+  Bot,
+  Clock,
 } from 'lucide-react';
 
 interface RoomLobbyModalProps {
@@ -26,6 +28,7 @@ interface RoomLobbyModalProps {
   onStartGame: () => void;
   onKickPlayer: (playerId: string) => void;
   onLeaveRoom: () => void;
+  onFallbackToAI?: () => void;
   onClose: () => void;
 }
 
@@ -36,10 +39,36 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
   onStartGame,
   onKickPlayer,
   onLeaveRoom,
+  onFallbackToAI,
   onClose,
 }) => {
   const [copied, setCopied] = useState(false);
   const [shareSuccess, setShareSuccess] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(30);
+  const waitRoomCodeRef = useRef<string | null>(null);
+  const waitStartedAtRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    if (!isOpen || !room || room.players.length >= 2) {
+      setSecondsLeft(30);
+      waitRoomCodeRef.current = null;
+      return;
+    }
+
+    if (waitRoomCodeRef.current !== room.roomCode) {
+      waitRoomCodeRef.current = room.roomCode;
+      waitStartedAtRef.current = Date.now();
+      setSecondsLeft(30);
+    }
+
+    const timer = window.setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - waitStartedAtRef.current) / 1000);
+      const remaining = Math.max(0, 30 - elapsedSec);
+      setSecondsLeft(remaining);
+    }, 500);
+
+    return () => window.clearInterval(timer);
+  }, [isOpen, room]);
 
   if (!isOpen || !room) return null;
 
@@ -222,6 +251,44 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
           </div>
         </div>
 
+        {/* 30-Second Opponent Wait & AI Bot Fallback Banner */}
+        {room.players.length < 2 && onFallbackToAI && (
+          <div
+            className={`p-3.5 rounded-2xl border transition-all ${
+              secondsLeft === 0
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800'
+                : 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800/70'
+            }`}
+          >
+            {secondsLeft > 0 ? (
+              <div className="flex items-center justify-between gap-2 text-xs text-amber-800 dark:text-amber-200">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-4 h-4 shrink-0 animate-pulse" />
+                  <span>
+                    Waiting for 2nd player to join... AI fallback unlocks in{' '}
+                    <strong className="font-mono">{secondsLeft}s</strong>
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                <div className="flex items-center gap-2 text-xs font-bold text-emerald-800 dark:text-emerald-200">
+                  <Bot className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>No second player joined within 30 seconds.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={onFallbackToAI}
+                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-bold text-xs rounded-xl shadow-md flex items-center justify-center gap-2 transition-all"
+                >
+                  <Bot className="w-4 h-4" />
+                  <span>Play vs AI Bot Now</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Footer Actions */}
         <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center gap-3">
           <button
@@ -242,7 +309,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
               {room.players.length < 2 ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Waiting for Opponent</span>
+                  <span>Waiting ({secondsLeft}s)</span>
                 </>
               ) : (
                 <>

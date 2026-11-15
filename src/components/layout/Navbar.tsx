@@ -10,7 +10,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useSocial } from '../../context/SocialContext';
 import { INITIAL_USER, INITIAL_FRIENDS } from '../../services/mockData';
-import { searchCloudUsers, deriveUsername } from '../../lib/firebase';
+import { fetchPublicDirectory, searchCloudUsers, deriveUsername } from '../../lib/firebase';
 import {
   Sun,
   Moon,
@@ -56,8 +56,22 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const [headerQuery, setHeaderQuery] = useState('');
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [cloudDirectory, setCloudDirectory] = useState<UserProfile[]>([]);
   const [cloudHits, setCloudHits] = useState<UserProfile[]>([]);
   const [searching, setSearching] = useState(false);
+
+  // Preload Firebase directory on mount so typing a name shows matches instantaneously
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicDirectory(200)
+      .then((list) => {
+        if (!cancelled && list.length > 0) setCloudDirectory(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleLogoTap = () => {
     const now = Date.now();
@@ -117,8 +131,9 @@ export const Navbar: React.FC<NavbarProps> = ({
     const q = headerQuery.trim().toLowerCase().replace(/^@+/, '');
     if (!q) return [];
     const qDigits = headerQuery.replace(/\D/g, '');
-    const pool = [...registeredProfiles, INITIAL_USER, ...INITIAL_FRIENDS].filter(
+    const pool = [...cloudDirectory, ...registeredProfiles, INITIAL_USER, ...INITIAL_FRIENDS].filter(
       (p, idx, arr) =>
+        p?.id &&
         p.id !== currentUser?.id &&
         p.status !== 'deleted' &&
         arr.findIndex((x) => x.id === p.id) === idx
@@ -129,10 +144,10 @@ export const Navbar: React.FC<NavbarProps> = ({
       const nameHit = u.fullName.toLowerCase().includes(q);
       const userHit = uname.includes(q);
       const phoneHit =
-        qDigits.length >= 3 && u.contactNumber.replace(/\D/g, '').includes(qDigits);
+        qDigits.length >= 3 && (u.contactNumber || '').replace(/\D/g, '').includes(qDigits);
       return nameHit || userHit || phoneHit;
     });
-  }, [headerQuery, registeredProfiles, currentUser?.id]);
+  }, [headerQuery, cloudDirectory, registeredProfiles, currentUser?.id]);
 
   const mergedResults = useMemo(() => {
     const byId = new Map<string, UserProfile>();
@@ -206,13 +221,20 @@ export const Navbar: React.FC<NavbarProps> = ({
         </nav>
 
         {/* Zone 2.5: Live User Search Input (Tablet & Desktop) */}
-        <div ref={searchBoxRef} className="hidden md:block relative w-52 xl:w-64 shrink">
+        <div ref={searchBoxRef} className="hidden sm:block relative w-44 md:w-52 xl:w-64 shrink">
           <div className="relative flex items-center">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
             <input
               type="text"
               value={headerQuery}
-              onFocus={() => setDropdownOpen(true)}
+              onFocus={() => {
+                setDropdownOpen(true);
+                fetchPublicDirectory(200)
+                  .then((list) => {
+                    if (list.length > 0) setCloudDirectory(list);
+                  })
+                  .catch(() => {});
+              }}
               onChange={(e) => {
                 setHeaderQuery(e.target.value);
                 setDropdownOpen(true);
@@ -334,7 +356,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* Mobile / Quick Global Search Trigger */}
           <button
             onClick={onOpenSearch}
-            className="md:hidden min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            className="sm:hidden min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             title="Search JIT GROUP (Ctrl+K)"
             aria-label="Search"
           >

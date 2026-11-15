@@ -399,7 +399,9 @@ export async function loginCloudProfileByPhone(
     batch.update(doc(db, 'phone_index', phoneKey), {
       lastLoginAt: serverTimestamp(),
     });
+    batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(profile));
     await batch.commit();
+    invalidateDirectoryCache();
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.UPDATE, `profiles/${profile.id}`);
@@ -436,6 +438,14 @@ export async function registerOrRecognizeCloudProfile(
     const cleanName = fullName.trim().slice(0, 120) || prev.fullName;
     const cleanAddr = address.trim().slice(0, 300) || prev.address;
 
+    const mergedExisting: UserProfile = {
+      ...prev,
+      fullName: cleanName,
+      address: cleanAddr,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+    };
+
     try {
       const batch = writeBatch(db);
       batch.update(doc(db, 'profiles', prev.id), {
@@ -448,7 +458,9 @@ export async function registerOrRecognizeCloudProfile(
       batch.update(doc(db, 'phone_index', phoneKey), {
         lastLoginAt: serverTimestamp(),
       });
+      batch.set(doc(db, 'user_directory', prev.id), buildUserDirectoryPayload(mergedExisting));
       await batch.commit();
+      invalidateDirectoryCache();
     } catch (err: any) {
       if (err?.code === 'permission-denied') {
         handleFirestoreError(err, OperationType.UPDATE, `profiles/${prev.id}`);
@@ -459,13 +471,7 @@ export async function registerOrRecognizeCloudProfile(
     return {
       success: true,
       isExisting: true,
-      profile: {
-        ...prev,
-        fullName: cleanName,
-        address: cleanAddr,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-      },
+      profile: mergedExisting,
     };
   }
 
@@ -992,26 +998,133 @@ export async function getCloudProfileById(profileId: string): Promise<UserProfil
   return null;
 }
 
-export async function fetchPublicDirectory(maxEntries = 60): Promise<UserProfile[]> {
-  try {
-    const q = query(
-      collection(db, 'user_directory'),
-      where('rewardPoints', '>=', 0),
-      limit(maxEntries)
-    );
-    const snap = await getDocs(q);
-    return snap.docs.map((d) => directoryDocToUserProfile({ profileId: d.id, ...d.data() }));
-  } catch (err: any) {
-    if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.LIST, 'user_directory');
-    }
-    console.warn('Public directory fetch notice:', err);
-    return [];
+// In-memory directory cache (25s TTL) + private digit search map for instant partial matching
+let cachedDirectoryList: UserProfile[] = [];
+let cachedDirectoryAt = 0;
+const searchablePhoneDigitsById = new Map<string, string>();
+
+function invalidateDirectoryCache() {
+  cachedDirectoryAt = 0;
+}
+
+export async function fetchPublicDirectory(maxEntries = 200, forceRefresh = false): Promise<UserProfile[]> {
+  if (!forceRefresh && cachedDirectoryList.length > 0 && Date.now() - cachedDirectoryAt < 25000) {
+    return cachedDirectoryList.slice(0, maxEntries);
   }
+
+  const byId = new Map<string, UserProfile>();
+
+  // 1. Fetch user_directory and leaderboard in parallel so ALL registered Firebase users are discovered
+  const [dirRes, lbRes] = await Promise.allSettled([
+    getDocs(
+      query(
+        collection(db, 'user_directory'),
+        where('rewardPoints', '>=', 0),
+        limit(Math.max(maxEntries, 200))
+      )
+    ),
+    getDocs(
+      query(
+        collection(db, 'leaderboard'),
+        where('rewardPoints', '>=', 0),
+        limit(Math.max(maxEntries, 200))
+      )
+    ),
+  ]);
+
+  if (dirRes.status === 'fulfilled') {
+    dirRes.value.docs.forEach((d) => {
+      const data = d.data();
+      const profile = directoryDocToUserProfile({ profileId: d.id, ...data });
+      if (profile.id) {
+        byId.set(profile.id, profile);
+        const last4 = typeof data.phoneLast4 === 'string' ? data.phoneLast4 : '';
+        if (last4) searchablePhoneDigitsById.set(profile.id, last4);
+      }
+    });
+  } else if ((dirRes.reason as any)?.code === 'permission-denied') {
+    handleFirestoreError(dirRes.reason, OperationType.LIST, 'user_directory');
+  }
+
+  const missingProfileIds: Array<{ id: string; lbData: Record<string, any> }> = [];
+  if (lbRes.status === 'fulfilled') {
+    lbRes.value.docs.forEach((d) => {
+      const data = d.data();
+      const pid = String(data.profileId || d.id);
+      if (pid && !byId.has(pid)) {
+        missingProfileIds.push({ id: pid, lbData: data });
+      }
+    });
+  }
+
+  // 2. Hydrate any registered users present in leaderboard but missing from user_directory
+  if (missingProfileIds.length > 0) {
+    const CHUNK = 12;
+    for (let i = 0; i < missingProfileIds.length; i += CHUNK) {
+      const slice = missingProfileIds.slice(i, i + CHUNK);
+      await Promise.all(
+        slice.map(async ({ id, lbData }) => {
+          try {
+            const pSnap = await getDoc(doc(db, 'profiles', id));
+            if (pSnap.exists()) {
+              const pData = pSnap.data();
+              if (pData.status === 'deleted') return;
+              const fullProfile = firestoreDocToUserProfile(pData);
+              const pDigits = normalizeDigitsOnly(fullProfile.contactNumber || '');
+              if (pDigits) searchablePhoneDigitsById.set(fullProfile.id, pDigits);
+              byId.set(fullProfile.id, {
+                ...fullProfile,
+                contactNumber: fullProfile.isContactNumberPublic
+                  ? fullProfile.contactNumber
+                  : pDigits.length >= 4
+                  ? `******${pDigits.slice(-4)}`
+                  : 'Private',
+              });
+              // Best-effort backfill of user_directory for future fast queries
+              setDoc(doc(db, 'user_directory', fullProfile.id), buildUserDirectoryPayload(fullProfile)).catch(
+                () => {}
+              );
+              return;
+            }
+          } catch {
+            // Fall back to public leaderboard summary fields
+          }
+          const lbName = String(lbData.fullName || 'JIT Member');
+          byId.set(id, {
+            id,
+            contactNumber: 'Private',
+            fullName: lbName,
+            username: deriveUsername(lbName),
+            address: 'JIT Campus',
+            bio: 'JIT Campus Member',
+            avatarUrl: sanitizeAvatarUrl(typeof lbData.avatarUrl === 'string' ? lbData.avatarUrl : undefined),
+            joinedAt: new Date().toISOString(),
+            lastLoginAt: new Date().toISOString(),
+            lastLogin: new Date().toISOString(),
+            isContactNumberPublic: false,
+            isAddressPublic: true,
+            stats: sanitizeStats({
+              rewardPoints: Number(lbData.rewardPoints ?? 100),
+              gamesPlayed: Number(lbData.gamesPlayed ?? 0),
+              gamesWon: Number(lbData.gamesWon ?? 0),
+              streakDays: Number(lbData.streakDays ?? 1),
+            }),
+          });
+        })
+      );
+    }
+  }
+
+  const list = Array.from(byId.values());
+  if (list.length > 0) {
+    cachedDirectoryList = list;
+    cachedDirectoryAt = Date.now();
+  }
+  return list.slice(0, maxEntries);
 }
 
 /**
- * Case-insensitive search across registered Firebase users matching:
+ * Case-insensitive partial-string search across ALL registered Firebase users matching:
  * displayName (fullName), username (@handle), or phone number.
  */
 export async function searchCloudUsers(queryStr: string, maxResults = 30): Promise<UserProfile[]> {
@@ -1021,31 +1134,47 @@ export async function searchCloudUsers(queryStr: string, maxResults = 30): Promi
 
   const byId = new Map<string, UserProfile>();
 
-  // 1. Exact phone lookup if 7+ digits entered (finds any Firebase user even across devices)
+  // 1. Exact phone lookup if 7+ digits entered (finds any Firebase user even if not yet cached)
   if (digits.length >= 7) {
     try {
       const phoneRes = await lookupCloudProfileByPhone(raw);
       if (phoneRes.found && phoneRes.profile) {
-        byId.set(phoneRes.profile.id, phoneRes.profile);
+        const pDigits = normalizeDigitsOnly(phoneRes.profile.contactNumber || '');
+        if (pDigits) searchablePhoneDigitsById.set(phoneRes.profile.id, pDigits);
+        byId.set(phoneRes.profile.id, {
+          ...phoneRes.profile,
+          contactNumber: phoneRes.profile.isContactNumberPublic
+            ? phoneRes.profile.contactNumber
+            : pDigits.length >= 4
+            ? `******${pDigits.slice(-4)}`
+            : 'Private',
+        });
       }
     } catch {
       // non-fatal
     }
   }
 
-  // 2. Query Firestore public user_directory
+  // 2. Query Firestore unified directory (user_directory + leaderboard + profiles hydration)
   try {
-    const dirUsers = await fetchPublicDirectory(100);
+    const dirUsers = await fetchPublicDirectory(250);
     for (const u of dirUsers) {
-      if (!qLower) {
+      if (!qLower && digits.length === 0) {
         byId.set(u.id, u);
         continue;
       }
-      const nameMatch = u.fullName.toLowerCase().includes(qLower);
-      const userMatch = (u.username || deriveUsername(u.fullName)).toLowerCase().includes(qLower);
-      const bioMatch = (u.bio || '').toLowerCase().includes(qLower);
-      const addrMatch = (u.address || '').toLowerCase().includes(qLower);
-      const phoneMatch = digits.length >= 4 && normalizeDigitsOnly(u.contactNumber).includes(digits.slice(-4));
+      const nameMatch = Boolean(qLower) && u.fullName.toLowerCase().includes(qLower);
+      const uname = (u.username || deriveUsername(u.fullName)).toLowerCase();
+      const userMatch = Boolean(qLower) && uname.includes(qLower);
+      const bioMatch = Boolean(qLower) && (u.bio || '').toLowerCase().includes(qLower);
+      const addrMatch = Boolean(qLower) && (u.address || '').toLowerCase().includes(qLower);
+      const knownDigits =
+        searchablePhoneDigitsById.get(u.id) || normalizeDigitsOnly(u.contactNumber || '');
+      const phoneMatch =
+        digits.length >= 3 &&
+        (knownDigits.includes(digits) ||
+          (digits.length >= 4 && knownDigits.includes(digits.slice(-4))));
+
       if (nameMatch || userMatch || bioMatch || addrMatch || phoneMatch) {
         if (!byId.has(u.id)) {
           byId.set(u.id, u);
@@ -1056,7 +1185,7 @@ export async function searchCloudUsers(queryStr: string, maxResults = 30): Promi
     // fallback continues
   }
 
-  // 3. Also query backend /api/users/search when available (captures profiles with full phone match)
+  // 3. Also query backend /api/users/search when available (captures any local/Express profiles & full phone substrings)
   if (typeof fetch === 'function') {
     try {
       const res = await fetch(`/api/users/search?q=${encodeURIComponent(raw)}`);
@@ -1204,7 +1333,7 @@ export async function createFirestoreGameRoom(
 
 export async function joinFirestoreGameRoom(
   roomCode: string,
-  gameId: string,
+  gameId: string | undefined,
   player: { id: string; name: string; avatar: string }
 ): Promise<MultiplayerRoom> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
@@ -1219,7 +1348,7 @@ export async function joinFirestoreGameRoom(
   }
 
   const data = snap.data();
-  if (data.gameId !== gameId) {
+  if (gameId && data.gameId !== gameId) {
     throw new Error(`Room #${cleanCode} is for ${String(data.gameId || '').toUpperCase()}, not ${gameId.toUpperCase()}.`);
   }
 
@@ -1246,8 +1375,9 @@ export async function joinFirestoreGameRoom(
     },
   ];
 
+  // Auto-start as soon as the room reaches capacity (e.g. 2/2 players) so neither player gets stuck waiting
   const nextStatus =
-    parsed.isPublicMatch && nextPlayers.length >= parsed.maxPlayers ? 'in_game' : parsed.status;
+    nextPlayers.length >= parsed.maxPlayers ? 'in_game' : parsed.status;
 
   try {
     await updateDoc(roomRef, {
@@ -1310,10 +1440,11 @@ export async function startFirestoreGameRoom(
 ): Promise<void> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
   if (cleanCode.length !== 4) return;
+  const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
       status: 'in_game',
-      gameStateJson: JSON.stringify({ ...initialGameState, _seq: Date.now() }),
+      gameStateJson: JSON.stringify({ ...initialGameState, _startId: startId, moveSeq: 0 }),
       currentTurn: firstTurnId,
       moveAction: 'GAME_START',
       updatedAt: serverTimestamp(),
@@ -1337,7 +1468,7 @@ export async function pushFirestoreGameMove(
   if (cleanCode.length !== 4) return;
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
-      gameStateJson: JSON.stringify({ ...newGameState, _seq: Date.now() }),
+      gameStateJson: JSON.stringify(newGameState),
       moveAction: String(moveAction).slice(0, 40),
       currentTurn: String(nextTurnId || '').slice(0, 64),
       status,
@@ -1358,10 +1489,11 @@ export async function rematchFirestoreGameRoom(
 ): Promise<void> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
   if (cleanCode.length !== 4) return;
+  const moveId = `rematch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
       status: 'in_game',
-      gameStateJson: JSON.stringify({ ...resetState, _seq: Date.now() }),
+      gameStateJson: JSON.stringify({ ...resetState, moveId, moveSeq: 0 }),
       moveAction: 'REMATCH',
       currentTurn: String(firstTurnId || '').slice(0, 64),
       updatedAt: serverTimestamp(),
