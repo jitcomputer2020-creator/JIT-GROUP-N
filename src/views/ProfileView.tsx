@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { NavTab, UserProfile } from '../types';
-import { INITIAL_ACHIEVEMENTS } from '../services/mockData';
+import { INITIAL_ACHIEVEMENTS, INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
-import { saveMediaFile, validateMediaFile } from '../services/mediaStorage';
+import { getCloudProfileById, deriveUsername } from '../lib/firebase';
 import {
   Edit3,
   Calendar,
@@ -73,8 +73,45 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
 
   // Determine if viewing own profile or someone else's
   const isViewingOther = !!viewingUserId && viewingUserId !== currentUser?.id;
+  const [fetchedOtherUser, setFetchedOtherUser] = useState<UserProfile | null>(null);
+  const [loadingOtherUser, setLoadingOtherUser] = useState(false);
+
+  const localOtherMatch = isViewingOther
+    ? [...registeredProfiles, INITIAL_USER, ...INITIAL_FRIENDS].find(
+        (u) => u.id === viewingUserId
+      ) || null
+    : null;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isViewingOther || !viewingUserId) {
+      setFetchedOtherUser(null);
+      setLoadingOtherUser(false);
+      return;
+    }
+    if (localOtherMatch) {
+      setFetchedOtherUser(localOtherMatch);
+      setLoadingOtherUser(false);
+      return;
+    }
+    setLoadingOtherUser(true);
+    getCloudProfileById(viewingUserId)
+      .then((cloudProf) => {
+        if (!cancelled) {
+          setFetchedOtherUser(cloudProf);
+          setLoadingOtherUser(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadingOtherUser(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isViewingOther, viewingUserId, localOtherMatch]);
+
   const targetUser: UserProfile | null = isViewingOther
-    ? registeredProfiles.find((u) => u.id === viewingUserId) || null
+    ? localOtherMatch || fetchedOtherUser
     : currentUser;
 
   // Filter posts and reels belonging to this profile
@@ -130,6 +167,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
     setCopiedId(true);
     setTimeout(() => setCopiedId(false), 2000);
   };
+
+  if (isViewingOther && loadingOtherUser && !targetUser) {
+    return (
+      <div className="max-w-md mx-auto py-16 px-6 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-600 mx-auto" />
+        <p className="text-xs font-semibold text-slate-500">Loading member profile from Firebase...</p>
+      </div>
+    );
+  }
 
   if (!currentUser && !targetUser) {
     return (
@@ -293,6 +339,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
               <h2 className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
                 {user.fullName}
               </h2>
+              <span className="text-xs font-mono font-semibold text-slate-500 dark:text-slate-400">
+                @{user.username || deriveUsername(user.fullName)}
+              </span>
               <span className="text-[11px] font-bold px-2 py-0.5 rounded-lg bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400">
                 Verified JIT Member
               </span>

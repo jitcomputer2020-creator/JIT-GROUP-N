@@ -3,21 +3,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { UserProfile, NavTab } from '../types';
 import { INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
+import { fetchPublicDirectory, searchCloudUsers, deriveUsername } from '../lib/firebase';
 import {
-  Users,
   UserPlus,
-  UserCheck,
   Search,
   MessageSquare,
   Check,
   X,
   UserX,
+  Loader2,
 } from 'lucide-react';
 
 interface FriendsViewProps {
@@ -39,13 +39,71 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
 
   const [tab, setTab] = useState<'all' | 'requests' | 'discover'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [cloudUsers, setCloudUsers] = useState<UserProfile[]>([]);
+  const [searchingCloud, setSearchingCloud] = useState(false);
 
-  // Collect all known campus profiles
-  const allKnownProfiles: UserProfile[] = [
-    INITIAL_USER,
-    ...INITIAL_FRIENDS,
-    ...(registeredProfiles || []),
-  ].filter((p, index, self) => index === self.findIndex((t) => t.id === p.id));
+  // Load Firebase public user directory on mount
+  useEffect(() => {
+    let cancelled = false;
+    fetchPublicDirectory(100)
+      .then((list) => {
+        if (!cancelled) setCloudUsers(list);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Run case-insensitive Firebase + backend search when typing in Friends search box
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setSearchingCloud(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchingCloud(true);
+    const timer = window.setTimeout(() => {
+      searchCloudUsers(trimmed, 40)
+        .then((res) => {
+          if (!cancelled) {
+            setCloudUsers((prev) => {
+              const map = new Map<string, UserProfile>();
+              res.forEach((u) => map.set(u.id, u));
+              prev.forEach((u) => {
+                if (!map.has(u.id)) map.set(u.id, u);
+              });
+              return Array.from(map.values());
+            });
+            setSearchingCloud(false);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setSearchingCloud(false);
+        });
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery]);
+
+  // Collect all known campus + Firebase registered profiles
+  const allKnownProfiles: UserProfile[] = useMemo(() => {
+    return [
+      ...cloudUsers,
+      ...(registeredProfiles || []),
+      INITIAL_USER,
+      ...INITIAL_FRIENDS,
+    ].filter(
+      (p, index, self) =>
+        p?.id &&
+        p.status !== 'deleted' &&
+        index === self.findIndex((t) => t.id === p.id)
+    );
+  }, [cloudUsers, registeredProfiles]);
 
   // Current friends list
   const friendsList = allKnownProfiles.filter(
@@ -72,13 +130,20 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
 
   const filterBySearch = (list: UserProfile[]) => {
     if (!searchQuery.trim()) return list;
-    const q = searchQuery.toLowerCase();
-    return list.filter(
-      (f) =>
+    const q = searchQuery.trim().toLowerCase().replace(/^@+/, '');
+    const qDigits = searchQuery.replace(/\D/g, '');
+    return list.filter((f) => {
+      const uname = (f.username || deriveUsername(f.fullName)).toLowerCase();
+      const phoneMatch =
+        qDigits.length >= 3 && (f.contactNumber || '').replace(/\D/g, '').includes(qDigits);
+      return (
         f.fullName.toLowerCase().includes(q) ||
-        f.address.toLowerCase().includes(q) ||
-        f.bio?.toLowerCase().includes(q)
-    );
+        uname.includes(q) ||
+        (f.address || '').toLowerCase().includes(q) ||
+        (f.bio || '').toLowerCase().includes(q) ||
+        phoneMatch
+      );
+    });
   };
 
   const filteredFriends = filterBySearch(friendsList);
@@ -88,26 +153,29 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
   return (
     <div className="space-y-6 max-w-4xl mx-auto w-full">
       {/* 1. Header with Search */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-sm">
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
           <div>
             <h2 className="text-xl font-bold text-slate-900 dark:text-white">
               Campus Friends & Community
             </h2>
             <p className="text-xs text-slate-500">
-              Connect with fellow students, faculty, and tournament rivals
+              Search registered Firebase users by name, @username, or phone number
             </p>
           </div>
 
-          <div className="relative w-full sm:w-64">
+          <div className="relative w-full sm:w-72">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
               type="text"
-              placeholder="Search by name or department..."
+              placeholder="Search name, @username or phone..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-3.5 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
+              className="w-full pl-10 pr-8 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
             />
+            {searchingCloud && (
+              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-blue-600" />
+            )}
           </div>
         </div>
 
@@ -180,8 +248,10 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
                     <h4 className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-blue-600 transition-colors truncate">
                       {req.fullName}
                     </h4>
-                    <p className="text-xs text-slate-500 truncate">{req.bio || 'JIT Campus Member'}</p>
-                    <span className="text-[10px] text-slate-400 block truncate">{req.address}</span>
+                    <p className="text-[11px] font-mono text-blue-600 dark:text-blue-400 truncate">
+                      @{req.username || deriveUsername(req.fullName)}
+                    </p>
+                    <p className="text-xs text-slate-500 truncate">{req.bio || req.address || 'JIT Campus Member'}</p>
                   </div>
                 </div>
 
@@ -212,7 +282,9 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {filteredFriends.length === 0 ? (
             <div className="col-span-full p-8 text-center text-xs text-slate-400 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl">
-              No friends found. Use "Find Peers" to connect with campus members!
+              {searchQuery.trim()
+                ? 'No current friends matched your search. See Discover matches below!'
+                : 'No friends found. Use "Find Peers" to connect with campus members!'}
             </div>
           ) : (
             filteredFriends.map((friend) => (
@@ -233,6 +305,9 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
                     <h4 className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-blue-600 transition-colors truncate">
                       {friend.fullName}
                     </h4>
+                    <p className="text-[11px] font-mono text-blue-600 dark:text-blue-400 truncate">
+                      @{friend.username || deriveUsername(friend.fullName)}
+                    </p>
                     <p className="text-xs text-slate-500 line-clamp-1 mb-1">
                       {friend.bio || 'JIT Campus Member'}
                     </p>
@@ -253,12 +328,17 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
                     <span>Message</span>
                   </button>
                   <button
+                    onClick={() => handleUserClick(friend.id)}
+                    className="py-1.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-colors"
+                  >
+                    View Profile
+                  </button>
+                  <button
                     onClick={() => removeFriend(friend.id)}
-                    className="py-1.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1"
+                    className="py-1.5 px-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1"
                     title="Remove Friend"
                   >
                     <UserX className="w-3.5 h-3.5" />
-                    <span>Remove</span>
                   </button>
                 </div>
               </div>
@@ -267,73 +347,85 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
         </div>
       )}
 
-      {/* 4. Discover Peers Tab */}
-      {tab === 'discover' && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {filteredDiscover.length === 0 ? (
-            <div className="col-span-full p-8 text-center text-xs text-slate-400 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl">
-              All peers are already in your network or pending!
-            </div>
-          ) : (
-            filteredDiscover.map((peer) => {
-              const pendingOut = hasPendingOutgoing(peer.id);
-              return (
-                <div
-                  key={peer.id}
-                  className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl flex flex-col justify-between shadow-sm hover:border-slate-300 dark:hover:border-slate-700 transition-all"
-                >
+      {/* 4. Discover Peers Tab (Also shown inline whenever actively searching from Friends/Requests!) */}
+      {(tab === 'discover' || (searchQuery.trim().length > 0 && filteredDiscover.length > 0)) && (
+        <div className="space-y-3">
+          {tab !== 'discover' && (
+            <h3 className="text-xs font-bold text-slate-900 dark:text-white uppercase tracking-wider px-1">
+              More JIT Members Matching "{searchQuery}" ({filteredDiscover.length})
+            </h3>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {filteredDiscover.length === 0 ? (
+              <div className="col-span-full p-8 text-center text-xs text-slate-400 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl">
+                {searchQuery.trim()
+                  ? `No users matched "${searchQuery}". Try another name, @username, or phone.`
+                  : 'All peers are already in your network or pending!'}
+              </div>
+            ) : (
+              filteredDiscover.map((peer) => {
+                const pendingOut = hasPendingOutgoing(peer.id);
+                return (
                   <div
-                    onClick={() => handleUserClick(peer.id)}
-                    className="flex items-start gap-3.5 mb-3 cursor-pointer group"
+                    key={peer.id}
+                    className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl flex flex-col justify-between shadow-sm hover:border-slate-300 dark:hover:border-slate-700 transition-all"
                   >
-                    <img
-                      src={peer.avatarUrl || APP_CONFIG.logoUrl}
-                      alt={peer.fullName}
-                      className="w-12 h-12 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0 group-hover:ring-2 group-hover:ring-blue-500 transition-all"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <h4 className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-blue-600 transition-colors truncate">
-                        {peer.fullName}
-                      </h4>
-                      <p className="text-xs text-slate-500 line-clamp-1 mb-1">
-                        {peer.bio || peer.address}
-                      </p>
-                      <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-                        <span>{peer.stats?.gamesWon || 0} wins</span>
-                        <span aria-hidden="true">·</span>
-                        <span>{peer.stats?.rewardPoints || 100} points</span>
+                    <div
+                      onClick={() => handleUserClick(peer.id)}
+                      className="flex items-start gap-3.5 mb-3 cursor-pointer group"
+                    >
+                      <img
+                        src={peer.avatarUrl || APP_CONFIG.logoUrl}
+                        alt={peer.fullName}
+                        className="w-12 h-12 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0 group-hover:ring-2 group-hover:ring-blue-500 transition-all"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-sm font-bold text-slate-900 dark:text-white group-hover:text-blue-600 transition-colors truncate">
+                          {peer.fullName}
+                        </h4>
+                        <p className="text-[11px] font-mono text-blue-600 dark:text-blue-400 truncate">
+                          @{peer.username || deriveUsername(peer.fullName)}
+                        </p>
+                        <p className="text-xs text-slate-500 line-clamp-1 mb-1">
+                          {peer.bio || peer.address}
+                        </p>
+                        <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
+                          <span>{peer.stats?.gamesWon || 0} wins</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{peer.stats?.rewardPoints || 100} points</span>
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="flex items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
-                    {pendingOut ? (
+                    <div className="flex items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                      {pendingOut ? (
+                        <button
+                          disabled
+                          className="flex-1 py-1.5 px-3 bg-slate-100 dark:bg-slate-800 text-slate-400 rounded-xl text-xs font-semibold"
+                        >
+                          Request Sent
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => sendFriendRequest(peer.id)}
+                          className="flex-1 py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors flex items-center justify-center gap-1.5"
+                        >
+                          <UserPlus className="w-3.5 h-3.5" />
+                          <span>Add Friend</span>
+                        </button>
+                      )}
                       <button
-                        disabled
-                        className="flex-1 py-1.5 px-3 bg-slate-100 dark:bg-slate-800 text-slate-400 rounded-xl text-xs font-semibold"
+                        onClick={() => handleUserClick(peer.id)}
+                        className="py-1.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-colors"
                       >
-                        Request Sent
+                        View Profile
                       </button>
-                    ) : (
-                      <button
-                        onClick={() => sendFriendRequest(peer.id)}
-                        className="flex-1 py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors flex items-center justify-center gap-1.5"
-                      >
-                        <UserPlus className="w-3.5 h-3.5" />
-                        <span>Add Friend</span>
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleUserClick(peer.id)}
-                      className="py-1.5 px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-colors"
-                    >
-                      View Profile
-                    </button>
+                    </div>
                   </div>
-                </div>
-              );
-            })
-          )}
+                );
+              })
+            )}
+          </div>
         </div>
       )}
     </div>

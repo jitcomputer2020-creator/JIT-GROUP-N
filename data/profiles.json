@@ -80,7 +80,11 @@
     "bio": "Computer Science Department | Ludo Master & AI Researcher",
     "avatarUrl": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80",
     "joinedAt": "2026-02-01T10:00:00Z",
-    "lastLoginAt": "2026-11-06T20:19:18.743Z",
+    "lastLoginAt": "2026-11-15T04:23:56.834Z",
+    "lastLogin": "2026-11-15T04:23:56.834Z",
+    "isContactNumberPublic": false,
+    "isAddressPublic": false,
+    "status": "active",
     "stats": {
       "friendsCount": 89,
       "followersCount": 210,
@@ -91,8 +95,7 @@
       "gamesWon": 28,
       "rewardPoints": 890,
       "streakDays": 5
-    },
-    "lastLogin": "2026-11-06T20:19:18.743Z"
+    }
   },
   {
     "id": "usr_jit_004",

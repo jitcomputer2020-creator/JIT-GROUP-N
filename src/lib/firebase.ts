@@ -18,6 +18,8 @@ import {
   getDocFromServer,
   setDoc,
   updateDoc,
+  deleteDoc,
+  onSnapshot,
   writeBatch,
   collection,
   query,
@@ -26,9 +28,11 @@ import {
   where,
   serverTimestamp,
   Timestamp,
+  Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { UserProfile, LeaderboardEntry, MatchHistoryRecord, GameId } from '../types';
+import { MultiplayerRoom, RoomPlayer, InGameChatMessage } from '../types/multiplayer';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -137,6 +141,53 @@ function sanitizeAvatarUrl(url?: string): string {
   return url;
 }
 
+export function deriveUsername(
+  fullName: string,
+  contactNumber?: string,
+  explicitUsername?: string
+): string {
+  const cleanedExplicit = (explicitUsername || '')
+    .trim()
+    .replace(/^@+/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (cleanedExplicit.length >= 2) {
+    return cleanedExplicit.slice(0, 48);
+  }
+  const slug = (fullName || 'jit_member')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32);
+  const digits = normalizeDigitsOnly(contactNumber || '');
+  const suffix = digits.length >= 4 ? `_${digits.slice(-2)}` : '';
+  const base = slug.length >= 2 ? slug : 'jit_member';
+  return `${base}${suffix}`.slice(0, 48);
+}
+
+function buildUserDirectoryPayload(profile: UserProfile): Record<string, any> {
+  const cleanName = (profile.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
+  const username = deriveUsername(cleanName, profile.contactNumber, profile.username);
+  const digits = normalizeDigitsOnly(profile.contactNumber || '');
+  const stats = sanitizeStats(profile.stats);
+  return {
+    profileId: profile.id,
+    fullName: cleanName,
+    fullNameLower: cleanName.toLowerCase(),
+    username,
+    usernameLower: username.toLowerCase(),
+    avatarUrl: sanitizeAvatarUrl(profile.avatarUrl),
+    bio: (profile.bio || '').slice(0, 500),
+    address: (profile.address || 'JIT Campus').slice(0, 300),
+    phoneLast4: digits.length >= 4 ? digits.slice(-4) : '',
+    rewardPoints: stats.rewardPoints,
+    gamesWon: stats.gamesWon,
+    updatedAt: serverTimestamp(),
+  };
+}
+
 /**
  * Attempts to upload a compressed profile/cover Data URL to Firebase Storage
  * to obtain a short permanent CDN download URL. If Storage is unavailable or
@@ -203,10 +254,13 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     data.joinedAt ||
     new Date().toISOString();
 
+  const fullName = String(data.fullName || 'JIT Member');
+  const contactNumber = String(data.contactNumber || '');
   return {
     id: String(data.id),
-    contactNumber: String(data.contactNumber || ''),
-    fullName: String(data.fullName || 'JIT Member'),
+    contactNumber,
+    fullName,
+    username: deriveUsername(fullName, contactNumber, typeof data.username === 'string' ? data.username : undefined),
     address: String(data.address || ''),
     bio: typeof data.bio === 'string' ? data.bio : '',
     avatarUrl:
@@ -418,10 +472,15 @@ export async function registerOrRecognizeCloudProfile(
   const profileId =
     seedProfile?.id || `usr_jit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
+  const cleanFullName = (seedProfile?.fullName || fullName).trim().slice(0, 120);
+  const cleanContact = (seedProfile?.contactNumber || contactNumber).trim().slice(0, 30);
+  const derivedUsername = deriveUsername(cleanFullName, cleanContact, seedProfile?.username);
+
   const newProfile: UserProfile = {
     id: profileId,
-    contactNumber: (seedProfile?.contactNumber || contactNumber).trim().slice(0, 30),
-    fullName: (seedProfile?.fullName || fullName).trim().slice(0, 120),
+    contactNumber: cleanContact,
+    fullName: cleanFullName,
+    username: derivedUsername,
     address: (seedProfile?.address || address).trim().slice(0, 300),
     bio: (seedProfile?.bio || 'Proud member of JIT GROUP campus community.').slice(0, 500),
     avatarUrl: sanitizeAvatarUrl(seedProfile?.avatarUrl),
@@ -441,6 +500,7 @@ export async function registerOrRecognizeCloudProfile(
     contactNumber: newProfile.contactNumber,
     phoneKey,
     fullName: newProfile.fullName,
+    username: derivedUsername,
     address: newProfile.address,
     bio: newProfile.bio || '',
     avatarUrl: newProfile.avatarUrl,
@@ -474,6 +534,7 @@ export async function registerOrRecognizeCloudProfile(
       streakDays: newProfile.stats.streakDays,
       updatedAt: serverTimestamp(),
     });
+    batch.set(doc(db, 'user_directory', newProfile.id), buildUserDirectoryPayload(newProfile));
     await batch.commit();
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
@@ -557,13 +618,24 @@ export async function updateCloudProfile(
         detailPatch.isAddressPublic = Boolean(updates.isAddressPublic);
       }
 
+      const mergedProfile: UserProfile = {
+        ...profile,
+        ...updates,
+        stats: sanitizeStats(updates.stats || profile.stats),
+      };
       const batch = writeBatch(db);
       batch.update(profileRef, detailPatch);
       batch.update(indexRef, { lastLoginAt: serverTimestamp() });
+      batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
     }
 
     if (hasStatsUpdate) {
+      const mergedProfile: UserProfile = {
+        ...profile,
+        ...updates,
+        stats: sanitizeStats(updates.stats),
+      };
       const batch = writeBatch(db);
       batch.update(profileRef, {
         stats: sanitizeStats(updates.stats),
@@ -572,6 +644,7 @@ export async function updateCloudProfile(
         lastActiveAt: serverTimestamp(),
       });
       batch.update(indexRef, { lastLoginAt: serverTimestamp() });
+      batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
     }
   } catch (err: any) {
@@ -598,9 +671,15 @@ export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<vo
         profile
       );
     } else {
-      const lbSnap = await fetchDocServerFirst(['leaderboard', profile.id]);
+      const [lbSnap, dirSnap] = await Promise.all([
+        fetchDocServerFirst(['leaderboard', profile.id]),
+        fetchDocServerFirst(['user_directory', profile.id]),
+      ]);
       if (!lbSnap.exists()) {
         await syncLeaderboardEntry(profile);
+      }
+      if (!dirSnap.exists()) {
+        await setDoc(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(profile));
       }
     }
   } catch (err) {
@@ -862,5 +941,529 @@ export async function deleteCloudProfileAsAdmin(profile: UserProfile): Promise<v
     }
     throw err;
   }
+}
+
+// ============================================================================
+// APP-WIDE USER DIRECTORY & SEARCH
+// ============================================================================
+
+function directoryDocToUserProfile(data: Record<string, any>): UserProfile {
+  const fullName = String(data.fullName || 'JIT Member');
+  const phoneLast4 = typeof data.phoneLast4 === 'string' && data.phoneLast4 ? data.phoneLast4 : '';
+  return {
+    id: String(data.profileId || ''),
+    contactNumber: phoneLast4 ? `******${phoneLast4}` : 'Private',
+    fullName,
+    username: deriveUsername(fullName, undefined, typeof data.username === 'string' ? data.username : undefined),
+    address: String(data.address || 'JIT Campus'),
+    bio: typeof data.bio === 'string' ? data.bio : '',
+    avatarUrl: sanitizeAvatarUrl(typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
+    joinedAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString(),
+    lastLogin: new Date().toISOString(),
+    isContactNumberPublic: false,
+    isAddressPublic: true,
+    stats: sanitizeStats({
+      rewardPoints: Number(data.rewardPoints ?? 100),
+      gamesWon: Number(data.gamesWon ?? 0),
+    }),
+  };
+}
+
+export async function getCloudProfileById(profileId: string): Promise<UserProfile | null> {
+  if (!profileId || profileId.length < 8) return null;
+  try {
+    const snap = await fetchDocServerFirst(['profiles', profileId]);
+    if (snap.exists()) {
+      const profile = firestoreDocToUserProfile(snap.data());
+      if (profile.status !== 'deleted') return profile;
+    }
+  } catch {
+    // fallback to directory
+  }
+  try {
+    const dirSnap = await fetchDocServerFirst(['user_directory', profileId]);
+    if (dirSnap.exists()) {
+      return directoryDocToUserProfile(dirSnap.data());
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+export async function fetchPublicDirectory(maxEntries = 60): Promise<UserProfile[]> {
+  try {
+    const q = query(
+      collection(db, 'user_directory'),
+      where('rewardPoints', '>=', 0),
+      limit(maxEntries)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => directoryDocToUserProfile({ profileId: d.id, ...d.data() }));
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.LIST, 'user_directory');
+    }
+    console.warn('Public directory fetch notice:', err);
+    return [];
+  }
+}
+
+/**
+ * Case-insensitive search across registered Firebase users matching:
+ * displayName (fullName), username (@handle), or phone number.
+ */
+export async function searchCloudUsers(queryStr: string, maxResults = 30): Promise<UserProfile[]> {
+  const raw = (queryStr || '').trim();
+  const qLower = raw.toLowerCase().replace(/^@+/, '');
+  const digits = normalizeDigitsOnly(raw);
+
+  const byId = new Map<string, UserProfile>();
+
+  // 1. Exact phone lookup if 7+ digits entered (finds any Firebase user even across devices)
+  if (digits.length >= 7) {
+    try {
+      const phoneRes = await lookupCloudProfileByPhone(raw);
+      if (phoneRes.found && phoneRes.profile) {
+        byId.set(phoneRes.profile.id, phoneRes.profile);
+      }
+    } catch {
+      // non-fatal
+    }
+  }
+
+  // 2. Query Firestore public user_directory
+  try {
+    const dirUsers = await fetchPublicDirectory(100);
+    for (const u of dirUsers) {
+      if (!qLower) {
+        byId.set(u.id, u);
+        continue;
+      }
+      const nameMatch = u.fullName.toLowerCase().includes(qLower);
+      const userMatch = (u.username || deriveUsername(u.fullName)).toLowerCase().includes(qLower);
+      const bioMatch = (u.bio || '').toLowerCase().includes(qLower);
+      const addrMatch = (u.address || '').toLowerCase().includes(qLower);
+      const phoneMatch = digits.length >= 4 && normalizeDigitsOnly(u.contactNumber).includes(digits.slice(-4));
+      if (nameMatch || userMatch || bioMatch || addrMatch || phoneMatch) {
+        if (!byId.has(u.id)) {
+          byId.set(u.id, u);
+        }
+      }
+    }
+  } catch {
+    // fallback continues
+  }
+
+  // 3. Also query backend /api/users/search when available (captures profiles with full phone match)
+  if (typeof fetch === 'function') {
+    try {
+      const res = await fetch(`/api/users/search?q=${encodeURIComponent(raw)}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.users)) {
+          for (const u of data.users as UserProfile[]) {
+            if (u?.id && !byId.has(u.id)) {
+              byId.set(u.id, u);
+            }
+          }
+        }
+      }
+    } catch {
+      // Static Vercel deployment fallback ignores missing /api
+    }
+  }
+
+  return Array.from(byId.values()).slice(0, maxResults);
+}
+
+// ============================================================================
+// REAL-TIME 4-DIGIT MULTIPLAYER GAME ROOMS (FIRESTORE + ONSNAPSHOT)
+// ============================================================================
+
+function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
+  let players: RoomPlayer[] = [];
+  let gameState: any = null;
+  let messages: InGameChatMessage[] = [];
+  try {
+    players = typeof data.playersJson === 'string' ? JSON.parse(data.playersJson) : [];
+  } catch {
+    players = [];
+  }
+  try {
+    const parsedState = typeof data.gameStateJson === 'string' ? JSON.parse(data.gameStateJson) : null;
+    gameState = parsedState && Object.keys(parsedState).length > 0 ? parsedState : null;
+  } catch {
+    gameState = null;
+  }
+  try {
+    messages = typeof data.messagesJson === 'string' ? JSON.parse(data.messagesJson) : [];
+  } catch {
+    messages = [];
+  }
+
+  const createdMs =
+    data.createdAt && typeof data.createdAt.toMillis === 'function'
+      ? data.createdAt.toMillis()
+      : Date.now();
+
+  return {
+    roomCode: String(data.roomCode || ''),
+    gameId: String(data.gameId || 'tictactoe'),
+    hostId: String(data.hostId || ''),
+    createdAt: createdMs,
+    status: (data.status as MultiplayerRoom['status']) || 'waiting',
+    maxPlayers: Number(data.maxPlayers || 2),
+    isPublicMatch: Boolean(data.isPublicMatch),
+    players,
+    gameState,
+    currentTurn: String(data.currentTurn || ''),
+    messages,
+    callState: null,
+  };
+}
+
+export async function createFirestoreGameRoom(
+  gameId: string,
+  maxPlayers: number,
+  hostPlayer: { id: string; name: string; avatar: string },
+  isPublicMatch = false
+): Promise<MultiplayerRoom> {
+  const safeMax = Math.min(4, Math.max(2, maxPlayers));
+  let chosenCode = '';
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const candidate = Math.floor(1000 + Math.random() * 9000).toString();
+    try {
+      const snap = await getDocFromServer(doc(db, 'gameRooms', candidate));
+      if (!snap.exists()) {
+        chosenCode = candidate;
+        break;
+      }
+    } catch {
+      chosenCode = candidate;
+      break;
+    }
+  }
+  if (!chosenCode) {
+    chosenCode = Math.floor(1000 + Math.random() * 9000).toString();
+  }
+
+  const players: RoomPlayer[] = [
+    {
+      id: hostPlayer.id,
+      name: hostPlayer.name.slice(0, 80),
+      avatar: sanitizeAvatarUrl(hostPlayer.avatar),
+      isHost: true,
+      isReady: true,
+      color: 'Red',
+    },
+  ];
+
+  const payload = {
+    roomCode: chosenCode,
+    gameId,
+    hostId: hostPlayer.id,
+    status: 'waiting',
+    maxPlayers: safeMax,
+    playerCount: 1,
+    isPublicMatch,
+    playersJson: JSON.stringify(players),
+    gameStateJson: '{}',
+    messagesJson: '[]',
+    moveAction: 'ROOM_CREATED',
+    currentTurn: hostPlayer.id,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'gameRooms', chosenCode), payload);
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.CREATE, `gameRooms/${chosenCode}`);
+    }
+    throw err;
+  }
+
+  return {
+    roomCode: chosenCode,
+    gameId,
+    hostId: hostPlayer.id,
+    createdAt: Date.now(),
+    status: 'waiting',
+    maxPlayers: safeMax,
+    isPublicMatch,
+    players,
+    gameState: null,
+    currentTurn: hostPlayer.id,
+    messages: [],
+    callState: null,
+  };
+}
+
+export async function joinFirestoreGameRoom(
+  roomCode: string,
+  gameId: string,
+  player: { id: string; name: string; avatar: string }
+): Promise<MultiplayerRoom> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) {
+    throw new Error('Please enter a valid 4-digit room code.');
+  }
+
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const snap = await fetchDocServerFirst(['gameRooms', cleanCode]);
+  if (!snap.exists()) {
+    throw new Error(`Room #${cleanCode} not found. Please verify the 4-digit code.`);
+  }
+
+  const data = snap.data();
+  if (data.gameId !== gameId) {
+    throw new Error(`Room #${cleanCode} is for ${String(data.gameId || '').toUpperCase()}, not ${gameId.toUpperCase()}.`);
+  }
+
+  const parsed = parseRoomSnapshotData(data);
+  const alreadyJoined = parsed.players.some((p) => p.id === player.id);
+  if (alreadyJoined) {
+    return parsed;
+  }
+
+  if (parsed.players.length >= parsed.maxPlayers) {
+    throw new Error(`Room #${cleanCode} is full (max ${parsed.maxPlayers} players).`);
+  }
+
+  const seatColors = ['Red', 'Yellow', 'Green', 'Blue'];
+  const nextPlayers: RoomPlayer[] = [
+    ...parsed.players,
+    {
+      id: player.id,
+      name: player.name.slice(0, 80),
+      avatar: sanitizeAvatarUrl(player.avatar),
+      isHost: false,
+      isReady: true,
+      color: seatColors[parsed.players.length % seatColors.length],
+    },
+  ];
+
+  const nextStatus =
+    parsed.isPublicMatch && nextPlayers.length >= parsed.maxPlayers ? 'in_game' : parsed.status;
+
+  try {
+    await updateDoc(roomRef, {
+      playersJson: JSON.stringify(nextPlayers),
+      playerCount: nextPlayers.length,
+      hostId: parsed.hostId,
+      status: nextStatus,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    throw err;
+  }
+
+  return {
+    ...parsed,
+    status: nextStatus,
+    players: nextPlayers,
+  };
+}
+
+export async function quickMatchFirestoreRoom(
+  gameId: string,
+  maxPlayers: number,
+  player: { id: string; name: string; avatar: string }
+): Promise<{ room: MultiplayerRoom; matchedExisting: boolean }> {
+  try {
+    const q = query(
+      collection(db, 'gameRooms'),
+      where('isPublicMatch', '==', true),
+      where('status', '==', 'waiting'),
+      where('gameId', '==', gameId),
+      limit(10)
+    );
+    const snap = await getDocs(q);
+    for (const d of snap.docs) {
+      const parsed = parseRoomSnapshotData(d.data());
+      if (
+        parsed.players.length < parsed.maxPlayers &&
+        !parsed.players.some((p) => p.id === player.id)
+      ) {
+        const joined = await joinFirestoreGameRoom(parsed.roomCode, gameId, player);
+        return { room: joined, matchedExisting: true };
+      }
+    }
+  } catch {
+    // Create new public waiting room if query requires index or none found
+  }
+
+  const created = await createFirestoreGameRoom(gameId, maxPlayers, player, true);
+  return { room: created, matchedExisting: false };
+}
+
+export async function startFirestoreGameRoom(
+  roomCode: string,
+  initialGameState: Record<string, any>,
+  firstTurnId: string
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  try {
+    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+      status: 'in_game',
+      gameStateJson: JSON.stringify({ ...initialGameState, _seq: Date.now() }),
+      currentTurn: firstTurnId,
+      moveAction: 'GAME_START',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    throw err;
+  }
+}
+
+export async function pushFirestoreGameMove(
+  roomCode: string,
+  moveAction: string,
+  newGameState: Record<string, any>,
+  nextTurnId?: string,
+  status: 'in_game' | 'finished' = 'in_game'
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  try {
+    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+      gameStateJson: JSON.stringify({ ...newGameState, _seq: Date.now() }),
+      moveAction: String(moveAction).slice(0, 40),
+      currentTurn: String(nextTurnId || '').slice(0, 64),
+      status,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    console.warn('Firestore pushGameMove notice:', err);
+  }
+}
+
+export async function rematchFirestoreGameRoom(
+  roomCode: string,
+  resetState: Record<string, any>,
+  firstTurnId: string
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  try {
+    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+      status: 'in_game',
+      gameStateJson: JSON.stringify({ ...resetState, _seq: Date.now() }),
+      moveAction: 'REMATCH',
+      currentTurn: String(firstTurnId || '').slice(0, 64),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    console.warn('Firestore rematchGameRoom notice:', err);
+  }
+}
+
+export async function sendFirestoreRoomChat(
+  roomCode: string,
+  msg: Omit<InGameChatMessage, 'id' | 'roomCode' | 'timestamp'>
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  try {
+    const snap = await getDoc(roomRef);
+    if (!snap.exists()) return;
+    const parsed = parseRoomSnapshotData(snap.data());
+    const formatted: InGameChatMessage = {
+      id: `gmsg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      roomCode: cleanCode,
+      senderId: msg.senderId,
+      senderName: msg.senderName,
+      senderAvatar: sanitizeAvatarUrl(msg.senderAvatar),
+      ...(msg.text ? { text: msg.text.slice(0, 1000) } : {}),
+      ...(msg.imageUrl ? { imageUrl: msg.imageUrl } : {}),
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    const nextMessages = [...parsed.messages, formatted].slice(-50);
+    await updateDoc(roomRef, {
+      messagesJson: JSON.stringify(nextMessages),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    console.warn('Firestore room chat notice:', err);
+  }
+}
+
+export async function kickOrLeaveFirestoreRoom(
+  roomCode: string,
+  targetPlayerId: string
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  try {
+    const snap = await getDoc(roomRef);
+    if (!snap.exists()) return;
+    const parsed = parseRoomSnapshotData(snap.data());
+    const remaining = parsed.players.filter((p) => p.id !== targetPlayerId);
+    if (remaining.length === 0) {
+      await deleteDoc(roomRef);
+      return;
+    }
+    const nextHostId = parsed.hostId === targetPlayerId ? remaining[0].id : parsed.hostId;
+    const updatedPlayers = remaining.map((p) => ({
+      ...p,
+      isHost: p.id === nextHostId,
+    }));
+    await updateDoc(roomRef, {
+      playersJson: JSON.stringify(updatedPlayers),
+      playerCount: updatedPlayers.length,
+      hostId: nextHostId,
+      status: parsed.status,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    console.warn('Firestore leave/kick notice:', err);
+  }
+}
+
+export function subscribeToGameRoom(
+  roomCode: string,
+  onRoomUpdate: (room: MultiplayerRoom, moveAction: string) => void,
+  onRoomDeleted?: () => void
+): Unsubscribe {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  return onSnapshot(
+    doc(db, 'gameRooms', cleanCode),
+    (snap) => {
+      if (!snap.exists()) {
+        onRoomDeleted?.();
+        return;
+      }
+      const data = snap.data();
+      const room = parseRoomSnapshotData(data);
+      onRoomUpdate(room, String(data.moveAction || ''));
+    },
+    (err) => {
+      console.warn('Game room onSnapshot error:', err);
+    }
+  );
 }
 

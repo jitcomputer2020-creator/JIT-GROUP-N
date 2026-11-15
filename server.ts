@@ -649,6 +649,77 @@ app.get('/api/profiles', (req, res) => {
   res.json({ profiles });
 });
 
+// 1b. Case-insensitive app-wide user search across Firebase & local mirror (name, username, or phone)
+app.get('/api/users/search', async (req, res) => {
+  const raw = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const qLower = raw.toLowerCase().replace(/^@+/, '');
+  const qDigits = normalizeDigits(raw);
+
+  try {
+    const cloudResult = await fetchAllCloudProfilesForAdmin().catch(() => ({
+      profiles: [] as any[],
+      firebaseCount: 0,
+    }));
+    const cloudProfiles = Array.isArray(cloudResult?.profiles) ? cloudResult.profiles : [];
+    const localProfiles = readProfiles();
+    const merged = [...cloudProfiles, ...localProfiles, INITIAL_USER, ...INITIAL_FRIENDS];
+    const seen = new Set<string>();
+    const results: any[] = [];
+
+    for (const p of merged) {
+      if (!p || !p.id || p.status === 'deleted' || seen.has(p.id)) continue;
+      seen.add(p.id);
+
+      const name = String(p.fullName || '');
+      const slugBase = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const pDigits = normalizeDigits(p.contactNumber || '');
+      const derivedUsername = String(
+        p.username || `${slugBase || 'jit_member'}${pDigits.length >= 4 ? `_${pDigits.slice(-2)}` : ''}`
+      );
+
+      const matches =
+        !qLower ||
+        name.toLowerCase().includes(qLower) ||
+        derivedUsername.toLowerCase().includes(qLower) ||
+        (p.bio || '').toLowerCase().includes(qLower) ||
+        (p.address || '').toLowerCase().includes(qLower) ||
+        (qDigits.length >= 4 && pDigits.includes(qDigits));
+
+      if (matches) {
+        results.push({
+          id: p.id,
+          fullName: p.fullName,
+          username: derivedUsername,
+          avatarUrl: p.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
+          bio: p.bio || '',
+          address: p.address || 'JIT Campus',
+          contactNumber: p.isContactNumberPublic ? p.contactNumber : (pDigits.length >= 4 ? `******${pDigits.slice(-4)}` : 'Private'),
+          joinedAt: p.joinedAt,
+          lastLoginAt: p.lastLoginAt || p.joinedAt,
+          isContactNumberPublic: Boolean(p.isContactNumberPublic),
+          isAddressPublic: Boolean(p.isAddressPublic),
+          stats: p.stats || {
+            friendsCount: 0,
+            followersCount: 0,
+            followingCount: 0,
+            postsCount: 0,
+            reelsCount: 0,
+            gamesPlayed: 0,
+            gamesWon: 0,
+            rewardPoints: 100,
+            streakDays: 1,
+          },
+        });
+      }
+    }
+
+    res.json({ users: results.slice(0, 30) });
+  } catch (err) {
+    console.error('Error in /api/users/search:', err);
+    res.status(500).json({ users: [] });
+  }
+});
+
 // ----------------------------------------------------------------------------
 // Persistent Chats, Posts & Global Announcements Stores (data/*.json)
 // ----------------------------------------------------------------------------
@@ -1301,14 +1372,15 @@ app.get('/api/games/history', async (req, res) => {
 // ----------------------------------------------------------------------------
 
 const ADMIN_CONFIG_FILE = path.join(DATA_DIR, 'admin-config.json');
-const DEFAULT_ADMIN_PIN = process.env.ADMIN_PIN || 'ADMIN1234';
+const MASTER_ADMIN_PHONE = '8071462677';
+const ADMIN_PHONE_AUTH_VERSION = 2;
 const ADMIN_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 interface AdminConfig {
   pinHash: string;
   salt: string;
   sessionSecret: string;
-  isDefaultPin: boolean;
+  phoneAuthVersion?: number;
   updatedAt: string;
 }
 
@@ -1320,7 +1392,12 @@ function readAdminConfig(): AdminConfig {
   try {
     if (fs.existsSync(ADMIN_CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(ADMIN_CONFIG_FILE, 'utf-8'));
-      if (parsed?.pinHash && parsed?.salt && parsed?.sessionSecret) {
+      if (
+        parsed?.pinHash &&
+        parsed?.salt &&
+        parsed?.sessionSecret &&
+        parsed?.phoneAuthVersion === ADMIN_PHONE_AUTH_VERSION
+      ) {
         return parsed;
       }
     }
@@ -1331,10 +1408,10 @@ function readAdminConfig(): AdminConfig {
   const salt = crypto.randomBytes(16).toString('hex');
   const sessionSecret = crypto.randomBytes(32).toString('hex');
   const initialConfig: AdminConfig = {
-    pinHash: hashPin(DEFAULT_ADMIN_PIN, salt),
+    pinHash: hashPin(MASTER_ADMIN_PHONE, salt),
     salt,
     sessionSecret,
-    isDefaultPin: true,
+    phoneAuthVersion: ADMIN_PHONE_AUTH_VERSION,
     updatedAt: new Date().toISOString(),
   };
   try {
@@ -1345,15 +1422,11 @@ function readAdminConfig(): AdminConfig {
   return initialConfig;
 }
 
-function writeAdminConfig(config: AdminConfig): void {
-  fs.writeFileSync(ADMIN_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
-}
-
-function verifyPinMatch(candidatePin: string, config: AdminConfig): boolean {
-  const candidateHash = Buffer.from(hashPin(candidatePin, config.salt), 'hex');
-  const expectedHash = Buffer.from(config.pinHash, 'hex');
-  if (candidateHash.length !== expectedHash.length) return false;
-  return crypto.timingSafeEqual(candidateHash, expectedHash);
+function verifyMasterAdminPhone(candidate: string): boolean {
+  const inputBuf = Buffer.from(candidate, 'utf-8');
+  const expectedBuf = Buffer.from(MASTER_ADMIN_PHONE, 'utf-8');
+  if (inputBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(inputBuf, expectedBuf);
 }
 
 function signAdminToken(config: AdminConfig): { token: string; expiresAt: number } {
@@ -1410,17 +1483,19 @@ app.post('/api/admin/auth', (req, res) => {
     const waitSec = Math.ceil((limitEntry.lockedUntil - now) / 1000);
     return res.status(429).json({
       success: false,
-      error: `Too many incorrect PIN attempts. Please wait ${waitSec}s before trying again.`,
+      error: `Too many incorrect attempts. Please wait ${waitSec}s before trying again.`,
     });
   }
 
-  const pin = typeof req.body?.pin === 'string' ? req.body.pin.trim() : '';
-  if (!pin) {
-    return res.status(400).json({ success: false, error: 'Administrator PIN is required.' });
-  }
+  const rawCode =
+    typeof req.body?.phone === 'string'
+      ? req.body.phone
+      : typeof req.body?.pin === 'string'
+      ? req.body.pin
+      : '';
+  const accessCode = rawCode.trim();
 
-  const config = readAdminConfig();
-  if (!verifyPinMatch(pin, config)) {
+  if (!accessCode || !verifyMasterAdminPhone(accessCode)) {
     const nextFailures = (limitEntry?.failures || 0) + 1;
     adminRateLimiter.set(ip, {
       failures: nextFailures >= 5 ? 0 : nextFailures,
@@ -1428,17 +1503,17 @@ app.post('/api/admin/auth', (req, res) => {
     });
     return res.status(401).json({
       success: false,
-      error: 'Access denied. Invalid administrator PIN.',
+      error: 'Invalid Admin Access Code',
     });
   }
 
   adminRateLimiter.delete(ip);
+  const config = readAdminConfig();
   const { token, expiresAt } = signAdminToken(config);
   return res.json({
     success: true,
     token,
     expiresAt,
-    isDefaultPin: config.isDefaultPin,
   });
 });
 
@@ -1451,42 +1526,13 @@ app.get('/api/admin/session', (req, res) => {
   return res.json({
     authenticated: true,
     expiresAt: check.expiresAt,
-    isDefaultPin: config.isDefaultPin,
   });
 });
 
 app.post('/api/admin/change-pin', (req, res) => {
-  const config = readAdminConfig();
-  const check = verifyAdminToken(extractBearerToken(req), config);
-  if (!check.valid) {
-    return res.status(401).json({ success: false, error: 'Unauthorized administrator session.' });
-  }
-
-  const currentPin = typeof req.body?.currentPin === 'string' ? req.body.currentPin.trim() : '';
-  const newPin = typeof req.body?.newPin === 'string' ? req.body.newPin.trim() : '';
-
-  if (!verifyPinMatch(currentPin, config)) {
-    return res.status(403).json({ success: false, error: 'Current administrator PIN is incorrect.' });
-  }
-  if (newPin.length < 4 || newPin.length > 64) {
-    return res.status(400).json({ success: false, error: 'New PIN must be between 4 and 64 characters.' });
-  }
-
-  const nextSalt = crypto.randomBytes(16).toString('hex');
-  const nextConfig: AdminConfig = {
-    pinHash: hashPin(newPin, nextSalt),
-    salt: nextSalt,
-    sessionSecret: config.sessionSecret,
-    isDefaultPin: newPin === DEFAULT_ADMIN_PIN,
-    updatedAt: new Date().toISOString(),
-  };
-  writeAdminConfig(nextConfig);
-  const { token, expiresAt } = signAdminToken(nextConfig);
-  return res.json({
-    success: true,
-    token,
-    expiresAt,
-    isDefaultPin: nextConfig.isDefaultPin,
+  return res.status(403).json({
+    success: false,
+    error: 'Administrator access is permanently locked to the authorized owner phone number.',
   });
 });
 
@@ -1496,7 +1542,7 @@ function requireAdminSession(req: express.Request, res: express.Response): boole
   if (!check.valid) {
     res.status(401).json({
       success: false,
-      error: 'Administrator PIN authentication required.',
+      error: 'Invalid Admin Access Code',
     });
     return false;
   }

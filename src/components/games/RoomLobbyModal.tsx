@@ -47,8 +47,33 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
   const canStart = isHost && room.players.length >= 2;
   const gameInfo = APP_CONFIG.games.find((g) => g.id === room.gameId);
 
-  const handleCopyCode = () => {
-    navigator.clipboard.writeText(room.roomCode);
+  const copyTextSafe = async (value: string) => {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(value);
+        return true;
+      }
+    } catch {
+      // Fallback below
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleCopyCode = async () => {
+    await copyTextSafe(room.roomCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -69,7 +94,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
         // Fallback to clipboard
       }
     }
-    navigator.clipboard.writeText(`${inviteText} - ${window.location.origin}/#room-${room.roomCode}`);
+    await copyTextSafe(`${inviteText} - ${window.location.origin}/#room-${room.roomCode}`);
     setShareSuccess(true);
     setTimeout(() => setShareSuccess(false), 2000);
   };

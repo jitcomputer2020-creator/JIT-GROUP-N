@@ -21,6 +21,7 @@ import {
   ShieldAlert,
   Check,
   AlertCircle,
+  Loader2,
 } from 'lucide-react';
 
 interface GameModeSelectModalProps {
@@ -32,6 +33,7 @@ interface GameModeSelectModalProps {
   onPlayRandom: () => void;
   onPlayAI: (difficulty: AIDifficulty) => void;
   joinError?: string | null;
+  isSubmitting?: boolean;
 }
 
 export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
@@ -43,6 +45,7 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
   onPlayRandom,
   onPlayAI,
   joinError,
+  isSubmitting = false,
 }) => {
   const [selectedTab, setSelectedTab] = useState<GameMode>('friend');
   const [friendAction, setFriendAction] = useState<'create' | 'join'>('create');
@@ -182,11 +185,12 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
                 </p>
                 <button
                   type="button"
+                  disabled={isSubmitting}
                   onClick={onCreateFriendRoom}
-                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 active:scale-[0.99] text-white font-bold text-xs rounded-2xl shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2 transition-all"
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 active:scale-[0.99] text-white font-bold text-xs rounded-2xl shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2 transition-all"
                 >
-                  <Sparkles className="w-4 h-4" />
-                  <span>Create Room & Get 4-Digit Code</span>
+                  {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  <span>{isSubmitting ? 'Creating 4-Digit Room...' : 'Create Room & Get 4-Digit Code'}</span>
                 </button>
               </div>
             ) : (
@@ -213,10 +217,11 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
                   />
                   <button
                     type="submit"
-                    disabled={enteredCode.length !== 4}
-                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-40 text-white font-bold text-xs rounded-2xl shadow-md transition-all shrink-0"
+                    disabled={enteredCode.length !== 4 || isSubmitting}
+                    className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-40 text-white font-bold text-xs rounded-2xl shadow-md transition-all shrink-0 flex items-center gap-1.5"
                   >
-                    Join Room
+                    {isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    <span>{isSubmitting ? 'Joining...' : 'Join Room'}</span>
                   </button>
                 </div>
               </form>
@@ -236,11 +241,12 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
             </p>
             <button
               type="button"
+              disabled={isSubmitting}
               onClick={onPlayRandom}
-              className="w-full py-3 bg-purple-600 hover:bg-purple-700 active:scale-[0.99] text-white font-bold text-xs rounded-2xl shadow-lg shadow-purple-500/25 flex items-center justify-center gap-2 transition-all"
+              className="w-full py-3 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 active:scale-[0.99] text-white font-bold text-xs rounded-2xl shadow-lg shadow-purple-500/25 flex items-center justify-center gap-2 transition-all"
             >
-              <Play className="w-4 h-4 fill-white" />
-              <span>Find Opponent & Match</span>
+              {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-white" />}
+              <span>{isSubmitting ? 'Finding Match...' : 'Find Opponent & Match'}</span>
             </button>
           </div>
         )}

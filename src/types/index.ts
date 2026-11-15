@@ -24,6 +24,7 @@ export interface UserProfile {
   id: string; // Permanent UUID
   contactNumber: string; // Private by default
   fullName: string;
+  username?: string; // Searchable handle without '@'
   address: string; // Private by default
   bio?: string;
   avatarUrl?: string;

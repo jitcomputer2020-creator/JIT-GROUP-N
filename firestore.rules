@@ -63,13 +63,17 @@ service cloud.firestore {
         stats.streakDays is int && stats.streakDays >= 0;
     }
 
+    function isValidRoomCode(roomCode) {
+      return roomCode is string && roomCode.size() == 4 && roomCode.matches('^[0-9]{4}$');
+    }
+
     function isValidProfileSchema(data, profileId) {
       return data.keys().hasAll([
           'id', 'contactNumber', 'phoneKey', 'fullName', 'address',
           'joinedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt', 'stats'
         ]) &&
         data.keys().hasOnly([
-          'id', 'contactNumber', 'phoneKey', 'fullName', 'address',
+          'id', 'contactNumber', 'phoneKey', 'fullName', 'username', 'address',
           'bio', 'avatarUrl', 'coverUrl', 'joinedAt', 'lastLoginAt',
           'lastLogin', 'lastActiveAt', 'isContactNumberPublic',
           'isAddressPublic', 'status', 'suspendedReason', 'suspendedAt', 'stats'
@@ -79,6 +83,7 @@ service cloud.firestore {
         data.contactNumber is string && data.contactNumber.size() >= 7 && data.contactNumber.size() <= 30 &&
         isValidPhoneKey(data.phoneKey) &&
         data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        (!('username' in data) || (data.username is string && data.username.size() >= 2 && data.username.size() <= 64)) &&
         data.address is string && data.address.size() >= 1 && data.address.size() <= 300 &&
         (!('bio' in data) || (data.bio is string && data.bio.size() <= 500)) &&
         (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
@@ -109,7 +114,9 @@ service cloud.firestore {
         // Action-based update branches
         (
           incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'address', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'address', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'stats', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'suspendedReason', 'suspendedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
@@ -187,6 +194,79 @@ service cloud.firestore {
         data.createdAtTs == request.time;
     }
 
+    function isValidUserDirectoryEntry(data, profileId) {
+      return data.keys().hasAll([
+          'profileId', 'fullName', 'fullNameLower', 'username', 'usernameLower',
+          'rewardPoints', 'gamesWon', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'profileId', 'fullName', 'fullNameLower', 'username', 'usernameLower',
+          'avatarUrl', 'bio', 'address', 'phoneLast4', 'rewardPoints', 'gamesWon', 'updatedAt'
+        ]) &&
+        isValidId(data.profileId) &&
+        data.profileId == profileId &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.fullNameLower is string && data.fullNameLower.size() >= 1 && data.fullNameLower.size() <= 120 &&
+        data.username is string && data.username.size() >= 2 && data.username.size() <= 64 &&
+        data.usernameLower is string && data.usernameLower.size() >= 2 && data.usernameLower.size() <= 64 &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
+        (!('bio' in data) || (data.bio is string && data.bio.size() <= 500)) &&
+        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
+        (!('phoneLast4' in data) || (data.phoneLast4 is string && data.phoneLast4.size() <= 4)) &&
+        data.rewardPoints is int && data.rewardPoints >= 0 && data.rewardPoints <= 1000000 &&
+        data.gamesWon is int && data.gamesWon >= 0 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidGameRoomSchema(data, roomCode) {
+      return data.keys().hasAll([
+          'roomCode', 'gameId', 'hostId', 'status', 'maxPlayers', 'playerCount',
+          'isPublicMatch', 'playersJson', 'gameStateJson', 'messagesJson',
+          'currentTurn', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'roomCode', 'gameId', 'hostId', 'status', 'maxPlayers', 'playerCount',
+          'isPublicMatch', 'playersJson', 'gameStateJson', 'messagesJson',
+          'moveAction', 'currentTurn', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidRoomCode(data.roomCode) &&
+        data.roomCode == roomCode &&
+        data.gameId is string && data.gameId in ['ludo', 'tictactoe', 'quiz', 'chess', 'snake_ladder', 'carrom'] &&
+        isValidId(data.hostId) &&
+        data.status in ['waiting', 'in_game', 'finished'] &&
+        data.maxPlayers is int && data.maxPlayers >= 2 && data.maxPlayers <= 4 &&
+        data.playerCount is int && data.playerCount >= 1 && data.playerCount <= data.maxPlayers &&
+        data.isPublicMatch is bool &&
+        data.playersJson is string && data.playersJson.size() >= 2 && data.playersJson.size() <= 30000 &&
+        data.gameStateJson is string && data.gameStateJson.size() >= 2 && data.gameStateJson.size() <= 100000 &&
+        data.messagesJson is string && data.messagesJson.size() >= 2 && data.messagesJson.size() <= 100000 &&
+        (!('moveAction' in data) || (data.moveAction is string && data.moveAction.size() <= 40)) &&
+        data.currentTurn is string && data.currentTurn.size() <= 64 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidGameRoomCreate(data, roomCode) {
+      return isValidGameRoomSchema(data, roomCode) &&
+        data.status == 'waiting' &&
+        data.playerCount == 1 &&
+        data.createdAt == request.time;
+    }
+
+    function isValidGameRoomUpdate(data, prev, roomCode) {
+      return isValidGameRoomSchema(data, roomCode) &&
+        data.roomCode == prev.roomCode &&
+        data.gameId == prev.gameId &&
+        data.createdAt == prev.createdAt &&
+        data.maxPlayers == prev.maxPlayers &&
+        data.isPublicMatch == prev.isPublicMatch &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['playersJson', 'playerCount', 'hostId', 'status', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'gameStateJson', 'currentTurn', 'moveAction', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['gameStateJson', 'moveAction', 'currentTurn', 'status', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['messagesJson', 'updatedAt'])
+        );
+    }
+
     // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
@@ -237,6 +317,25 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
       allow list: if false;
       allow create, update, delete: if false;
+    }
+
+    // 8. Public Non-PII User Search Directory
+    match /user_directory/{profileId} {
+      allow get: if isValidId(profileId);
+      allow list: if existing().rewardPoints >= 0;
+      allow create, update: if isValidId(profileId) &&
+        isValidUserDirectoryEntry(incoming(), profileId) &&
+        existsAfter(/databases/$(database)/documents/profiles/$(profileId));
+      allow delete: if isAdmin();
+    }
+
+    // 9. Real-Time 4-Digit Multiplayer Game Rooms (private rooms accessible by exact 4-digit code)
+    match /gameRooms/{roomCode} {
+      allow get: if isValidRoomCode(roomCode);
+      allow list: if existing().isPublicMatch == true && existing().status == 'waiting';
+      allow create: if isValidRoomCode(roomCode) && isValidGameRoomCreate(incoming(), roomCode);
+      allow update: if isValidRoomCode(roomCode) && isValidGameRoomUpdate(incoming(), existing(), roomCode);
+      allow delete: if isValidRoomCode(roomCode) && existing().playerCount <= 1;
     }
   }
 }

@@ -47,6 +47,7 @@ export interface MultiplayerRoom {
   createdAt: number;
   status: 'waiting' | 'in_game' | 'finished';
   maxPlayers: number;
+  isPublicMatch?: boolean;
   players: RoomPlayer[];
   gameState: any;
   currentTurn: string;

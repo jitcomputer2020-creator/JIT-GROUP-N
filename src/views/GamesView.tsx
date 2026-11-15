@@ -15,6 +15,17 @@ import { GameMode, AIDifficulty, MultiplayerRoom, InGameChatMessage } from '../t
 import { APP_CONFIG } from '../constants/branding';
 import { multiplayerSocket } from '../services/multiplayerSocket';
 import {
+  createFirestoreGameRoom,
+  joinFirestoreGameRoom,
+  quickMatchFirestoreRoom,
+  startFirestoreGameRoom,
+  pushFirestoreGameMove,
+  rematchFirestoreGameRoom,
+  sendFirestoreRoomChat,
+  kickOrLeaveFirestoreRoom,
+  subscribeToGameRoom,
+} from '../lib/firebase';
+import {
   checkTicTacToeWinner,
   getTicTacToeAIMove,
   getPieceColor,
@@ -110,8 +121,34 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   // Room state
   const [currentRoom, setCurrentRoom] = useState<MultiplayerRoom | null>(null);
+  const currentRoomRef = useRef<MultiplayerRoom | null>(null);
+  const roomUnsubRef = useRef<(() => void) | null>(null);
+  const lastRemoteSeqRef = useRef<number>(0);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [isRoomSubmitting, setIsRoomSubmitting] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
+
+  const guestPlayerId = useMemo(() => {
+    if (typeof window === 'undefined') return 'usr_jit_guest_001';
+    const existing = window.sessionStorage.getItem('jit_guest_player_id');
+    if (existing && existing.length >= 8) return existing;
+    const generated = `usr_guest_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    window.sessionStorage.setItem('jit_guest_player_id', generated);
+    return generated;
+  }, []);
+
+  const activePlayer = useMemo(
+    () => ({
+      id: currentUser?.id || guestPlayerId,
+      name: currentUser?.fullName || 'Campus Guest',
+      avatar: currentUser?.avatarUrl || APP_CONFIG.logoUrl,
+    }),
+    [currentUser?.id, currentUser?.fullName, currentUser?.avatarUrl, guestPlayerId]
+  );
+
+  useEffect(() => {
+    currentRoomRef.current = currentRoom;
+  }, [currentRoom]);
 
   // In-Game Chat & Call state
   const [chatMessages, setChatMessages] = useState<InGameChatMessage[]>([]);
@@ -182,13 +219,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [tttAiThinking, setTttAiThinking] = useState(false);
 
   // --------------------------------------------------------------------------
-  // GAME 2: LUDO STATE (4 players x 2 tokens each: -1=yard, 0..55=track, 56=home)
+  // GAME 2: LUDO STATE (4 players x 4 tokens each: -1=yard, 0..55=track, 56=home)
   // --------------------------------------------------------------------------
   const [ludoTokens, setLudoTokens] = useState<number[][]>([
-    [-1, -1],
-    [-1, -1],
-    [-1, -1],
-    [-1, -1],
+    [-1, -1, -1, -1],
+    [-1, -1, -1, -1],
+    [-1, -1, -1, -1],
+    [-1, -1, -1, -1],
   ]);
   const [ludoTurn, setLudoTurn] = useState<0 | 1 | 2 | 3>(0);
   const [ludoDice, setLudoDice] = useState(6);
@@ -246,6 +283,40 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [slFinished, setSlFinished] = useState(false);
   const [slMessage, setSlMessage] = useState<string>('Your turn (Blue 📍). Roll the die to start!');
 
+  // Ludo Seat Mapping: 2-player online rooms use Red (0) vs Yellow (2) opposite corners!
+  const ludoInactiveSeats = useMemo<number[]>(() => {
+    if (gameMode === 'ai' || !currentRoom) return [];
+    const count = currentRoom.players.length;
+    if (count <= 2) return [1, 3];
+    if (count === 3) return [3];
+    return [];
+  }, [gameMode, currentRoom]);
+
+  const myLudoSeat = useMemo<0 | 1 | 2 | 3>(() => {
+    if (gameMode === 'ai' || !currentRoom) return 0;
+    const idx = currentRoom.players.findIndex((p) => p.id === activePlayer.id);
+    if (idx <= 0) return 0;
+    if (currentRoom.players.length <= 2) return 2;
+    return (idx % 4) as 0 | 1 | 2 | 3;
+  }, [gameMode, currentRoom, activePlayer.id]);
+
+  const getNextActiveLudoTurn = useCallback(
+    (cur: 0 | 1 | 2 | 3): 0 | 1 | 2 | 3 => {
+      if (gameMode === 'ai' || !currentRoom) {
+        return (((cur + 1) % 4) as 0 | 1 | 2 | 3);
+      }
+      const count = currentRoom.players.length;
+      if (count <= 2) {
+        return cur === 0 ? 2 : 0;
+      }
+      if (count === 3) {
+        return cur === 0 ? 1 : cur === 1 ? 2 : 0;
+      }
+      return (((cur + 1) % 4) as 0 | 1 | 2 | 3);
+    },
+    [gameMode, currentRoom]
+  );
+
   // --------------------------------------------------------------------------
   // Reset helpers
   // --------------------------------------------------------------------------
@@ -258,16 +329,19 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setTttResult(null);
       setTttWinningLine(null);
       setTttAiThinking(false);
-      if (sync && currentRoom) {
-        multiplayerSocket.rematchGame(currentRoom.roomCode, {
+      if (sync && currentRoomRef.current) {
+        const room = currentRoomRef.current;
+        const resetState = {
           board: Array(9).fill(null),
           isXNext: true,
           result: null,
           line: null,
-        });
+        };
+        multiplayerSocket.rematchGame(room.roomCode, resetState);
+        rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
       }
     },
-    [clearAiTimers, currentRoom]
+    [clearAiTimers]
   );
 
   const resetLudo = useCallback(
@@ -275,10 +349,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       clearAiTimers();
       awardedMatchRef.current.ludo = false;
       const fresh = [
-        [-1, -1],
-        [-1, -1],
-        [-1, -1],
-        [-1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
       ];
       setLudoTokens(fresh);
       setLudoTurn(0);
@@ -289,16 +363,20 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setLudoConsecutiveSixes(0);
       setLudoWinner(null);
       setLudoLog(['Match reset! Roll 6 to bring a Red token out of the yard.']);
-      if (sync && currentRoom) {
-        multiplayerSocket.rematchGame(currentRoom.roomCode, {
+      if (sync && currentRoomRef.current) {
+        const room = currentRoomRef.current;
+        const resetState = {
           tokens: fresh,
           turn: 0,
           dice: 6,
+          log: ['Match reset! Roll 6 to bring a Red token out of the yard.'],
           winner: null,
-        });
+        };
+        multiplayerSocket.rematchGame(room.roomCode, resetState);
+        rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
       }
     },
-    [clearAiTimers, currentRoom]
+    [clearAiTimers]
   );
 
   const resetQuiz = useCallback(() => {
@@ -324,30 +402,176 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setChessWinner(null);
       setChessAiThinking(false);
       setChessMoveLog(['Match reset. White to move first.']);
-      if (sync && currentRoom) {
-        multiplayerSocket.rematchGame(currentRoom.roomCode, {
+      if (sync && currentRoomRef.current) {
+        const room = currentRoomRef.current;
+        const resetState = {
           board: fresh,
           turn: 'white',
+          log: ['Match reset. White to move first.'],
           status: 'active',
-        });
+          winner: null,
+        };
+        multiplayerSocket.rematchGame(room.roomCode, resetState);
+        rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
       }
     },
-    [clearAiTimers, currentRoom]
+    [clearAiTimers]
   );
 
-  const resetSnakeLadder = useCallback(() => {
-    clearAiTimers();
-    awardedMatchRef.current.snake_ladder = false;
-    setSlPositions({ p1: 1, p2: 1 });
-    setSlTurn('p1');
-    setSlDice(1);
-    setSlRolling(false);
-    setSlFinished(false);
-    setSlMessage('Board reset! Your turn (Blue 📍) to roll.');
-  }, [clearAiTimers]);
+  const resetSnakeLadder = useCallback(
+    (sync = true) => {
+      clearAiTimers();
+      awardedMatchRef.current.snake_ladder = false;
+      setSlPositions({ p1: 1, p2: 1 });
+      setSlTurn('p1');
+      setSlDice(1);
+      setSlRolling(false);
+      setSlFinished(false);
+      setSlMessage('Board reset! Your turn (Blue 📍) to roll.');
+      if (sync && currentRoomRef.current) {
+        const room = currentRoomRef.current;
+        const resetState = {
+          positions: { p1: 1, p2: 1 },
+          turn: 'p1',
+          dice: 1,
+          message: 'Board reset! Host (Blue 📍) to roll.',
+          finished: false,
+        };
+        multiplayerSocket.rematchGame(room.roomCode, resetState);
+        rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
+      }
+    },
+    [clearAiTimers]
+  );
+
+  const applySyncedMoveState = useCallback(
+    (moveAction: string, gameState: any) => {
+      if (!gameState || typeof gameState !== 'object') return;
+      const seq = Number(gameState._seq || 0);
+      if (seq && seq <= lastRemoteSeqRef.current) return;
+      if (seq) lastRemoteSeqRef.current = seq;
+
+      if (moveAction === 'REMATCH') {
+        resetTtt(false);
+        resetChess(false);
+        resetLudo(false);
+        resetQuiz();
+        resetSnakeLadder(false);
+        return;
+      }
+
+      if (moveAction === 'TTT_MOVE') {
+        if (Array.isArray(gameState.board)) setTttBoard(gameState.board);
+        if (typeof gameState.isXNext === 'boolean') setIsXNext(gameState.isXNext);
+        setTttResult(gameState.result ?? null);
+        setTttWinningLine(gameState.line || null);
+      } else if (moveAction === 'LUDO_MOVE') {
+        if (Array.isArray(gameState.tokens)) setLudoTokens(gameState.tokens);
+        if (typeof gameState.turn === 'number') setLudoTurn(gameState.turn as 0 | 1 | 2 | 3);
+        if (typeof gameState.dice === 'number') setLudoDice(gameState.dice);
+        if (Array.isArray(gameState.log)) setLudoLog(gameState.log);
+        setLudoLegalTokens([]);
+        setLudoRolling(false);
+        setLudoPhase(gameState.winner !== null && gameState.winner !== undefined ? 'finished' : 'roll');
+        setLudoWinner(gameState.winner ?? null);
+      } else if (moveAction === 'CHESS_MOVE') {
+        if (Array.isArray(gameState.board)) setChessBoard(gameState.board);
+        if (gameState.turn) setChessTurn(gameState.turn);
+        if (Array.isArray(gameState.log)) setChessMoveLog(gameState.log);
+        if (gameState.status) setChessStatus(gameState.status);
+        if (gameState.winner !== undefined) setChessWinner(gameState.winner);
+      } else if (moveAction === 'SL_MOVE') {
+        if (gameState.positions) setSlPositions(gameState.positions);
+        if (gameState.turn) setSlTurn(gameState.turn);
+        if (typeof gameState.dice === 'number') setSlDice(gameState.dice);
+        if (gameState.message) setSlMessage(gameState.message);
+        if (typeof gameState.finished === 'boolean') setSlFinished(gameState.finished);
+      }
+    },
+    [resetChess, resetLudo, resetQuiz, resetSnakeLadder, resetTtt]
+  );
+
+  const attachFirestoreRoomSubscription = useCallback(
+    (roomCode: string) => {
+      if (roomUnsubRef.current) {
+        roomUnsubRef.current();
+        roomUnsubRef.current = null;
+      }
+      lastRemoteSeqRef.current = 0;
+
+      roomUnsubRef.current = subscribeToGameRoom(
+        roomCode,
+        (room, moveAction) => {
+          const stillMember = room.players.some((p) => p.id === activePlayer.id);
+          if (!stillMember) {
+            if (roomUnsubRef.current) {
+              roomUnsubRef.current();
+              roomUnsubRef.current = null;
+            }
+            setCurrentRoom(null);
+            setIsLobbyOpen(false);
+            setJoinError('You were removed from the room.');
+            return;
+          }
+
+          setCurrentRoom(room);
+          setJoinError(null);
+
+          if (room.status === 'in_game') {
+            setIsLobbyOpen(false);
+          }
+
+          if (Array.isArray(room.messages) && room.messages.length > 0) {
+            setChatMessages((prev) => {
+              if (room.messages.length > prev.length && !isChatOpen) {
+                setUnreadChatCount((c) => c + (room.messages.length - prev.length));
+              }
+              return room.messages;
+            });
+          }
+
+          if (room.gameState && moveAction && moveAction !== 'ROOM_CREATED' && moveAction !== 'GAME_START') {
+            applySyncedMoveState(moveAction, room.gameState);
+          }
+        },
+        () => {
+          setCurrentRoom(null);
+          setIsLobbyOpen(false);
+          setGameMode('ai');
+        }
+      );
+    },
+    [activePlayer.id, applySyncedMoveState, isChatOpen]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (roomUnsubRef.current) {
+        roomUnsubRef.current();
+        roomUnsubRef.current = null;
+      }
+    };
+  }, []);
+
+  const broadcastRoomMove = useCallback(
+    (
+      moveAction: string,
+      newGameState: Record<string, any>,
+      nextTurnId?: string,
+      status: 'in_game' | 'finished' = 'in_game'
+    ) => {
+      const room = currentRoomRef.current;
+      if (!room) return;
+      const stampedState = { ...newGameState, _seq: Date.now() };
+      lastRemoteSeqRef.current = stampedState._seq;
+      multiplayerSocket.sendMove(room.roomCode, moveAction, stampedState, nextTurnId);
+      pushFirestoreGameMove(room.roomCode, moveAction, stampedState, nextTurnId, status).catch(() => {});
+    },
+    []
+  );
 
   // --------------------------------------------------------------------------
-  // WebSocket Lifecycle & Event Handlers
+  // WebSocket Lifecycle & Event Handlers (fast-path alongside Firestore)
   // --------------------------------------------------------------------------
   useEffect(() => {
     multiplayerSocket.connect();
@@ -356,8 +580,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setSocketConnected(data.connected);
     };
 
-    const handleRoomCreated = (data: { room: MultiplayerRoom; isQuickMatch?: boolean }) => {
-      setCurrentRoom(data.room);
+    const handleRoomCreated = (data: { room: MultiplayerRoom }) => {
+      if (!currentRoomRef.current) {
+        setCurrentRoom(data.room);
+      }
       setJoinError(null);
       setIsModeSelectOpen(false);
       setIsLobbyOpen(true);
@@ -381,34 +607,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       moveAction: string;
       gameState: any;
     }) => {
-      if (!currentRoom || currentRoom.roomCode !== data.roomCode) return;
-      const { moveAction, gameState } = data;
-
-      if (moveAction === 'TTT_MOVE' && gameState) {
-        setTttBoard(gameState.board);
-        setIsXNext(gameState.isXNext);
-        setTttResult(gameState.result);
-        setTttWinningLine(gameState.line || null);
-      } else if (moveAction === 'LUDO_MOVE' && gameState) {
-        if (gameState.tokens) setLudoTokens(gameState.tokens);
-        setLudoTurn(gameState.turn);
-        setLudoDice(gameState.dice);
-        setLudoLog(gameState.log || []);
-        setLudoPhase(gameState.winner !== null && gameState.winner !== undefined ? 'finished' : 'roll');
-        setLudoWinner(gameState.winner ?? null);
-      } else if (moveAction === 'CHESS_MOVE' && gameState) {
-        setChessBoard(gameState.board);
-        setChessTurn(gameState.turn);
-        setChessMoveLog(gameState.log);
-        if (gameState.status) setChessStatus(gameState.status);
-        if (gameState.winner !== undefined) setChessWinner(gameState.winner);
-      } else if (moveAction === 'SL_MOVE' && gameState) {
-        if (gameState.positions) setSlPositions(gameState.positions);
-        if (gameState.turn) setSlTurn(gameState.turn);
-        setSlDice(gameState.dice);
-        if (gameState.message) setSlMessage(gameState.message);
-        if (typeof gameState.finished === 'boolean') setSlFinished(gameState.finished);
-      }
+      if (!currentRoomRef.current || currentRoomRef.current.roomCode !== data.roomCode) return;
+      applySyncedMoveState(data.moveAction, data.gameState);
     };
 
     const handleGameReset = (data: { room: MultiplayerRoom }) => {
@@ -417,11 +617,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       resetChess(false);
       resetLudo(false);
       resetQuiz();
-      resetSnakeLadder();
+      resetSnakeLadder(false);
     };
 
     const handleChatMessage = (data: { message: InGameChatMessage }) => {
-      setChatMessages((prev) => [...prev, data.message]);
+      setChatMessages((prev) => {
+        if (prev.some((m) => m.id === data.message.id)) return prev;
+        return [...prev, data.message];
+      });
       if (!isChatOpen) {
         setUnreadChatCount((c) => c + 1);
       }
@@ -436,7 +639,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     };
 
     const handlePlayerKicked = (data: { targetPlayerId: string; room: MultiplayerRoom }) => {
-      if (data.targetPlayerId === currentUser?.id) {
+      if (data.targetPlayerId === activePlayer.id) {
         setCurrentRoom(null);
         setIsLobbyOpen(false);
         setJoinError('You were removed from the room by the host.');
@@ -446,7 +649,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     };
 
     const handleError = (data: { code: string; message: string }) => {
-      setJoinError(data.message || 'Room error occurred.');
+      // Only show WS error if not already inside a Firestore-synced room
+      if (!currentRoomRef.current) {
+        setJoinError(data.message || 'Room error occurred.');
+      }
     };
 
     multiplayerSocket.on('CONNECTION_STATUS', handleConnectionStatus);
@@ -473,8 +679,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       multiplayerSocket.off('ERROR', handleError);
     };
   }, [
-    currentUser?.id,
-    currentRoom?.roomCode,
+    activePlayer.id,
+    applySyncedMoveState,
     isChatOpen,
     resetTtt,
     resetChess,
@@ -484,42 +690,95 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   ]);
 
   // --------------------------------------------------------------------------
-  // Multiplayer Room Actions
+  // Multiplayer Room Actions (Firestore Authoritative + WS Fast-Path)
   // --------------------------------------------------------------------------
-  const handleCreateFriendRoom = () => {
-    if (!currentUser) return;
+  const handleCreateFriendRoom = async () => {
+    if (isRoomSubmitting) return;
+    setIsRoomSubmitting(true);
     setGameMode('friend');
     setJoinError(null);
-    multiplayerSocket.createRoom(selectedGame, 2, {
-      id: currentUser.id,
-      name: currentUser.fullName,
-      avatar: currentUser.avatarUrl || APP_CONFIG.logoUrl,
-    });
+    setChatMessages([]);
+    try {
+      const maxP = selectedGame === 'ludo' ? 4 : 2;
+      const room = await createFirestoreGameRoom(selectedGame, maxP, activePlayer, false);
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
+      setIsModeSelectOpen(false);
+      setIsLobbyOpen(true);
+    } catch (err: any) {
+      setJoinError(err?.message || 'Could not create private room. Please try again.');
+    } finally {
+      setIsRoomSubmitting(false);
+    }
   };
 
-  const handleJoinFriendRoom = (code: string) => {
-    if (!currentUser) return;
+  const handleJoinFriendRoom = async (code: string) => {
+    if (isRoomSubmitting) return;
+    setIsRoomSubmitting(true);
     setGameMode('friend');
     setJoinError(null);
-    multiplayerSocket.joinRoom(code, selectedGame, {
-      id: currentUser.id,
-      name: currentUser.fullName,
-      avatar: currentUser.avatarUrl || APP_CONFIG.logoUrl,
-    });
+    setChatMessages([]);
+    try {
+      const room = await joinFirestoreGameRoom(code, selectedGame, activePlayer);
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
+      setIsModeSelectOpen(false);
+      if (room.status === 'in_game') {
+        setIsLobbyOpen(false);
+      } else {
+        setIsLobbyOpen(true);
+      }
+      if (room.gameState && Object.keys(room.gameState).length > 0) {
+        const lastAction =
+          selectedGame === 'ludo'
+            ? 'LUDO_MOVE'
+            : selectedGame === 'chess'
+            ? 'CHESS_MOVE'
+            : selectedGame === 'snake_ladder'
+            ? 'SL_MOVE'
+            : 'TTT_MOVE';
+        applySyncedMoveState(lastAction, room.gameState);
+      }
+    } catch (err: any) {
+      // Fallback to WebSocket room if code only exists in server WS memory
+      if (socketConnected) {
+        multiplayerSocket.joinRoom(code, selectedGame, activePlayer);
+      }
+      setJoinError(err?.message || `Room #${code} not found. Please check the 4-digit code.`);
+    } finally {
+      setIsRoomSubmitting(false);
+    }
   };
 
-  const handlePlayRandom = () => {
-    if (!currentUser) return;
+  const handlePlayRandom = async () => {
+    if (isRoomSubmitting) return;
+    setIsRoomSubmitting(true);
     setGameMode('random');
     setJoinError(null);
-    multiplayerSocket.quickMatch(selectedGame, 2, {
-      id: currentUser.id,
-      name: currentUser.fullName,
-      avatar: currentUser.avatarUrl || APP_CONFIG.logoUrl,
-    });
+    setChatMessages([]);
+    try {
+      const maxP = 2;
+      const { room, matchedExisting } = await quickMatchFirestoreRoom(
+        selectedGame,
+        maxP,
+        activePlayer
+      );
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
+      setIsModeSelectOpen(false);
+      setIsLobbyOpen(!matchedExisting && room.status === 'waiting');
+    } catch (err: any) {
+      setJoinError(err?.message || 'Quick matchmaking failed. Please try again.');
+    } finally {
+      setIsRoomSubmitting(false);
+    }
   };
 
   const handlePlayAI = (diff: AIDifficulty) => {
+    if (roomUnsubRef.current) {
+      roomUnsubRef.current();
+      roomUnsubRef.current = null;
+    }
     setGameMode('ai');
     setAiDifficulty(diff);
     setCurrentRoom(null);
@@ -529,23 +788,36 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     resetChess(false);
     resetLudo(false);
     resetQuiz();
-    resetSnakeLadder();
+    resetSnakeLadder(false);
   };
 
-  const handleStartRoomGame = () => {
+  const handleStartRoomGame = async () => {
     if (!currentRoom) return;
-    multiplayerSocket.startGame(currentRoom.roomCode);
+    resetTtt(false);
+    resetChess(false);
+    resetLudo(false);
+    resetQuiz();
+    resetSnakeLadder(false);
     setIsLobbyOpen(false);
+    const firstTurnId = currentRoom.players[0]?.id || currentRoom.hostId;
+    multiplayerSocket.startGame(currentRoom.roomCode);
+    await startFirestoreGameRoom(currentRoom.roomCode, {}, firstTurnId).catch(() => {});
   };
 
-  const handleKickPlayer = (playerId: string) => {
+  const handleKickPlayer = async (playerId: string) => {
     if (!currentRoom) return;
     multiplayerSocket.kickPlayer(currentRoom.roomCode, playerId);
+    await kickOrLeaveFirestoreRoom(currentRoom.roomCode, playerId);
   };
 
-  const handleLeaveRoom = () => {
-    if (currentRoom && currentUser) {
-      multiplayerSocket.leaveRoom(currentRoom.roomCode, currentUser.id);
+  const handleLeaveRoom = async () => {
+    if (roomUnsubRef.current) {
+      roomUnsubRef.current();
+      roomUnsubRef.current = null;
+    }
+    if (currentRoom) {
+      multiplayerSocket.leaveRoom(currentRoom.roomCode, activePlayer.id);
+      await kickOrLeaveFirestoreRoom(currentRoom.roomCode, activePlayer.id);
     }
     setCurrentRoom(null);
     setIsLobbyOpen(false);
@@ -556,19 +828,19 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // --------------------------------------------------------------------------
   // In-Game Chat & Call Actions
   // --------------------------------------------------------------------------
-  const handleSendInGameMessage = (text?: string, imageUrl?: string) => {
-    if (!currentUser) return;
+  const handleSendInGameMessage = async (text?: string, imageUrl?: string) => {
     const roomCode = currentRoom?.roomCode || 'LOCAL_ROOM';
     const msg = {
-      senderId: currentUser.id,
-      senderName: currentUser.fullName,
-      senderAvatar: currentUser.avatarUrl || APP_CONFIG.logoUrl,
+      senderId: activePlayer.id,
+      senderName: activePlayer.name,
+      senderAvatar: activePlayer.avatar,
       text,
       imageUrl,
     };
 
     if (currentRoom) {
       multiplayerSocket.sendChatMessage(roomCode, msg);
+      await sendFirestoreRoomChat(roomCode, msg);
     } else {
       setChatMessages((prev) => [
         ...prev,
@@ -590,24 +862,24 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const handleStartCall = (type: 'voice' | 'video') => {
     setActiveCallType(type);
-    if (currentRoom && currentUser) {
+    if (currentRoom) {
       multiplayerSocket.sendCallSignal(
         currentRoom.roomCode,
         { type: 'CALL_START' },
         undefined,
-        currentUser.id,
+        activePlayer.id,
         type
       );
     }
   };
 
   const handleEndCall = () => {
-    if (currentRoom && currentUser) {
+    if (currentRoom) {
       multiplayerSocket.sendCallSignal(
         currentRoom.roomCode,
         { type: 'CALL_END' },
         undefined,
-        currentUser.id
+        activePlayer.id
       );
     }
     setActiveCallType(null);
@@ -620,7 +892,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     if (tttBoard[index] || tttResult || tttAiThinking) return;
 
     if (gameMode !== 'ai' && currentRoom) {
-      const isHost = currentRoom.hostId === currentUser?.id;
+      const isHost = currentRoom.hostId === activePlayer.id;
       const mySymbol = isHost ? 'X' : 'O';
       const currentSymbol = isXNext ? 'X' : 'O';
       if (mySymbol !== currentSymbol) {
@@ -675,11 +947,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setTttWinningLine(line);
 
     if (currentRoom) {
-      multiplayerSocket.sendMove(
-        currentRoom.roomCode,
+      const nextTurnId = nextTurnBool ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
+      broadcastRoomMove(
         'TTT_MOVE',
         { board: newBoard, isXNext: nextTurnBool, result: resStr, line },
-        nextTurnBool ? currentRoom.players[0]?.id : currentRoom.players[1]?.id
+        nextTurnId,
+        winner ? 'finished' : 'in_game'
       );
     }
 
@@ -829,7 +1102,20 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     [aiDifficulty, gameMode, registerAiTimer, triggerGameAward]
   );
 
+  const getPlayerIdForLudoSeat = useCallback((seat: 0 | 1 | 2 | 3): string | undefined => {
+    const room = currentRoomRef.current;
+    if (!room) return undefined;
+    if (room.players.length <= 2) {
+      return seat === 0 ? room.players[0]?.id : room.players[1]?.id;
+    }
+    return room.players[seat]?.id;
+  }, []);
+
   const executeLudoTokenMove = (playerIdx: 0 | 1 | 2 | 3, tokenIdx: number, rollVal: number) => {
+    if (gameMode !== 'ai' && currentRoom && ludoTurn !== myLudoSeat) {
+      soundFx.playError();
+      return;
+    }
     const updated = ludoTokens.map((arr) => [...arr]);
     const cur = updated[playerIdx][tokenIdx];
     const nextPos = cur === -1 ? 0 : cur + rollVal;
@@ -875,7 +1161,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setLudoWinner(playerIdx);
       setLudoPhase('finished');
       soundFx.playWin();
-      const playerWon = playerIdx === 0 || gameMode !== 'ai';
+      const playerWon = gameMode === 'ai' ? playerIdx === 0 : playerIdx === myLudoSeat;
       triggerGameAward('ludo', {
         gameId: 'ludo',
         gameName: 'Ludo',
@@ -885,21 +1171,24 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         scoreSummary: `${color.name} won Ludo`,
       });
       if (currentRoom) {
-        multiplayerSocket.sendMove(currentRoom.roomCode, 'LUDO_MOVE', {
-          tokens: updated,
-          turn: playerIdx,
-          dice: rollVal,
-          log: newLog,
-          winner: playerIdx,
-        });
+        broadcastRoomMove(
+          'LUDO_MOVE',
+          {
+            tokens: updated,
+            turn: playerIdx,
+            dice: rollVal,
+            log: newLog,
+            winner: playerIdx,
+          },
+          getPlayerIdForLudoSeat(playerIdx),
+          'finished'
+        );
       }
       return;
     }
 
     const bonusRoll = rollVal === 6 || Boolean(capturedName) || nextPos === 56;
-    const nextTurn = bonusRoll
-      ? playerIdx
-      : (((playerIdx + 1) % 4) as 0 | 1 | 2 | 3);
+    const nextTurn = bonusRoll ? playerIdx : getNextActiveLudoTurn(playerIdx);
     const nextSixes = rollVal === 6 ? ludoConsecutiveSixes : 0;
 
     setLudoPhase('roll');
@@ -907,13 +1196,18 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setLudoConsecutiveSixes(bonusRoll && rollVal === 6 ? nextSixes : 0);
 
     if (currentRoom) {
-      multiplayerSocket.sendMove(currentRoom.roomCode, 'LUDO_MOVE', {
-        tokens: updated,
-        turn: nextTurn,
-        dice: rollVal,
-        log: newLog,
-        winner: null,
-      });
+      broadcastRoomMove(
+        'LUDO_MOVE',
+        {
+          tokens: updated,
+          turn: nextTurn,
+          dice: rollVal,
+          log: newLog,
+          winner: null,
+        },
+        getPlayerIdForLudoSeat(nextTurn),
+        'in_game'
+      );
     }
 
     if (gameMode === 'ai' && nextTurn !== 0) {
@@ -924,6 +1218,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const rollLudoDice = () => {
     if (ludoRolling || ludoPhase !== 'roll') return;
     if (gameMode === 'ai' && ludoTurn !== 0) return;
+    if (gameMode !== 'ai' && currentRoom && ludoTurn !== myLudoSeat) {
+      soundFx.playError();
+      return;
+    }
 
     setLudoRolling(true);
     soundFx.playDice();
@@ -942,7 +1240,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       const color = LUDO_COLORS[ludoTurn];
 
       if (newSixes >= 3) {
-        const nextTurn = (((ludoTurn + 1) % 4) as 0 | 1 | 2 | 3);
+        const nextTurn = getNextActiveLudoTurn(ludoTurn);
         const newLog = [
           `${color.name} rolled three 6s in a row — turn forfeited!`,
           ...ludoLog.slice(0, 4),
@@ -951,6 +1249,20 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         setLudoLog(newLog);
         setLudoConsecutiveSixes(0);
         setLudoTurn(nextTurn);
+        if (currentRoom) {
+          broadcastRoomMove(
+            'LUDO_MOVE',
+            {
+              tokens: ludoTokens,
+              turn: nextTurn,
+              dice: roll,
+              log: newLog,
+              winner: null,
+            },
+            getPlayerIdForLudoSeat(nextTurn),
+            'in_game'
+          );
+        }
         if (gameMode === 'ai' && nextTurn !== 0) {
           scheduleNextLudoAI(nextTurn, ludoTokens, newLog, 0);
         }
@@ -961,7 +1273,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       const legal = getLegalLudoTokenIndices(ludoTokens[ludoTurn], roll);
 
       if (legal.length === 0) {
-        const nextTurn = (((ludoTurn + 1) % 4) as 0 | 1 | 2 | 3);
+        const nextTurn = getNextActiveLudoTurn(ludoTurn);
         const newLog = [
           `${color.name} rolled ${roll} — no legal moves (need 6 to unlock or exact roll).`,
           ...ludoLog.slice(0, 4),
@@ -970,13 +1282,18 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         setLudoConsecutiveSixes(0);
         setLudoTurn(nextTurn);
         if (currentRoom) {
-          multiplayerSocket.sendMove(currentRoom.roomCode, 'LUDO_MOVE', {
-            tokens: ludoTokens,
-            turn: nextTurn,
-            dice: roll,
-            log: newLog,
-            winner: null,
-          });
+          broadcastRoomMove(
+            'LUDO_MOVE',
+            {
+              tokens: ludoTokens,
+              turn: nextTurn,
+              dice: roll,
+              log: newLog,
+              winner: null,
+            },
+            getPlayerIdForLudoSeat(nextTurn),
+            'in_game'
+          );
         }
         if (gameMode === 'ai' && nextTurn !== 0) {
           scheduleNextLudoAI(nextTurn, ludoTokens, newLog, 0);
@@ -1085,7 +1402,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }
 
     if (gameMode !== 'ai' && currentRoom) {
-      const isHost = currentRoom.hostId === currentUser?.id;
+      const isHost = currentRoom.hostId === activePlayer.id;
       const myColor = isHost ? 'white' : 'black';
       if (myColor !== chessTurn) {
         soundFx.playError();
@@ -1186,13 +1503,19 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setChessMoveLog(newLog);
 
     if (currentRoom) {
-      multiplayerSocket.sendMove(currentRoom.roomCode, 'CHESS_MOVE', {
-        board: newBoard,
-        turn: nextTurn,
-        log: newLog,
-        status: nextStatus,
-        winner: winnerResult,
-      });
+      const nextTurnId = nextTurn === 'white' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
+      broadcastRoomMove(
+        'CHESS_MOVE',
+        {
+          board: newBoard,
+          turn: nextTurn,
+          log: newLog,
+          status: nextStatus,
+          winner: winnerResult,
+        },
+        nextTurnId,
+        winnerResult ? 'finished' : 'in_game'
+      );
     }
 
     // AI Bot Move
@@ -1268,6 +1591,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // --------------------------------------------------------------------------
   const executeSnakeLadderRoll = useCallback(
     (side: 'p1' | 'p2', currentPositions: { p1: number; p2: number }) => {
+      if (gameMode !== 'ai' && currentRoom) {
+        const mySide = currentRoom.hostId === activePlayer.id ? 'p1' : 'p2';
+        if (side !== mySide) {
+          soundFx.playError();
+          return;
+        }
+      }
       setSlRolling(true);
       soundFx.playDice();
 
@@ -1281,7 +1611,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         setSlDice(roll);
         setSlRolling(false);
 
-        const label = side === 'p1' ? 'You (Blue 📍)' : gameMode === 'ai' ? 'AI Bot (Amber ⭐)' : 'Player 2 (Amber ⭐)';
+        const label = side === 'p1' ? 'Player 1 (Blue 📍)' : gameMode === 'ai' ? 'AI Bot (Amber ⭐)' : 'Player 2 (Amber ⭐)';
         const startPos = currentPositions[side];
         let nextPos = startPos + roll;
         let msg = `${label} rolled ${roll}: moved ${startPos} → ${nextPos}`;
@@ -1309,11 +1639,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         if (nextPos === 100) {
           setSlFinished(true);
           soundFx.playWin();
-          const playerWon = side === 'p1';
+          const mySide = currentRoom ? (currentRoom.hostId === activePlayer.id ? 'p1' : 'p2') : 'p1';
+          const playerWon = side === mySide;
           setSlMessage(
             playerWon
               ? '🏆 You reached Square 100! +50 JIT Points awarded!'
-              : `🤖 ${label} reached Square 100 first! +10 Participation Points`
+              : `🏁 ${label} reached Square 100 first! +10 Participation Points`
           );
           triggerGameAward('snake_ladder', {
             gameId: 'snake_ladder',
@@ -1325,29 +1656,42 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           });
 
           if (currentRoom) {
-            multiplayerSocket.sendMove(currentRoom.roomCode, 'SL_MOVE', {
-              positions: updatedPos,
-              turn: side,
-              dice: roll,
-              message: msg,
-              finished: true,
-            });
+            const winnerId = side === 'p1' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
+            broadcastRoomMove(
+              'SL_MOVE',
+              {
+                positions: updatedPos,
+                turn: side,
+                dice: roll,
+                message: msg,
+                finished: true,
+              },
+              winnerId,
+              'finished'
+            );
           }
           return;
         }
 
         const nextTurn: 'p1' | 'p2' = roll === 6 ? side : side === 'p1' ? 'p2' : 'p1';
         setSlTurn(nextTurn);
-        setSlMessage(roll === 6 ? `${msg} (Bonus roll for 6!)` : msg);
+        const finalMsg = roll === 6 ? `${msg} (Bonus roll for 6!)` : msg;
+        setSlMessage(finalMsg);
 
         if (currentRoom) {
-          multiplayerSocket.sendMove(currentRoom.roomCode, 'SL_MOVE', {
-            positions: updatedPos,
-            turn: nextTurn,
-            dice: roll,
-            message: msg,
-            finished: false,
-          });
+          const nextTurnId = nextTurn === 'p1' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
+          broadcastRoomMove(
+            'SL_MOVE',
+            {
+              positions: updatedPos,
+              turn: nextTurn,
+              dice: roll,
+              message: finalMsg,
+              finished: false,
+            },
+            nextTurnId,
+            'in_game'
+          );
         }
 
         if (gameMode === 'ai' && nextTurn === 'p2') {
@@ -1357,7 +1701,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         }
       }, 450);
     },
-    [currentRoom, gameMode, registerAiTimer, triggerGameAward]
+    [activePlayer.id, broadcastRoomMove, currentRoom, gameMode, registerAiTimer, triggerGameAward]
   );
 
   // --------------------------------------------------------------------------
@@ -1367,10 +1711,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     switch (gameId) {
       case 'ludo':
         return [
-          'Each player controls 2 tokens from the corner Yard to the center Home Triangle.',
+          'Each player controls 4 tokens from the corner Yard to the center Home Triangle.',
           'Roll a 6 to unlock a token from the Yard. Rolling three 6s in a row forfeits the turn.',
           'Landing on an opponent outside Star (★) squares captures their token back to Yard.',
-          'Exact roll required to reach step 56 (Home). First player with both tokens home wins!',
+          'Exact roll required to reach step 56 (Home). First player with all 4 tokens home wins!',
         ];
       case 'tictactoe':
         return [
@@ -1444,7 +1788,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
             <div className="flex flex-wrap items-center gap-2">
               <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black/30 backdrop-blur-md rounded-xl text-xs font-semibold">
-                {socketConnected ? (
+                {socketConnected || currentRoom || (typeof navigator !== 'undefined' && navigator.onLine) ? (
                   <>
                     <Wifi className="w-3.5 h-3.5 text-emerald-400" />
                     <span className="text-emerald-300">Live Realtime Active</span>
@@ -1707,10 +2051,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             {/* GAME 2: LUDO (Classic 15x15 Interactive Board) */}
             {/* ----------------------------------------------------------- */}
             {selectedGame === 'ludo' && (
-              <div className="max-w-lg mx-auto flex flex-col items-center space-y-4">
+              <div className="max-w-xl mx-auto flex flex-col items-center space-y-3 sm:space-y-4">
                 <div className="flex items-center justify-between w-full px-1">
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
                     Turn: <span className={LUDO_COLORS[ludoTurn].text}>{LUDO_COLORS[ludoTurn].name}</span>
+                    {gameMode !== 'ai' && currentRoom && (
+                      <span className="ml-1.5 text-[11px] font-semibold text-slate-400">
+                        ({ludoTurn === myLudoSeat ? 'Your Turn' : 'Opponent Turn'})
+                      </span>
+                    )}
                   </span>
                   <button
                     type="button"
@@ -1723,23 +2072,45 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 </div>
 
                 {/* 4 Player Score Chips */}
-                <div className="grid grid-cols-4 gap-2 w-full">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 w-full">
                   {LUDO_COLORS.map((c, idx) => {
-                    const isCurrent = ludoTurn === idx && ludoPhase !== 'finished';
+                    const isInactive = ludoInactiveSeats.includes(idx);
+                    const isCurrent = !isInactive && ludoTurn === idx && ludoPhase !== 'finished';
                     const homeCount = ludoTokens[idx].filter((p) => p === 56).length;
+                    const roomPlayer = currentRoom
+                      ? currentRoom.players.length <= 2
+                        ? idx === 0
+                          ? currentRoom.players[0]
+                          : idx === 2
+                          ? currentRoom.players[1]
+                          : undefined
+                        : currentRoom.players[idx]
+                      : undefined;
+                    const seatLabel = isInactive
+                      ? `${c.name} (Empty)`
+                      : roomPlayer
+                      ? `${roomPlayer.name.split(' ')[0]} (${c.name})`
+                      : idx === 0
+                      ? 'You (Red)'
+                      : gameMode === 'ai'
+                      ? `${c.name} AI`
+                      : c.name;
+
                     return (
                       <div
                         key={c.name}
                         className={`p-2 rounded-2xl text-center border transition-all ${
-                          isCurrent
+                          isInactive
+                            ? 'opacity-45 bg-slate-50 dark:bg-slate-900/30 border-slate-100 dark:border-slate-800/60 text-slate-400'
+                            : isCurrent
                             ? `border-current ${c.text} font-bold ring-2 ring-current/25 bg-slate-50 dark:bg-slate-800`
                             : 'bg-slate-50 dark:bg-slate-800/40 border-slate-100 dark:border-slate-800 text-slate-500'
                         }`}
                       >
-                        <p className="text-[11px] font-bold truncate">
-                          {idx === 0 ? 'You (Red)' : gameMode === 'ai' ? `${c.name} AI` : c.name}
+                        <p className="text-[11px] font-bold truncate">{seatLabel}</p>
+                        <p className="text-[10px] font-mono mt-0.5">
+                          {isInactive ? 'Inactive' : `${homeCount}/4 Home`}
                         </p>
-                        <p className="text-[10px] font-mono mt-0.5">{homeCount}/2 Home</p>
                       </div>
                     );
                   })}
@@ -1749,7 +2120,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   tokens={ludoTokens}
                   currentTurn={ludoTurn}
                   legalTokenIndices={ludoLegalTokens}
-                  awaitingTokenChoice={ludoPhase === 'select'}
+                  awaitingTokenChoice={
+                    ludoPhase === 'select' &&
+                    (gameMode === 'ai' ? ludoTurn === 0 : !currentRoom || ludoTurn === myLudoSeat)
+                  }
+                  inactiveSeats={ludoInactiveSeats}
                   onSelectToken={(tIdx) => executeLudoTokenMove(ludoTurn, tIdx, ludoDice)}
                 />
 
@@ -1765,7 +2140,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                     <button
                       type="button"
                       onClick={() => resetLudo(true)}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold"
+                      className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-bold shrink-0"
                     >
                       Play Again
                     </button>
@@ -1775,15 +2150,16 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                     <p className="text-xs font-bold text-amber-800 dark:text-amber-300">
                       Rolled {ludoDice}! Choose which token to move:
                     </p>
-                    <div className="flex justify-center gap-2">
+                    <div className="flex flex-wrap justify-center gap-2">
                       {ludoLegalTokens.map((tIdx) => (
                         <button
                           key={tIdx}
                           type="button"
+                          disabled={gameMode !== 'ai' && Boolean(currentRoom) && ludoTurn !== myLudoSeat}
                           onClick={() => executeLudoTokenMove(ludoTurn, tIdx, ludoDice)}
-                          className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-xl text-xs font-bold shadow-sm min-h-[40px]"
+                          className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-sm min-h-[40px]"
                         >
-                          Move Token #{tIdx + 1} (
+                          Move #{tIdx + 1} (
                           {ludoTokens[ludoTurn][tIdx] === -1
                             ? 'Yard → Start'
                             : `Step ${ludoTokens[ludoTurn][tIdx]}`}
@@ -1793,25 +2169,37 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                     </div>
                   </div>
                 ) : (
-                  <div className="flex items-center gap-4">
+                  <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
                     <button
                       type="button"
                       onClick={rollLudoDice}
-                      disabled={ludoRolling || (gameMode === 'ai' && ludoTurn !== 0)}
-                      className="w-16 h-16 bg-white dark:bg-slate-900 border-2 border-blue-500 rounded-2xl shadow-lg flex items-center justify-center text-3xl font-black text-blue-600 hover:scale-105 active:scale-95 disabled:opacity-50 transition-all"
+                      disabled={
+                        ludoRolling ||
+                        (gameMode === 'ai'
+                          ? ludoTurn !== 0
+                          : Boolean(currentRoom) && ludoTurn !== myLudoSeat)
+                      }
+                      className="w-14 h-14 sm:w-16 sm:h-16 bg-white dark:bg-slate-900 border-2 border-blue-500 rounded-2xl shadow-lg flex items-center justify-center text-2xl sm:text-3xl font-black text-blue-600 hover:scale-105 active:scale-95 disabled:opacity-50 transition-all"
                     >
                       {ludoDice}
                     </button>
                     <button
                       type="button"
                       onClick={rollLudoDice}
-                      disabled={ludoRolling || (gameMode === 'ai' && ludoTurn !== 0)}
-                      className="px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-md transition-colors min-h-[44px]"
+                      disabled={
+                        ludoRolling ||
+                        (gameMode === 'ai'
+                          ? ludoTurn !== 0
+                          : Boolean(currentRoom) && ludoTurn !== myLudoSeat)
+                      }
+                      className="px-5 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-md transition-colors min-h-[44px]"
                     >
                       {ludoRolling
                         ? 'Rolling Dice...'
                         : gameMode === 'ai' && ludoTurn !== 0
                         ? `${LUDO_COLORS[ludoTurn].name} AI Playing...`
+                        : currentRoom && ludoTurn !== myLudoSeat
+                        ? `Waiting for ${LUDO_COLORS[ludoTurn].name}...`
                         : `Roll for ${LUDO_COLORS[ludoTurn].name} 🎲`}
                     </button>
                   </div>
@@ -1974,7 +2362,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   </div>
                 )}
 
-                <div className="grid grid-cols-8 border-2 border-slate-700 rounded-2xl overflow-hidden shadow-lg w-full aspect-square max-w-[min(360px,100%)] touch-manipulation select-none">
+                <div className="grid grid-cols-8 border-2 border-slate-700 rounded-2xl overflow-hidden shadow-lg w-full aspect-square max-w-[min(380px,calc(100vw-2.25rem),52dvh)] touch-manipulation select-none">
                   {chessBoard.map((row, r) =>
                     row.map((cell, c) => {
                       const isLight = (r + c) % 2 === 0;
@@ -2053,7 +2441,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   </span>
                   <button
                     type="button"
-                    onClick={resetSnakeLadder}
+                    onClick={() => resetSnakeLadder(true)}
                     className="text-xs font-semibold px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center gap-1"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
@@ -2065,7 +2453,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 </div>
 
                 {/* 10x10 Boustrophedon Board with SVG Ladder & Snake overlay */}
-                <div className="relative w-full aspect-square max-w-[min(360px,100%)] p-1.5 bg-slate-200 dark:bg-slate-800 rounded-2xl border-2 border-slate-300 dark:border-slate-700 select-none touch-manipulation">
+                <div className="relative w-full aspect-square max-w-[min(380px,calc(100vw-2.25rem),52dvh)] p-1.5 bg-slate-200 dark:bg-slate-800 rounded-2xl border-2 border-slate-300 dark:border-slate-700 select-none touch-manipulation">
                   <div className="grid grid-cols-10 grid-rows-10 gap-[2px] w-full h-full">
                     {boustrophedonSquares.map((squareNum) => {
                       const p1Here = slPositions.p1 === squareNum;
@@ -2156,7 +2544,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   <button
                     type="button"
                     onClick={() => executeSnakeLadderRoll(slTurn, slPositions)}
-                    disabled={slRolling || slFinished || (gameMode === 'ai' && slTurn === 'p2')}
+                    disabled={
+                      slRolling ||
+                      slFinished ||
+                      (gameMode === 'ai'
+                        ? slTurn === 'p2'
+                        : currentRoom
+                        ? slTurn !== (currentRoom.hostId === activePlayer.id ? 'p1' : 'p2')
+                        : false)
+                    }
                     className="w-16 h-16 bg-white dark:bg-slate-900 border-2 border-emerald-500 rounded-2xl shadow-md flex items-center justify-center text-3xl font-black text-emerald-600 hover:scale-105 active:scale-95 disabled:opacity-50 transition-all"
                   >
                     {slDice}
@@ -2164,7 +2560,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   <button
                     type="button"
                     onClick={() => executeSnakeLadderRoll(slTurn, slPositions)}
-                    disabled={slRolling || slFinished || (gameMode === 'ai' && slTurn === 'p2')}
+                    disabled={
+                      slRolling ||
+                      slFinished ||
+                      (gameMode === 'ai'
+                        ? slTurn === 'p2'
+                        : currentRoom
+                        ? slTurn !== (currentRoom.hostId === activePlayer.id ? 'p1' : 'p2')
+                        : false)
+                    }
                     className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-md transition-colors min-h-[44px]"
                   >
                     {slFinished
@@ -2173,7 +2577,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                       ? 'Rolling...'
                       : gameMode === 'ai' && slTurn === 'p2'
                       ? 'AI Rolling...'
-                      : `Roll for ${slTurn === 'p1' ? 'You (📍)' : 'Player 2 (⭐)'} 🎲`}
+                      : `Roll for ${slTurn === 'p1' ? 'Player 1 (📍)' : 'Player 2 (⭐)'} 🎲`}
                   </button>
                 </div>
 
@@ -2260,13 +2664,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         onPlayRandom={handlePlayRandom}
         onPlayAI={handlePlayAI}
         joinError={joinError}
+        isSubmitting={isRoomSubmitting}
       />
 
       {/* 5. 4-Digit Room Lobby Modal */}
       <RoomLobbyModal
         isOpen={isLobbyOpen}
         room={currentRoom}
-        currentUserId={currentUser?.id || ''}
+        currentUserId={activePlayer.id}
         onStartGame={handleStartRoomGame}
         onKickPlayer={handleKickPlayer}
         onLeaveRoom={handleLeaveRoom}
@@ -2278,7 +2683,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         isOpen={isChatOpen}
         onClose={() => setIsChatOpen(false)}
         messages={chatMessages}
-        currentUserId={currentUser?.id || ''}
+        currentUserId={activePlayer.id}
         onSendMessage={handleSendInGameMessage}
         mutedPlayerIds={mutedPlayerIds}
         onToggleMutePlayer={handleToggleMutePlayer}
@@ -2291,10 +2696,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           isActive={!!activeCallType}
           onEndCall={handleEndCall}
           callerName={
-            currentRoom?.players.find((p) => p.id !== currentUser?.id)?.name || 'Opponent'
+            currentRoom?.players.find((p) => p.id !== activePlayer.id)?.name || 'Opponent'
           }
           callerAvatar={
-            currentRoom?.players.find((p) => p.id !== currentUser?.id)?.avatar
+            currentRoom?.players.find((p) => p.id !== activePlayer.id)?.avatar
           }
         />
       )}

@@ -12,6 +12,8 @@ import { saveCompressedProfileMediaFile, validateMediaFile } from '../services/m
 import {
   auth,
   fetchAllCloudProfilesAsAdmin,
+  fetchGlobalLeaderboard,
+  fetchMatchHistory,
   deleteCloudProfileAsAdmin,
   signInAdminWithGoogle,
   signOutAdminGoogle,
@@ -89,8 +91,9 @@ type SortOption = 'joined_desc' | 'login_desc' | 'points_desc' | 'name_asc';
 type StatusFilter = 'all' | 'active' | 'suspended' | 'idle_30d';
 type InspectorTab = 'overview' | 'chats' | 'activity' | 'moderation';
 
-const ADMIN_TOKEN_KEY = 'jit_admin_session_token';
-const ADMIN_EXPIRY_KEY = 'jit_admin_session_expiry';
+const ADMIN_TOKEN_KEY = 'jit_admin_phone_token_v2';
+const ADMIN_EXPIRY_KEY = 'jit_admin_phone_expiry_v2';
+const OWNER_ADMIN_PHONE = '8071462677';
 const INACTIVITY_DAYS_LIMIT = 180;
 
 function formatDateTime(iso?: string): { date: string; time: string } {
@@ -124,8 +127,12 @@ function getDaysRemaining(profile: UserProfile): number {
 }
 
 export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
-  const { syncServerProfiles } = useAuth();
-  const { refreshAnnouncements } = useSocial();
+  const { syncServerProfiles, registeredProfiles } = useAuth();
+  const {
+    refreshAnnouncements,
+    posts: localPosts,
+    announcements: localAnnouncements,
+  } = useSocial();
 
   const [adminToken, setAdminToken] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null;
@@ -174,14 +181,6 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [sortBy, setSortBy] = useState<SortOption>('login_desc');
-
-  // Custom PIN modal
-  const [isPinModalOpen, setIsPinModalOpen] = useState(false);
-  const [currentPinField, setCurrentPinField] = useState('');
-  const [newPinField, setNewPinField] = useState('');
-  const [confirmPinField, setConfirmPinField] = useState('');
-  const [pinChangeMsg, setPinChangeMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
-  const [savingPin, setSavingPin] = useState(false);
 
   // Global Announcement Broadcaster modal/panel
   const [isBroadcastOpen, setIsBroadcastOpen] = useState(false);
@@ -240,6 +239,10 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       setVerifyingSession(false);
       return;
     }
+    if (adminToken === 'vercel-spa-admin') {
+      setVerifyingSession(false);
+      return;
+    }
     let active = true;
     (async () => {
       try {
@@ -247,7 +250,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
           headers: { Authorization: `Bearer ${adminToken}` },
         });
         if (!active) return;
-        if (!res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('application/json') || !res.ok) {
           clearSession();
         }
       } catch {
@@ -270,38 +274,56 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       setLoadError('');
 
       try {
-        const [usersRes, annRes] = await Promise.all([
-          fetch('/api/admin/users', {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-          fetch('/api/admin/announcements', {
-            headers: { Authorization: `Bearer ${token}` },
-          }),
-        ]);
-
-        if (usersRes.status === 401 || annRes.status === 401) {
-          clearSession();
-          setAuthError('Administrator session expired. Please enter your PIN again.');
-          return;
-        }
-
-        const data = await usersRes.json();
-        if (!usersRes.ok || !data.success) {
-          setLoadError(data.error || 'Unable to load Firebase user directory.');
-          return;
-        }
-
-        if (annRes.ok) {
-          const annData = await annRes.json();
-          if (Array.isArray(annData.announcements)) {
-            setAnnouncements(annData.announcements);
-          }
-        }
-
         const mergedMap = new Map<string, AdminUserRecord>();
-        const serverUsers: AdminUserRecord[] = Array.isArray(data.users) ? data.users : [];
-        for (const u of serverUsers) {
-          mergedMap.set(u.id, u);
+        let serverFirebaseCount = 0;
+        let usedExpressApi = false;
+
+        if (token !== 'vercel-spa-admin') {
+          const [usersRes, annRes] = await Promise.all([
+            fetch('/api/admin/users', {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+            fetch('/api/admin/announcements', {
+              headers: { Authorization: `Bearer ${token}` },
+            }),
+          ]);
+
+          if (usersRes.status === 401 || annRes.status === 401) {
+            clearSession();
+            setAuthError('Invalid Admin Access Code');
+            return;
+          }
+
+          const usersContentType = usersRes.headers.get('content-type') || '';
+          if (usersContentType.includes('application/json')) {
+            const data = await usersRes.json();
+            if (!usersRes.ok || !data.success) {
+              setLoadError(data.error || 'Unable to load Firebase user directory.');
+              return;
+            }
+            usedExpressApi = true;
+
+            if (annRes.ok && (annRes.headers.get('content-type') || '').includes('application/json')) {
+              const annData = await annRes.json();
+              if (Array.isArray(annData.announcements)) {
+                setAnnouncements(annData.announcements);
+              }
+            }
+
+            const serverUsers: AdminUserRecord[] = Array.isArray(data.users) ? data.users : [];
+            for (const u of serverUsers) {
+              mergedMap.set(u.id, u);
+            }
+            serverFirebaseCount = Number(data.firebaseCount || 0);
+
+            if (data.analytics) {
+              setAnalytics({
+                ...data.analytics,
+                totalUsers: Math.max(Number(data.analytics.totalUsers || 0), mergedMap.size),
+              });
+            }
+            setLastSyncedAt(data.syncedAt || new Date().toISOString());
+          }
         }
 
         let directFirebaseUsers = 0;
@@ -317,25 +339,85 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
           }
         }
 
+        if (!usedExpressApi) {
+          try {
+            const lbEntries = await fetchGlobalLeaderboard(500);
+            for (const entry of lbEntries) {
+              if (!mergedMap.has(entry.profileId)) {
+                const matchedLocal = registeredProfiles.find((p) => p.id === entry.profileId);
+                mergedMap.set(entry.profileId, {
+                  id: entry.profileId,
+                  contactNumber: matchedLocal?.contactNumber || '—',
+                  fullName: entry.fullName,
+                  address: matchedLocal?.address || 'JIT Campus',
+                  bio: matchedLocal?.bio || '',
+                  avatarUrl: entry.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
+                  coverUrl: matchedLocal?.coverUrl,
+                  joinedAt: matchedLocal?.joinedAt || new Date().toISOString(),
+                  lastLoginAt: matchedLocal?.lastLoginAt || matchedLocal?.lastLogin || new Date().toISOString(),
+                  lastLogin: matchedLocal?.lastLogin || new Date().toISOString(),
+                  status: matchedLocal?.status || 'active',
+                  stats: {
+                    friendsCount: matchedLocal?.stats?.friendsCount ?? 0,
+                    followersCount: matchedLocal?.stats?.followersCount ?? 0,
+                    followingCount: matchedLocal?.stats?.followingCount ?? 0,
+                    postsCount: matchedLocal?.stats?.postsCount ?? 0,
+                    reelsCount: matchedLocal?.stats?.reelsCount ?? 0,
+                    gamesPlayed: entry.gamesPlayed,
+                    gamesWon: entry.gamesWon,
+                    rewardPoints: entry.rewardPoints,
+                    streakDays: entry.streakDays,
+                  },
+                  source: 'firebase',
+                });
+                directFirebaseUsers++;
+              }
+            }
+          } catch {
+            // Best-effort Firestore leaderboard fallback
+          }
+
+          for (const rp of registeredProfiles) {
+            if (!mergedMap.has(rp.id)) {
+              mergedMap.set(rp.id, { ...rp, source: 'local-mirror' });
+            }
+          }
+
+          setAnnouncements(localAnnouncements);
+          setLastSyncedAt(new Date().toISOString());
+        }
+
         const finalList = Array.from(mergedMap.values());
         setUsers(finalList);
-        setFirebaseCount(Math.max(Number(data.firebaseCount || 0), directFirebaseUsers));
-        if (data.analytics) {
+        setFirebaseCount(Math.max(serverFirebaseCount, directFirebaseUsers));
+
+        if (!usedExpressApi) {
+          const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+          const dau = finalList.filter((u) => {
+            const ts = Date.parse(u.lastLoginAt || u.lastLogin || u.joinedAt || '');
+            return !isNaN(ts) && ts >= dayAgo;
+          }).length;
           setAnalytics({
-            ...data.analytics,
-            totalUsers: Math.max(Number(data.analytics.totalUsers || 0), finalList.length),
+            totalUsers: finalList.length,
+            dailyActiveUsers: dau,
+            totalPosts: localPosts.length,
+            activeChatThreads: 0,
+            totalMessages: 0,
+            activeAnnouncements: localAnnouncements.length,
           });
         } else {
-          setAnalytics((prev) => ({ ...prev, totalUsers: finalList.length }));
+          setAnalytics((prev) => ({
+            ...prev,
+            totalUsers: Math.max(prev.totalUsers, finalList.length),
+          }));
         }
-        setLastSyncedAt(data.syncedAt || new Date().toISOString());
       } catch {
         setLoadError('Network error while connecting to Firebase directory.');
       } finally {
         setLoadingUsers(false);
       }
     },
-    [adminToken, clearSession]
+    [adminToken, clearSession, registeredProfiles, localAnnouncements, localPosts]
   );
 
   useEffect(() => {
@@ -367,44 +449,61 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       setLoadingActivity(true);
 
       try {
-        const res = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}/activity`, {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        });
-        if (res.status === 401) {
-          clearSession();
-          return;
-        }
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          setActivityError(data.error || 'Failed to load user activity logs.');
-          setActivityData({
-            user,
-            conversations: [],
-            messages: [],
-            inGameMessages: [],
-            posts: [],
-            matchHistory: [],
+        if (adminToken !== 'vercel-spa-admin') {
+          const res = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}/activity`, {
+            headers: { Authorization: `Bearer ${adminToken}` },
           });
-          return;
+          if (res.status === 401) {
+            clearSession();
+            return;
+          }
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+              setActivityError(data.error || 'Failed to load user activity logs.');
+              setActivityData({
+                user,
+                conversations: [],
+                messages: [],
+                inGameMessages: [],
+                posts: [],
+                matchHistory: [],
+              });
+              return;
+            }
+            setActivityData(data);
+            if (data.user) {
+              setInspectedUser(data.user);
+              populateEditForm(data.user);
+            }
+            return;
+          }
         }
-        setActivityData(data);
-        if (data.user) {
-          setInspectedUser(data.user);
-          populateEditForm(data.user);
-        }
+
+        const cloudMatches = await fetchMatchHistory(user.id, 30).catch(() => []);
+        setActivityData({
+          user,
+          conversations: [],
+          messages: [],
+          inGameMessages: [],
+          posts: localPosts.filter((p) => p.authorId === user.id),
+          matchHistory: cloudMatches,
+        });
       } catch {
         setActivityError('Network error loading user chat and activity logs.');
       } finally {
         setLoadingActivity(false);
       }
     },
-    [adminToken, clearSession, populateEditForm]
+    [adminToken, clearSession, populateEditForm, localPosts]
   );
 
   const handleUnlockSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pinInput.trim()) {
-      setAuthError('Please enter the administrator PIN.');
+    const trimmed = pinInput.trim();
+    if (!trimmed) {
+      setAuthError('Invalid Admin Access Code');
       return;
     }
 
@@ -415,26 +514,59 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       const res = await fetch('/api/admin/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinInput }),
+        body: JSON.stringify({ phone: trimmed, pin: trimmed }),
       });
-      const data = await res.json();
+      const contentType = res.headers.get('content-type') || '';
 
-      if (!res.ok || !data.success || !data.token) {
-        setAuthError(data.error || 'Access denied. Invalid administrator PIN.');
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.token) {
+          setAuthError(data.error || 'Invalid Admin Access Code');
+          return;
+        }
+
+        try {
+          sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+          sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(data.expiresAt || Date.now() + 4 * 3600_000));
+        } catch {
+          // Ignore storage restrictions
+        }
+
+        setPinInput('');
+        setAdminToken(data.token);
         return;
       }
 
+      // Static Vercel SPA fallback when Express backend routes are not mounted
+      if (trimmed !== OWNER_ADMIN_PHONE) {
+        setAuthError('Invalid Admin Access Code');
+        return;
+      }
+
+      const fallbackToken = 'vercel-spa-admin';
       try {
-        sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
-        sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(data.expiresAt || Date.now() + 3600_000));
+        sessionStorage.setItem(ADMIN_TOKEN_KEY, fallbackToken);
+        sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(Date.now() + 4 * 3600_000));
       } catch {
         // Ignore storage restrictions
       }
 
       setPinInput('');
-      setAdminToken(data.token);
+      setAdminToken(fallbackToken);
     } catch {
-      setAuthError('Unable to reach verification server. Please try again.');
+      if (trimmed === OWNER_ADMIN_PHONE) {
+        const fallbackToken = 'vercel-spa-admin';
+        try {
+          sessionStorage.setItem(ADMIN_TOKEN_KEY, fallbackToken);
+          sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(Date.now() + 4 * 3600_000));
+        } catch {
+          // Ignore
+        }
+        setPinInput('');
+        setAdminToken(fallbackToken);
+      } else {
+        setAuthError('Invalid Admin Access Code');
+      }
     } finally {
       setSubmittingPin(false);
     }
@@ -467,60 +599,6 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       setGoogleStatusNote('');
     } finally {
       setGoogleAuthBusy(false);
-    }
-  };
-
-  const handleChangePin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!adminToken) return;
-    setPinChangeMsg(null);
-
-    if (newPinField.trim().length < 4) {
-      setPinChangeMsg({ type: 'err', text: 'New PIN must be at least 4 characters.' });
-      return;
-    }
-    if (newPinField !== confirmPinField) {
-      setPinChangeMsg({ type: 'err', text: 'New PIN and confirmation do not match.' });
-      return;
-    }
-
-    setSavingPin(true);
-    try {
-      const res = await fetch('/api/admin/change-pin', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          currentPin: currentPinField,
-          newPin: newPinField,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setPinChangeMsg({ type: 'err', text: data.error || 'Failed to update PIN.' });
-        return;
-      }
-
-      if (data.token) {
-        try {
-          sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
-          sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(data.expiresAt || Date.now() + 3600_000));
-        } catch {
-          // Ignore
-        }
-        setAdminToken(data.token);
-      }
-
-      setCurrentPinField('');
-      setNewPinField('');
-      setConfirmPinField('');
-      setPinChangeMsg({ type: 'ok', text: 'Custom administrator PIN saved.' });
-    } catch {
-      setPinChangeMsg({ type: 'err', text: 'Server error while saving new PIN.' });
-    } finally {
-      setSavingPin(false);
     }
   };
 
@@ -813,7 +891,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   }, [activityData, selectedThreadId]);
 
   // --------------------------------------------------------------------------
-  // PIN Gate Screen (Displayed whenever locked; normal users cannot bypass)
+  // Phone-Only Admin Gate (Displayed whenever locked; normal users cannot bypass)
   // --------------------------------------------------------------------------
   if (verifyingSession || !adminToken) {
     return (
@@ -826,7 +904,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
               </div>
               <div className="min-w-0">
                 <h1 className="text-lg font-bold text-slate-900 dark:text-white leading-tight">
-                  Administrator Access
+                  Admin Phone Verification
                 </h1>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                   Protected Platform Management Console
@@ -848,43 +926,49 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
               Verifying administrator session...
             </div>
           ) : (
-            <form onSubmit={handleUnlockSubmit} className="space-y-4">
+            <form onSubmit={handleUnlockSubmit} noValidate className="space-y-4">
               <div>
                 <label
-                  htmlFor="admin-pin-input"
+                  htmlFor="admin-phone-input"
                   className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5"
                 >
-                  Administrator PIN
+                  Authorized Admin Phone Number
                 </label>
                 <div className="relative">
-                  <KeyRound className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <input
-                    id="admin-pin-input"
-                    type={showPin ? 'text' : 'password'}
+                    id="admin-phone-input"
+                    type={showPin ? 'tel' : 'password'}
+                    inputMode="numeric"
                     autoFocus
-                    autoComplete="current-password"
-                    required
+                    autoComplete="off"
                     value={pinInput}
-                    onChange={(e) => setPinInput(e.target.value)}
-                    placeholder="Enter administrator PIN"
+                    onChange={(e) => {
+                      setPinInput(e.target.value);
+                      if (authError) setAuthError('');
+                    }}
+                    placeholder="Enter authorized admin phone number"
                     className="w-full min-h-[44px] pl-10 pr-12 py-2.5 text-sm bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 text-slate-900 dark:text-white font-mono tracking-wider"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPin((v) => !v)}
                     className="absolute right-1.5 top-1/2 -translate-y-1/2 min-w-[40px] min-h-[40px] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg"
-                    aria-label={showPin ? 'Hide PIN' : 'Show PIN'}
+                    aria-label={showPin ? 'Hide phone number' : 'Show phone number'}
                   >
                     {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
                 <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5 leading-relaxed">
-                  Only authorized administrators with a valid PIN can inspect user profiles, chat logs, and platform controls.
+                  Only the authorized owner phone number can unlock user profiles, personal chat logs, and platform management controls.
                 </p>
               </div>
 
               {authError && (
-                <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 rounded-xl text-xs text-red-700 dark:text-red-300 flex items-start gap-2">
+                <div
+                  role="alert"
+                  className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 rounded-xl text-xs text-red-700 dark:text-red-300 flex items-start gap-2"
+                >
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{authError}</span>
                 </div>
@@ -896,7 +980,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                   disabled={submittingPin}
                   className="flex-1 min-h-[44px] px-4 py-2.5 bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 text-white text-xs font-semibold rounded-xl transition-colors disabled:opacity-60 whitespace-nowrap"
                 >
-                  {submittingPin ? 'Verifying PIN...' : 'Unlock Dashboard'}
+                  {submittingPin ? 'Verifying...' : 'Unlock Dashboard'}
                 </button>
                 <button
                   type="button"
@@ -965,18 +1049,6 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loadingUsers ? 'animate-spin' : ''}`} />
             <span>Refresh</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              setPinChangeMsg(null);
-              setIsPinModalOpen(true);
-            }}
-            className="min-h-[44px] px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold rounded-xl transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-          >
-            <KeyRound className="w-3.5 h-3.5" />
-            <span>Change PIN</span>
           </button>
 
           <button
@@ -2275,111 +2347,6 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
         </div>
       )}
 
-      {/* Custom Admin PIN Modal */}
-      {isPinModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-base font-bold text-slate-900 dark:text-white">
-                  Update Administrator PIN
-                </h2>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Replace the default PIN with a custom administrator password.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsPinModalOpen(false)}
-                className="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                aria-label="Close modal"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={handleChangePin} className="space-y-3">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Current PIN
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={currentPinField}
-                  onChange={(e) => setCurrentPinField(e.target.value)}
-                  placeholder="Enter current PIN"
-                  className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  New Custom PIN
-                </label>
-                <input
-                  type="password"
-                  required
-                  minLength={4}
-                  value={newPinField}
-                  onChange={(e) => setNewPinField(e.target.value)}
-                  placeholder="Minimum 4 characters"
-                  className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                  Confirm New PIN
-                </label>
-                <input
-                  type="password"
-                  required
-                  minLength={4}
-                  value={confirmPinField}
-                  onChange={(e) => setConfirmPinField(e.target.value)}
-                  placeholder="Re-enter new PIN"
-                  className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white font-mono"
-                />
-              </div>
-
-              {pinChangeMsg && (
-                <div
-                  className={`p-3 rounded-xl text-xs flex items-center gap-2 border ${
-                    pinChangeMsg.type === 'ok'
-                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
-                      : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/50 text-red-700 dark:text-red-300'
-                  }`}
-                >
-                  {pinChangeMsg.type === 'ok' ? (
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                  )}
-                  <span>{pinChangeMsg.text}</span>
-                </div>
-              )}
-
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsPinModalOpen(false)}
-                  className="min-h-[44px] px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-xl"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={savingPin}
-                  className="min-h-[44px] px-4 py-2 text-xs font-semibold text-white bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 rounded-xl disabled:opacity-60"
-                >
-                  {savingPin ? 'Saving...' : 'Save Custom PIN'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

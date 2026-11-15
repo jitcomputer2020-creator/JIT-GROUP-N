@@ -16,7 +16,42 @@
       "usr_jit_002",
       "usr_jit_004"
     ],
-    "comments": []
+    "comments": [
+      {
+        "id": "comm_001",
+        "postId": "post_001",
+        "authorId": "usr_jit_002",
+        "authorName": "Priya Mukherjee",
+        "authorAvatar": "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=200&q=80",
+        "content": "Looking forward to the Chess Blitz championship, Professor!",
+        "createdAt": "1 hour ago",
+        "likesCount": 3,
+        "replies": [
+          {
+            "id": "reply_001",
+            "postId": "post_001",
+            "parentId": "comm_001",
+            "authorId": "usr_jit_primary_001",
+            "authorName": "Prof. Ramesh Sharma",
+            "authorAvatar": "/assets/aistudio/image_e64e54f2.png",
+            "content": "Make sure to bring your A-game, Priya! The trophies have arrived.",
+            "createdAt": "45m ago",
+            "likesCount": 2
+          }
+        ]
+      },
+      {
+        "id": "comm_002",
+        "postId": "post_001",
+        "authorId": "usr_jit_003",
+        "authorName": "Arjun Verma",
+        "authorAvatar": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=200&q=80",
+        "content": "Ludo room bracket is filled up. This is going to be epic!",
+        "createdAt": "30m ago",
+        "likesCount": 1,
+        "replies": []
+      }
+    ]
   },
   {
     "id": "post_002",
@@ -36,7 +71,19 @@
       "usr_jit_002",
       "usr_jit_003"
     ],
-    "comments": []
+    "comments": [
+      {
+        "id": "comm_003",
+        "postId": "post_002",
+        "authorId": "usr_jit_004",
+        "authorName": "Ananya Sen",
+        "authorAvatar": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80",
+        "content": "Joining the Snake & Ladder room right now!",
+        "createdAt": "2 hours ago",
+        "likesCount": 2,
+        "replies": []
+      }
+    ]
   },
   {
     "id": "post_003",
@@ -56,5 +103,26 @@
       "usr_jit_004"
     ],
     "comments": []
+  },
+  {
+    "id": "post_1793998431446_e4jf",
+    "authorId": "usr_jit_1793997636044_ifb0c",
+    "authorName": "rajdeep dhar",
+    "authorAvatar": "/assets/aistudio/image_e64e54f2.png",
+    "authorHandle": "@rajdeep_dhar",
+    "content": "good morning",
+    "mediaUrls": [],
+    "mediaType": "none",
+    "createdAt": "Just now",
+    "likesCount": 1,
+    "commentsCount": 0,
+    "sharesCount": 0,
+    "isLiked": true,
+    "isSaved": false,
+    "likedBy": [
+      "usr_jit_1793997636044_ifb0c"
+    ],
+    "comments": [],
+    "category": "all"
   }
 ]

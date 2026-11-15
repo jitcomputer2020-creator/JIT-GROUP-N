@@ -52,6 +52,12 @@
           "pattern": "^[0-9]{7,15}$",
           "description": "Normalized digit key for cross-browser phone lookup."
         },
+        "username": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "description": "Public searchable handle without @ prefix."
+        },
         "fullName": {
           "type": "string",
           "minLength": 1,
@@ -336,6 +342,76 @@
         }
       },
       "required": ["uid", "email", "grantedAt"]
+    },
+    "UserDirectoryEntry": {
+      "title": "UserDirectoryEntry",
+      "description": "Non-PII searchable directory entry for app-wide peer discovery.",
+      "type": "object",
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "fullNameLower": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "username": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "usernameLower": { "type": "string", "minLength": 2, "maxLength": 64 },
+        "avatarUrl": { "type": "string", "maxLength": 400000 },
+        "bio": { "type": "string", "maxLength": 500 },
+        "address": { "type": "string", "maxLength": 300 },
+        "phoneLast4": { "type": "string", "maxLength": 4 },
+        "rewardPoints": { "type": "integer" },
+        "gamesWon": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "profileId",
+        "fullName",
+        "fullNameLower",
+        "username",
+        "usernameLower",
+        "rewardPoints",
+        "gamesWon",
+        "updatedAt"
+      ]
+    },
+    "GameRoom": {
+      "title": "GameRoom",
+      "description": "Real-time 4-digit multiplayer room synced across devices via Firestore.",
+      "type": "object",
+      "properties": {
+        "roomCode": { "type": "string", "minLength": 4, "maxLength": 4, "pattern": "^[0-9]{4}$" },
+        "gameId": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "hostId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "status": { "type": "string", "enum": ["waiting", "in_game", "finished"] },
+        "maxPlayers": { "type": "integer" },
+        "playerCount": { "type": "integer" },
+        "isPublicMatch": { "type": "boolean" },
+        "playersJson": { "type": "string", "maxLength": 30000 },
+        "gameStateJson": { "type": "string", "maxLength": 100000 },
+        "messagesJson": { "type": "string", "maxLength": 100000 },
+        "moveAction": { "type": "string", "maxLength": 40 },
+        "currentTurn": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "roomCode",
+        "gameId",
+        "hostId",
+        "status",
+        "maxPlayers",
+        "playerCount",
+        "isPublicMatch",
+        "playersJson",
+        "gameStateJson",
+        "messagesJson",
+        "currentTurn",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -358,6 +434,14 @@
     "/admins/{adminId}": {
       "schema": { "$ref": "#/entities/AdminRole" },
       "description": "Authorized administrator accounts permitted to list user profiles."
+    },
+    "/user_directory/{profileId}": {
+      "schema": { "$ref": "#/entities/UserDirectoryEntry" },
+      "description": "Non-PII searchable directory for app-wide friend search."
+    },
+    "/gameRooms/{roomCode}": {
+      "schema": { "$ref": "#/entities/GameRoom" },
+      "description": "Real-time 4-digit code multiplayer rooms synced via Firestore."
     }
   }
 }

@@ -1,7 +1,7 @@
 {
-  "pinHash": "ae9257274c3984ca53ff46c784341be77e7d1ca6f32baa25a27a515f06ba3f6bd9340e0fabfb72ed8032bb8c24fd5210c87629ebe074ed3e05d9d71e0247e06a",
-  "salt": "8a4648c09e542385a0f9654615307ce2",
-  "sessionSecret": "cdd826e8ea58a32515daae66e815c7311ed47edac0b698216107b569a5cfe9b9",
-  "isDefaultPin": true,
-  "updatedAt": "2026-11-14T05:43:57.756Z"
+  "pinHash": "f7b81c58d1ecf57ba7734dc46c6c538bef1ceaf37b5901e2fafe2d1455da3774936ea6d794b598eb1dfd811929df11fcfafb4cd6ed458a4ba8e93faf3d03da12",
+  "salt": "b3ce883053ff8d29049ff7f28c5fc27d",
+  "sessionSecret": "7dd78a13b9ff91de7c105004d7ff37c6f1db0c8818d819469ceca82b416137fa",
+  "phoneAuthVersion": 2,
+  "updatedAt": "2026-11-15T04:23:51.549Z"
 }
