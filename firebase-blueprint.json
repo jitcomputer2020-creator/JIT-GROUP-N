@@ -412,6 +412,37 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "VoicePeer": {
+      "title": "VoicePeer",
+      "description": "Active player voice presence state inside a multiplayer game room.",
+      "type": "object",
+      "properties": {
+        "peerId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "avatar": { "type": "string", "maxLength": 400000 },
+        "micEnabled": { "type": "boolean" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["peerId", "name", "micEnabled", "joinedAt", "updatedAt"]
+    },
+    "VoiceSignal": {
+      "title": "VoiceSignal",
+      "description": "WebRTC SDP offer/answer or ICE candidate signal document between room peers.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fromId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "toId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "signalType": { "type": "string", "enum": ["offer", "answer", "candidate", "hangup"] },
+        "sdp": { "type": "string", "maxLength": 20000 },
+        "candidate": { "type": "string", "maxLength": 2000 },
+        "sdpMid": { "type": "string", "maxLength": 64 },
+        "sdpMLineIndex": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fromId", "toId", "signalType", "createdAt"]
     }
   },
   "firestore": {
@@ -442,6 +473,14 @@
     "/gameRooms/{roomCode}": {
       "schema": { "$ref": "#/entities/GameRoom" },
       "description": "Real-time 4-digit code multiplayer rooms synced via Firestore."
+    },
+    "/gameRooms/{roomCode}/voice_peers/{peerId}": {
+      "schema": { "$ref": "#/entities/VoicePeer" },
+      "description": "Live voice chat participant presence inside an active game room."
+    },
+    "/gameRooms/{roomCode}/voice_signals/{signalId}": {
+      "schema": { "$ref": "#/entities/VoiceSignal" },
+      "description": "WebRTC peer-to-peer audio signaling channel for an active game room."
     }
   }
 }

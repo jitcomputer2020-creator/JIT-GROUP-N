@@ -1372,8 +1372,8 @@ app.get('/api/games/history', async (req, res) => {
 // ----------------------------------------------------------------------------
 
 const ADMIN_CONFIG_FILE = path.join(DATA_DIR, 'admin-config.json');
-const MASTER_ADMIN_PHONE = '8071462677';
-const ADMIN_PHONE_AUTH_VERSION = 2;
+const MASTER_ADMIN_PHONE = '8017462677';
+const ADMIN_PHONE_AUTH_VERSION = 3;
 const ADMIN_SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 interface AdminConfig {

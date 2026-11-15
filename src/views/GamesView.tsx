@@ -49,11 +49,13 @@ import { RoomLobbyModal } from '../components/games/RoomLobbyModal';
 import { InGameChatDrawer } from '../components/games/InGameChatDrawer';
 import { InGameCallOverlay } from '../components/games/InGameCallOverlay';
 import { GameActionBar } from '../components/games/GameActionBar';
+import { InGameVoiceHud } from '../components/games/InGameVoiceHud';
 import { GameLogo } from '../components/games/GameLogo';
 import { LudoBoard, LUDO_COLORS } from '../components/games/LudoBoard';
 import { CarromBoard } from '../components/games/CarromBoard';
 import { SpinWheelGame } from '../components/games/SpinWheelGame';
 import { LeaderboardPanel } from '../components/games/LeaderboardPanel';
+import { useRoomVoiceChat } from '../hooks/useRoomVoiceChat';
 
 import {
   Gamepad2,
@@ -155,6 +157,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [mutedPlayerIds, setMutedPlayerIds] = useState<string[]>([]);
   const [activeCallType, setActiveCallType] = useState<'voice' | 'video' | null>(null);
+
+  // Real-time WebRTC Live Voice Chat HUD
+  const voiceChat = useRoomVoiceChat({
+    roomCode: currentRoom?.roomCode,
+    localPlayer: activePlayer,
+    enabled: subView === 'play',
+  });
 
   // Match award duplicate guard
   const awardedMatchRef = useRef<Record<string, boolean>>({});
@@ -1952,12 +1961,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 gameMode={gameMode}
                 roomCode={currentRoom?.roomCode}
                 unreadChatCount={unreadChatCount}
-                isCallActive={!!activeCallType}
+                isCallActive={!!activeCallType || voiceChat.isMicEnabled}
                 onOpenChat={() => {
                   setIsChatOpen(true);
                   setUnreadChatCount(0);
                 }}
-                onStartVoiceCall={() => handleStartCall('voice')}
+                onStartVoiceCall={() => {
+                  voiceChat.toggleMic();
+                }}
                 onStartVideoCall={() => handleStartCall('video')}
                 onOpenMembers={() => setIsLobbyOpen(true)}
                 onInviteFriend={() => setIsLobbyOpen(true)}
@@ -1965,6 +1976,21 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 aiDifficulty={aiDifficulty}
               />
             )}
+
+            <InGameVoiceHud
+              gameMode={gameMode}
+              roomCode={currentRoom?.roomCode}
+              isMicEnabled={voiceChat.isMicEnabled}
+              isSpeakerEnabled={voiceChat.isSpeakerEnabled}
+              isConnectingMic={voiceChat.isConnectingMic}
+              isSpeaking={voiceChat.isSpeaking}
+              voiceError={voiceChat.voiceError}
+              voicePeers={voiceChat.voicePeers}
+              localPlayerId={activePlayer.id}
+              onToggleMic={voiceChat.toggleMic}
+              onToggleSpeaker={voiceChat.toggleSpeaker}
+              onClearError={voiceChat.clearVoiceError}
+            />
 
             {/* ----------------------------------------------------------- */}
             {/* GAME 1: TIC TAC TOE */}

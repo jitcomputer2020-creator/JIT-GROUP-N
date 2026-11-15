@@ -267,6 +267,32 @@ service cloud.firestore {
         );
     }
 
+    function isValidVoicePeer(data, peerId) {
+      return data.keys().hasAll(['peerId', 'name', 'micEnabled', 'joinedAt', 'updatedAt']) &&
+        data.keys().hasOnly(['peerId', 'name', 'avatar', 'micEnabled', 'joinedAt', 'updatedAt']) &&
+        isValidId(data.peerId) &&
+        data.peerId == peerId &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 400000)) &&
+        data.micEnabled is bool &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidVoiceSignal(data, signalId) {
+      return data.keys().hasAll(['id', 'fromId', 'toId', 'signalType', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'fromId', 'toId', 'signalType', 'sdp', 'candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt']) &&
+        isValidId(data.id) &&
+        data.id == signalId &&
+        isValidId(data.fromId) &&
+        isValidId(data.toId) &&
+        data.signalType in ['offer', 'answer', 'candidate', 'hangup'] &&
+        (!('sdp' in data) || (data.sdp is string && data.sdp.size() <= 20000)) &&
+        (!('candidate' in data) || (data.candidate is string && data.candidate.size() <= 2000)) &&
+        (!('sdpMid' in data) || (data.sdpMid is string && data.sdpMid.size() <= 64)) &&
+        (!('sdpMLineIndex' in data) || (data.sdpMLineIndex is int && data.sdpMLineIndex >= 0 && data.sdpMLineIndex <= 16)) &&
+        data.createdAt == request.time;
+    }
+
     // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
@@ -336,6 +362,31 @@ service cloud.firestore {
       allow create: if isValidRoomCode(roomCode) && isValidGameRoomCreate(incoming(), roomCode);
       allow update: if isValidRoomCode(roomCode) && isValidGameRoomUpdate(incoming(), existing(), roomCode);
       allow delete: if isValidRoomCode(roomCode) && existing().playerCount <= 1;
+
+      match /voice_peers/{peerId} {
+        allow get: if isValidRoomCode(roomCode) && isValidId(peerId);
+        allow list: if isValidRoomCode(roomCode) && existing().micEnabled in [true, false];
+        allow create: if isValidRoomCode(roomCode) && isValidId(peerId) &&
+          exists(/databases/$(database)/documents/gameRooms/$(roomCode)) &&
+          isValidVoicePeer(incoming(), peerId) &&
+          incoming().joinedAt == request.time;
+        allow update: if isValidRoomCode(roomCode) && isValidId(peerId) &&
+          exists(/databases/$(database)/documents/gameRooms/$(roomCode)) &&
+          isValidVoicePeer(incoming(), peerId) &&
+          incoming().joinedAt == existing().joinedAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'avatar', 'micEnabled', 'updatedAt']);
+        allow delete: if isValidRoomCode(roomCode) && isValidId(peerId);
+      }
+
+      match /voice_signals/{signalId} {
+        allow get: if isValidRoomCode(roomCode) && isValidId(signalId);
+        allow list: if isValidRoomCode(roomCode) && existing().toId.size() >= 3;
+        allow create: if isValidRoomCode(roomCode) && isValidId(signalId) &&
+          exists(/databases/$(database)/documents/gameRooms/$(roomCode)) &&
+          isValidVoiceSignal(incoming(), signalId);
+        allow update: if false;
+        allow delete: if isValidRoomCode(roomCode) && isValidId(signalId);
+      }
     }
   }
 }

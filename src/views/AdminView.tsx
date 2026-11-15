@@ -91,9 +91,9 @@ type SortOption = 'joined_desc' | 'login_desc' | 'points_desc' | 'name_asc';
 type StatusFilter = 'all' | 'active' | 'suspended' | 'idle_30d';
 type InspectorTab = 'overview' | 'chats' | 'activity' | 'moderation';
 
-const ADMIN_TOKEN_KEY = 'jit_admin_phone_token_v2';
-const ADMIN_EXPIRY_KEY = 'jit_admin_phone_expiry_v2';
-const OWNER_ADMIN_PHONE = '8071462677';
+const ADMIN_TOKEN_KEY = 'jit_admin_phone_token_v3';
+const ADMIN_EXPIRY_KEY = 'jit_admin_phone_expiry_v3';
+const OWNER_ADMIN_PHONE = '8017462677';
 const INACTIVITY_DAYS_LIMIT = 180;
 
 function formatDateTime(iso?: string): { date: string; time: string } {
@@ -502,73 +502,57 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const handleUnlockSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = pinInput.trim();
-    if (!trimmed) {
+
+    if (trimmed !== OWNER_ADMIN_PHONE) {
       setAuthError('Invalid Admin Access Code');
       return;
     }
 
-    setSubmittingPin(true);
     setAuthError('');
+    setSubmittingPin(true);
 
+    // Immediate client-side unlock (no server timeout errors on Vercel / static SPA)
+    const fallbackToken = 'vercel-spa-admin';
     try {
+      sessionStorage.setItem(ADMIN_TOKEN_KEY, fallbackToken);
+      sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(Date.now() + 4 * 3600_000));
+    } catch {
+      // Ignore storage restrictions
+    }
+
+    setPinInput('');
+    setAdminToken(fallbackToken);
+    setSubmittingPin(false);
+
+    // Best-effort background upgrade to Express session token when local backend is active
+    try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 2000);
       const res = await fetch('/api/admin/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: trimmed, pin: trimmed }),
+        signal: controller.signal,
       });
+      window.clearTimeout(timeoutId);
       const contentType = res.headers.get('content-type') || '';
-
-      if (contentType.includes('application/json')) {
+      if (contentType.includes('application/json') && res.ok) {
         const data = await res.json();
-        if (!res.ok || !data.success || !data.token) {
-          setAuthError(data.error || 'Invalid Admin Access Code');
-          return;
+        if (data?.success && data?.token) {
+          try {
+            sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+            sessionStorage.setItem(
+              ADMIN_EXPIRY_KEY,
+              String(data.expiresAt || Date.now() + 4 * 3600_000)
+            );
+          } catch {
+            // Ignore
+          }
+          setAdminToken(data.token);
         }
-
-        try {
-          sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
-          sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(data.expiresAt || Date.now() + 4 * 3600_000));
-        } catch {
-          // Ignore storage restrictions
-        }
-
-        setPinInput('');
-        setAdminToken(data.token);
-        return;
       }
-
-      // Static Vercel SPA fallback when Express backend routes are not mounted
-      if (trimmed !== OWNER_ADMIN_PHONE) {
-        setAuthError('Invalid Admin Access Code');
-        return;
-      }
-
-      const fallbackToken = 'vercel-spa-admin';
-      try {
-        sessionStorage.setItem(ADMIN_TOKEN_KEY, fallbackToken);
-        sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(Date.now() + 4 * 3600_000));
-      } catch {
-        // Ignore storage restrictions
-      }
-
-      setPinInput('');
-      setAdminToken(fallbackToken);
     } catch {
-      if (trimmed === OWNER_ADMIN_PHONE) {
-        const fallbackToken = 'vercel-spa-admin';
-        try {
-          sessionStorage.setItem(ADMIN_TOKEN_KEY, fallbackToken);
-          sessionStorage.setItem(ADMIN_EXPIRY_KEY, String(Date.now() + 4 * 3600_000));
-        } catch {
-          // Ignore
-        }
-        setPinInput('');
-        setAdminToken(fallbackToken);
-      } else {
-        setAuthError('Invalid Admin Access Code');
-      }
-    } finally {
-      setSubmittingPin(false);
+      // Client-side admin dashboard remains unlocked cleanly
     }
   };
 

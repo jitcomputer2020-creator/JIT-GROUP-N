@@ -1467,3 +1467,203 @@ export function subscribeToGameRoom(
   );
 }
 
+// ============================================================================
+// REAL-TIME WEBRTC IN-GAME VOICE CHAT SIGNALING (FIRESTORE)
+// ============================================================================
+
+export interface FirestoreVoicePeer {
+  peerId: string;
+  name: string;
+  avatar: string;
+  micEnabled: boolean;
+}
+
+export interface FirestoreVoiceSignal {
+  id: string;
+  fromId: string;
+  toId: string;
+  signalType: 'offer' | 'answer' | 'candidate' | 'hangup';
+  sdp?: string;
+  candidate?: string;
+  sdpMid?: string;
+  sdpMLineIndex?: number;
+}
+
+function sanitizeVoiceId(raw: string): string {
+  const cleaned = (raw || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 72);
+  return cleaned.length >= 3 ? cleaned : `peer_${cleaned || '000'}`;
+}
+
+export async function upsertFirestoreVoicePeer(
+  roomCode: string,
+  peer: FirestoreVoicePeer
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const peerId = sanitizeVoiceId(peer.peerId);
+  const peerRef = doc(db, 'gameRooms', cleanCode, 'voice_peers', peerId);
+  const safeName = (peer.name || 'Player').trim().slice(0, 80) || 'Player';
+  const safeAvatar =
+    typeof peer.avatar === 'string' && peer.avatar.length <= 400000 ? peer.avatar : '';
+
+  try {
+    const snap = await getDoc(peerRef);
+    if (snap.exists()) {
+      await updateDoc(peerRef, {
+        name: safeName,
+        ...(safeAvatar ? { avatar: safeAvatar } : {}),
+        micEnabled: Boolean(peer.micEnabled),
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await setDoc(peerRef, {
+        peerId,
+        name: safeName,
+        ...(safeAvatar ? { avatar: safeAvatar } : {}),
+        micEnabled: Boolean(peer.micEnabled),
+        joinedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `gameRooms/${cleanCode}/voice_peers/${peerId}`);
+    }
+    console.warn('Firestore voice peer upsert notice:', err);
+  }
+}
+
+export async function removeFirestoreVoicePeer(
+  roomCode: string,
+  rawPeerId: string
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const peerId = sanitizeVoiceId(rawPeerId);
+  try {
+    await deleteDoc(doc(db, 'gameRooms', cleanCode, 'voice_peers', peerId));
+  } catch (err) {
+    console.warn('Firestore voice peer cleanup notice:', err);
+  }
+}
+
+export function subscribeToFirestoreVoicePeers(
+  roomCode: string,
+  onPeers: (peers: FirestoreVoicePeer[]) => void
+): Unsubscribe {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return () => {};
+  const q = query(
+    collection(db, 'gameRooms', cleanCode, 'voice_peers'),
+    where('micEnabled', 'in', [true, false])
+  );
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const peers: FirestoreVoicePeer[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data();
+        peers.push({
+          peerId: String(data.peerId || d.id),
+          name: String(data.name || 'Player'),
+          avatar: String(data.avatar || ''),
+          micEnabled: Boolean(data.micEnabled),
+        });
+      });
+      onPeers(peers);
+    },
+    (err) => {
+      console.warn('Firestore voice peers onSnapshot notice:', err);
+    }
+  );
+}
+
+export async function sendFirestoreVoiceSignal(
+  roomCode: string,
+  signal: Omit<FirestoreVoiceSignal, 'id'>
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const signalId = `sig_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const payload: Record<string, any> = {
+    id: signalId,
+    fromId: sanitizeVoiceId(signal.fromId),
+    toId: sanitizeVoiceId(signal.toId),
+    signalType: signal.signalType,
+    createdAt: serverTimestamp(),
+  };
+  if (typeof signal.sdp === 'string' && signal.sdp.length > 0 && signal.sdp.length <= 20000) {
+    payload.sdp = signal.sdp;
+  }
+  if (
+    typeof signal.candidate === 'string' &&
+    signal.candidate.length > 0 &&
+    signal.candidate.length <= 2000
+  ) {
+    payload.candidate = signal.candidate;
+  }
+  if (typeof signal.sdpMid === 'string' && signal.sdpMid.length > 0 && signal.sdpMid.length <= 64) {
+    payload.sdpMid = signal.sdpMid;
+  }
+  if (
+    typeof signal.sdpMLineIndex === 'number' &&
+    Number.isInteger(signal.sdpMLineIndex) &&
+    signal.sdpMLineIndex >= 0 &&
+    signal.sdpMLineIndex <= 16
+  ) {
+    payload.sdpMLineIndex = signal.sdpMLineIndex;
+  }
+
+  try {
+    await setDoc(doc(db, 'gameRooms', cleanCode, 'voice_signals', signalId), payload);
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(
+        err,
+        OperationType.CREATE,
+        `gameRooms/${cleanCode}/voice_signals/${signalId}`
+      );
+    }
+    console.warn('Firestore voice signal notice:', err);
+  }
+}
+
+export function subscribeToFirestoreVoiceSignals(
+  roomCode: string,
+  myPeerId: string,
+  onSignal: (signal: FirestoreVoiceSignal) => void
+): Unsubscribe {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return () => {};
+  const targetId = sanitizeVoiceId(myPeerId);
+  const q = query(
+    collection(db, 'gameRooms', cleanCode, 'voice_signals'),
+    where('toId', '==', targetId)
+  );
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const data = change.doc.data();
+          onSignal({
+            id: String(data.id || change.doc.id),
+            fromId: String(data.fromId || ''),
+            toId: String(data.toId || ''),
+            signalType: data.signalType as FirestoreVoiceSignal['signalType'],
+            sdp: typeof data.sdp === 'string' ? data.sdp : undefined,
+            candidate: typeof data.candidate === 'string' ? data.candidate : undefined,
+            sdpMid: typeof data.sdpMid === 'string' ? data.sdpMid : undefined,
+            sdpMLineIndex: typeof data.sdpMLineIndex === 'number' ? data.sdpMLineIndex : undefined,
+          });
+          deleteDoc(change.doc.ref).catch(() => {});
+        }
+      });
+    },
+    (err) => {
+      console.warn('Firestore voice signals onSnapshot notice:', err);
+    }
+  );
+}
+
+
