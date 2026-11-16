@@ -514,6 +514,7 @@
         "id": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "conversationId": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "senderId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "receiverId": { "type": "string", "maxLength": 64 },
         "senderName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "senderAvatar": { "type": "string", "maxLength": 400000 },
         "content": { "type": "string", "maxLength": 4000 },
@@ -580,6 +581,26 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "authorId", "authorName", "content", "mediaType", "category", "likesCount", "commentsCount", "sharesCount", "likedBy", "createdAt", "createdAtMs", "createdAtTs", "updatedAt"]
+    },
+    "GlobalAnnouncement": {
+      "title": "GlobalAnnouncement",
+      "description": "Site-wide admin broadcast notice with optional photo or video attachment.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 80, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "priority": { "type": "string", "enum": ["info", "important", "event"] },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "mediaUrl": { "type": "string", "maxLength": 750000 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "none"] },
+        "thumbnailUrl": { "type": "string", "maxLength": 180000 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "createdAtMs": { "type": "integer" },
+        "expiresAt": { "type": "integer" },
+        "createdAtTs": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "message", "priority", "authorName", "createdAt", "createdAtMs", "createdAtTs"]
     }
   },
   "firestore": {
@@ -642,6 +663,10 @@
     "/posts/{postId}": {
       "schema": { "$ref": "#/entities/FeedPost" },
       "description": "Public feed posts including video posts with 40-day automatic expiry."
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/GlobalAnnouncement" },
+      "description": "Site-wide admin announcements with optional image or video banners."
     }
   }
 }

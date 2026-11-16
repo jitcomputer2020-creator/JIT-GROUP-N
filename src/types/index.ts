@@ -57,6 +57,11 @@ export interface GlobalAnnouncement {
   priority: 'info' | 'important' | 'event';
   authorName: string;
   createdAt: string;
+  createdAtMs?: number;
+  mediaUrl?: string;
+  mediaType?: 'image' | 'video' | 'none';
+  thumbnailUrl?: string;
+  expiresAt?: number;
 }
 
 export interface Post {
@@ -173,12 +178,14 @@ export interface Message {
   id: string;
   conversationId: string;
   senderId: string;
+  receiverId?: string;
   senderName: string;
   senderAvatar?: string;
   content: string;
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'file';
   createdAt: string;
+  createdAtMs?: number;
   status: 'sent' | 'delivered' | 'read';
 }
 

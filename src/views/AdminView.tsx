@@ -4,11 +4,20 @@
  */
 
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { UserProfile, GlobalAnnouncement, Conversation, Message, Post, MatchHistoryRecord } from '../types';
+import {
+  UserProfile,
+  GlobalAnnouncement,
+  Conversation,
+  Message,
+  Post,
+  Reel,
+  MatchHistoryRecord,
+} from '../types';
 import { APP_CONFIG } from '../constants/branding';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { saveCompressedProfileMediaFile, validateMediaFile } from '../services/mediaStorage';
+import { ResilientVideo } from '../components/common/ResilientVideo';
 import {
   auth,
   fetchAllCloudProfilesAsAdmin,
@@ -17,6 +26,19 @@ import {
   deleteCloudProfileAsAdmin,
   signInAdminWithGoogle,
   signOutAdminGoogle,
+  adminOverrideCloudProfileClient,
+  adminModerateCloudProfileClient,
+  adminFetchUserChatActivityClient,
+  adminFetchUserActivityClient,
+  deleteFirestorePost,
+  deleteFirestoreReel,
+  deleteFirestoreMatchRecord,
+  uploadAnnouncementMediaToCloud,
+  publishFirestoreAnnouncement,
+  subscribeToFirestoreAnnouncements,
+  deleteFirestoreAnnouncement,
+  isVideoContentExpired,
+  deriveUsername,
 } from '../lib/firebase';
 import {
   Lock,
@@ -26,7 +48,6 @@ import {
   RefreshCw,
   Search,
   Download,
-  KeyRound,
   LogOut,
   ShieldCheck,
   AlertCircle,
@@ -45,11 +66,14 @@ import {
   RotateCcw,
   Save,
   Upload,
-  Sparkles,
   Trophy,
   ChevronRight,
   Send,
   ShieldAlert,
+  Image as ImageIcon,
+  Video,
+  Film,
+  Loader2,
 } from 'lucide-react';
 
 interface AdminUserRecord extends UserProfile {
@@ -68,7 +92,7 @@ interface PlatformAnalytics {
 interface UserActivityPayload {
   user: AdminUserRecord;
   conversations: Conversation[];
-  messages: Array<Message & { timestampIso?: string }>;
+  messages: Array<Message & { timestampIso?: string; createdAtMs?: number }>;
   inGameMessages: Array<{
     id: string;
     roomCode: string;
@@ -80,6 +104,7 @@ interface UserActivityPayload {
     timestamp: string;
   }>;
   posts: Post[];
+  reels: Reel[];
   matchHistory: MatchHistoryRecord[];
 }
 
@@ -131,7 +156,10 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const {
     refreshAnnouncements,
     posts: localPosts,
+    reels: localReels,
     announcements: localAnnouncements,
+    deletePost,
+    deleteReel,
   } = useSocial();
 
   const [adminToken, setAdminToken] = useState<string | null>(() => {
@@ -188,6 +216,10 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const [annMessage, setAnnMessage] = useState('');
   const [annPriority, setAnnPriority] = useState<'important' | 'info' | 'event'>('important');
   const [annPostToFeed, setAnnPostToFeed] = useState(true);
+  const [annMediaFile, setAnnMediaFile] = useState<File | null>(null);
+  const [annMediaPreviewUrl, setAnnMediaPreviewUrl] = useState<string | null>(null);
+  const [annMediaType, setAnnMediaType] = useState<'none' | 'image' | 'video'>('none');
+  const [annUploadProgress, setAnnUploadProgress] = useState<number>(0);
   const [sendingBroadcast, setSendingBroadcast] = useState(false);
   const [broadcastFeedback, setBroadcastFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -198,9 +230,14 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const [loadingActivity, setLoadingActivity] = useState(false);
   const [activityError, setActivityError] = useState('');
   const [selectedThreadId, setSelectedThreadId] = useState<string>('all');
+  const [dmSearchQuery, setDmSearchQuery] = useState('');
+  const [deletingActivityId, setDeletingActivityId] = useState<string | null>(null);
+  const [activityFeedback, setActivityFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   // Admin Profile Override form state
   const [editFullName, setEditFullName] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editStatus, setEditStatus] = useState<'active' | 'suspended'>('active');
   const [editBio, setEditBio] = useState('');
   const [editAvatarUrl, setEditAvatarUrl] = useState('');
   const [editCoverUrl, setEditCoverUrl] = useState('');
@@ -216,6 +253,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
 
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const coverInputRef = useRef<HTMLInputElement>(null);
+  const annImageInputRef = useRef<HTMLInputElement>(null);
+  const annVideoInputRef = useRef<HTMLInputElement>(null);
 
   const clearSession = useCallback(() => {
     setAdminToken(null);
@@ -306,7 +345,15 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             if (annRes.ok && (annRes.headers.get('content-type') || '').includes('application/json')) {
               const annData = await annRes.json();
               if (Array.isArray(annData.announcements)) {
-                setAnnouncements(annData.announcements);
+                setAnnouncements((prev) => {
+                  const byId = new Map<string, GlobalAnnouncement>();
+                  for (const a of [...annData.announcements, ...prev]) {
+                    if (!isVideoContentExpired(a) && !byId.has(a.id)) byId.set(a.id, a);
+                  }
+                  return Array.from(byId.values()).sort(
+                    (a, b) => (b.createdAtMs || Date.parse(b.createdAt) || 0) - (a.createdAtMs || Date.parse(a.createdAt) || 0)
+                  );
+                });
               }
             }
 
@@ -349,6 +396,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                   id: entry.profileId,
                   contactNumber: matchedLocal?.contactNumber || '—',
                   fullName: entry.fullName,
+                  username: matchedLocal?.username || deriveUsername(entry.fullName),
                   address: matchedLocal?.address || 'JIT Campus',
                   bio: matchedLocal?.bio || '',
                   avatarUrl: entry.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
@@ -383,7 +431,15 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             }
           }
 
-          setAnnouncements(localAnnouncements);
+          setAnnouncements((prev) => {
+            const byId = new Map<string, GlobalAnnouncement>();
+            for (const a of [...localAnnouncements, ...prev]) {
+              if (!isVideoContentExpired(a) && !byId.has(a.id)) byId.set(a.id, a);
+            }
+            return Array.from(byId.values()).sort(
+              (a, b) => (b.createdAtMs || Date.parse(b.createdAt) || 0) - (a.createdAtMs || Date.parse(a.createdAt) || 0)
+            );
+          });
           setLastSyncedAt(new Date().toISOString());
         }
 
@@ -426,8 +482,30 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
     }
   }, [adminToken, verifyingSession, fetchAdminUsers]);
 
+  // Keep Admin announcements list live from Firestore regardless of Express/SPA mode
+  useEffect(() => {
+    if (!adminToken || verifyingSession) return;
+    const unsub = subscribeToFirestoreAnnouncements((cloudItems) => {
+      setAnnouncements((prev) => {
+        const byId = new Map<string, GlobalAnnouncement>();
+        for (const a of cloudItems) {
+          if (!isVideoContentExpired(a)) byId.set(a.id, a);
+        }
+        for (const p of prev) {
+          if (!byId.has(p.id) && !isVideoContentExpired(p)) byId.set(p.id, p);
+        }
+        return Array.from(byId.values()).sort(
+          (a, b) => (b.createdAtMs || Date.parse(b.createdAt) || 0) - (a.createdAtMs || Date.parse(a.createdAt) || 0)
+        );
+      });
+    });
+    return () => unsub();
+  }, [adminToken, verifyingSession]);
+
   const populateEditForm = useCallback((user: AdminUserRecord) => {
     setEditFullName(user.fullName || '');
+    setEditUsername(user.username || deriveUsername(user.fullName || 'JIT Member', user.contactNumber));
+    setEditStatus(user.status === 'suspended' ? 'suspended' : 'active');
     setEditBio(user.bio || '');
     setEditAvatarUrl(user.avatarUrl || '/assets/aistudio/image_e64e54f2.png');
     setEditCoverUrl(user.coverUrl || '');
@@ -444,51 +522,119 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       setInspectedUser(user);
       setInspectorTab(initialTab);
       setSelectedThreadId('all');
+      setDmSearchQuery('');
+      setActivityFeedback(null);
       populateEditForm(user);
       setActivityError('');
       setLoadingActivity(true);
 
       try {
-        if (adminToken !== 'vercel-spa-admin') {
-          const res = await fetch(`/api/admin/users/${encodeURIComponent(user.id)}/activity`, {
-            headers: { Authorization: `Bearer ${adminToken}` },
-          });
+        const [expressResult, cloudChatResult, cloudActResult] = await Promise.allSettled([
+          adminToken !== 'vercel-spa-admin'
+            ? fetch(`/api/admin/users/${encodeURIComponent(user.id)}/activity`, {
+                headers: { Authorization: `Bearer ${adminToken}` },
+              })
+            : Promise.resolve(null),
+          adminFetchUserChatActivityClient(user.id),
+          adminFetchUserActivityClient(user.id),
+        ]);
+
+        let resolvedUser: AdminUserRecord = user;
+        const convMap = new Map<string, Conversation>();
+        const msgMap = new Map<string, Message & { timestampIso?: string; createdAtMs?: number }>();
+        const gameMsgMap = new Map<string, UserActivityPayload['inGameMessages'][number]>();
+        const postMap = new Map<string, Post>();
+        const reelMap = new Map<string, Reel>();
+        const matchMap = new Map<string, MatchHistoryRecord>();
+
+        if (expressResult.status === 'fulfilled' && expressResult.value) {
+          const res = expressResult.value;
           if (res.status === 401) {
             clearSession();
             return;
           }
           const contentType = res.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
+          if (contentType.includes('application/json') && res.ok) {
             const data = await res.json();
-            if (!res.ok || !data.success) {
-              setActivityError(data.error || 'Failed to load user activity logs.');
-              setActivityData({
-                user,
-                conversations: [],
-                messages: [],
-                inGameMessages: [],
-                posts: [],
-                matchHistory: [],
-              });
-              return;
+            if (data?.success) {
+              if (data.user) resolvedUser = { ...resolvedUser, ...data.user };
+              (data.conversations || []).forEach((c: Conversation) => convMap.set(c.id, c));
+              (data.messages || []).forEach((m: any) => msgMap.set(m.id, m));
+              (data.inGameMessages || []).forEach((gm: any) => gameMsgMap.set(gm.id, gm));
+              (data.posts || []).forEach((p: Post) => postMap.set(p.id, p));
+              (data.reels || []).forEach((r: Reel) => reelMap.set(r.id, r));
+              (data.matchHistory || []).forEach((mh: MatchHistoryRecord) => matchMap.set(mh.id, mh));
             }
-            setActivityData(data);
-            if (data.user) {
-              setInspectedUser(data.user);
-              populateEditForm(data.user);
-            }
-            return;
           }
         }
 
-        const cloudMatches = await fetchMatchHistory(user.id, 30).catch(() => []);
+        if (cloudChatResult.status === 'fulfilled') {
+          cloudChatResult.value.conversations.forEach((c) => {
+            if (!convMap.has(c.id)) convMap.set(c.id, c);
+          });
+          cloudChatResult.value.messages.forEach((m) => {
+            if (!msgMap.has(m.id)) msgMap.set(m.id, m);
+          });
+        }
+
+        if (cloudActResult.status === 'fulfilled') {
+          cloudActResult.value.posts.forEach((p) => {
+            if (!postMap.has(p.id)) postMap.set(p.id, p);
+          });
+          cloudActResult.value.reels.forEach((r) => {
+            if (!reelMap.has(r.id)) reelMap.set(r.id, r);
+          });
+          cloudActResult.value.matchHistory.forEach((mh) => {
+            if (!matchMap.has(mh.id)) matchMap.set(mh.id, mh);
+          });
+        }
+
+        // Merge any matching local posts / reels not yet indexed
+        for (const p of localPosts) {
+          const hasComment = (p.comments || []).some(
+            (c) =>
+              c.authorId === user.id ||
+              (c.replies || []).some((r) => r.authorId === user.id)
+          );
+          if ((p.authorId === user.id || hasComment) && !postMap.has(p.id) && !isVideoContentExpired(p)) {
+            postMap.set(p.id, p);
+          }
+        }
+        for (const r of localReels) {
+          if (r.creatorId === user.id && !reelMap.has(r.id) && !isVideoContentExpired(r)) {
+            reelMap.set(r.id, r);
+          }
+        }
+
+        const mergedMessages = Array.from(msgMap.values()).sort((a, b) => {
+          const tA = a.createdAtMs || (a.timestampIso ? Date.parse(a.timestampIso) : 0);
+          const tB = b.createdAtMs || (b.timestampIso ? Date.parse(b.timestampIso) : 0);
+          return tA - tB;
+        });
+
+        const mergedConversations = Array.from(convMap.values()).sort(
+          (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)
+        );
+        const mergedPosts = Array.from(postMap.values()).sort(
+          (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+        );
+        const mergedReels = Array.from(reelMap.values()).sort(
+          (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+        );
+        const mergedMatches = Array.from(matchMap.values()).sort(
+          (a, b) => Date.parse(b.createdAt || '') - Date.parse(a.createdAt || '')
+        );
+
+        setInspectedUser(resolvedUser);
+        populateEditForm(resolvedUser);
         setActivityData({
-          user,
-          conversations: [],
-          messages: [],
-          inGameMessages: [],
-          posts: localPosts.filter((p) => p.authorId === user.id),
-          matchHistory: cloudMatches,
+          user: resolvedUser,
+          conversations: mergedConversations,
+          messages: mergedMessages,
+          inGameMessages: Array.from(gameMsgMap.values()),
+          posts: mergedPosts,
+          reels: mergedReels,
+          matchHistory: mergedMatches,
         });
       } catch {
         setActivityError('Network error loading user chat and activity logs.');
@@ -496,7 +642,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
         setLoadingActivity(false);
       }
     },
-    [adminToken, clearSession, populateEditForm, localPosts]
+    [adminToken, clearSession, populateEditForm, localPosts, localReels]
   );
 
   const handleUnlockSubmit = async (e: React.FormEvent) => {
@@ -623,41 +769,75 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       return;
     }
 
+    const cleanUsername = deriveUsername(
+      editFullName.trim() || inspectedUser.fullName,
+      inspectedUser.contactNumber,
+      editUsername
+    );
+
     setSavingEdits(true);
     try {
-      const res = await fetch(`/api/admin/users/${encodeURIComponent(inspectedUser.id)}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
+      let updatedUser: AdminUserRecord | null = null;
+
+      if (adminToken !== 'vercel-spa-admin') {
+        try {
+          const res = await fetch(`/api/admin/users/${encodeURIComponent(inspectedUser.id)}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              fullName: editFullName.trim(),
+              username: cleanUsername,
+              status: editStatus,
+              bio: editBio,
+              avatarUrl: editAvatarUrl.trim() || '/assets/aistudio/image_e64e54f2.png',
+              coverUrl: editCoverUrl.trim(),
+              rewardPoints: Math.floor(parsedPoints),
+            }),
+          });
+
+          if (res.status === 401) {
+            clearSession();
+            return;
+          }
+
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const data = await res.json();
+            if (!res.ok || !data.success || !data.user) {
+              setEditFeedback({ type: 'err', text: data.error || 'Failed to save user overrides.' });
+              return;
+            }
+            updatedUser = { ...data.user, source: inspectedUser.source || 'firebase' };
+          }
+        } catch {
+          // Fall through to direct Firestore client override if backend is offline
+        }
+      }
+
+      if (!updatedUser) {
+        const directUpdated = await adminOverrideCloudProfileClient(inspectedUser, {
           fullName: editFullName.trim(),
+          username: cleanUsername,
+          status: editStatus,
           bio: editBio,
           avatarUrl: editAvatarUrl.trim() || '/assets/aistudio/image_e64e54f2.png',
           coverUrl: editCoverUrl.trim(),
           rewardPoints: Math.floor(parsedPoints),
-        }),
-      });
-
-      if (res.status === 401) {
-        clearSession();
-        return;
+        });
+        updatedUser = { ...directUpdated, source: inspectedUser.source || 'firebase' };
       }
 
-      const data = await res.json();
-      if (!res.ok || !data.success || !data.user) {
-        setEditFeedback({ type: 'err', text: data.error || 'Failed to save user overrides.' });
-        return;
-      }
-
-      const updated: AdminUserRecord = { ...data.user, source: inspectedUser.source || 'firebase' };
-      setInspectedUser(updated);
-      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
-      setEditFeedback({ type: 'ok', text: 'User profile and JIT Points saved to Firebase.' });
+      setInspectedUser(updatedUser);
+      setEditUsername(updatedUser.username || cleanUsername);
+      setEditStatus(updatedUser.status === 'suspended' ? 'suspended' : 'active');
+      setUsers((prev) => prev.map((u) => (u.id === updatedUser!.id ? updatedUser! : u)));
+      setEditFeedback({ type: 'ok', text: 'User profile, username, status & JIT Points saved to Firebase.' });
       syncServerProfiles().catch(() => {});
-    } catch {
-      setEditFeedback({ type: 'err', text: 'Network error while saving profile overrides.' });
+    } catch (err: any) {
+      setEditFeedback({ type: 'err', text: err?.message || 'Network error while saving profile overrides.' });
     } finally {
       setSavingEdits(false);
     }
@@ -669,33 +849,58 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
     setModerationFeedback(null);
 
     try {
-      const res = await fetch(`/api/admin/users/${encodeURIComponent(inspectedUser.id)}/moderate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          action,
-          reason: suspendReason.trim() || undefined,
-        }),
-      });
+      let moderatedProfile: UserProfile | null = null;
+      let handledByExpress = false;
 
-      if (res.status === 401) {
-        clearSession();
-        return;
+      if (adminToken !== 'vercel-spa-admin') {
+        try {
+          const res = await fetch(`/api/admin/users/${encodeURIComponent(inspectedUser.id)}/moderate`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              action,
+              reason: suspendReason.trim() || undefined,
+            }),
+          });
+
+          if (res.status === 401) {
+            clearSession();
+            return;
+          }
+
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+              setModerationFeedback({ type: 'err', text: data.error || 'Moderation action failed.' });
+              return;
+            }
+            handledByExpress = true;
+            moderatedProfile = data.user || null;
+          }
+        } catch {
+          // Fall back to direct Firestore moderation client helper
+        }
       }
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setModerationFeedback({ type: 'err', text: data.error || 'Moderation action failed.' });
-        return;
+      if (!handledByExpress) {
+        moderatedProfile = await adminModerateCloudProfileClient(
+          inspectedUser,
+          action,
+          suspendReason.trim() || undefined
+        );
       }
 
       if (action === 'delete') {
         if (auth.currentUser?.email) {
           deleteCloudProfileAsAdmin(inspectedUser).catch(() => {});
         }
+        // Also purge user posts/reels from live SocialContext UI immediately
+        localPosts.filter((p) => p.authorId === inspectedUser.id).forEach((p) => deletePost(p.id));
+        localReels.filter((r) => r.creatorId === inspectedUser.id).forEach((r) => deleteReel(r.id));
         setUsers((prev) => prev.filter((u) => u.id !== inspectedUser.id));
         setAnalytics((prev) => ({ ...prev, totalUsers: Math.max(0, prev.totalUsers - 1) }));
         setInspectedUser(null);
@@ -704,8 +909,13 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
         return;
       }
 
-      const updated: AdminUserRecord = { ...data.user, source: inspectedUser.source || 'firebase' };
+      const updated: AdminUserRecord = {
+        ...(moderatedProfile || inspectedUser),
+        status: action === 'suspend' ? 'suspended' : 'active',
+        source: inspectedUser.source || 'firebase',
+      };
       setInspectedUser(updated);
+      setEditStatus(updated.status === 'suspended' ? 'suspended' : 'active');
       setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
       setModerationFeedback({
         type: 'ok',
@@ -715,11 +925,122 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             : 'Account unblocked and restored to active status.',
       });
       syncServerProfiles().catch(() => {});
-    } catch {
-      setModerationFeedback({ type: 'err', text: 'Network error applying moderation action.' });
+    } catch (err: any) {
+      setModerationFeedback({ type: 'err', text: err?.message || 'Error applying moderation action.' });
     } finally {
       setModeratingBusy(false);
     }
+  };
+
+  const handleDeleteUserPost = async (postId: string) => {
+    if (!adminToken) return;
+    setDeletingActivityId(postId);
+    setActivityFeedback(null);
+    try {
+      if (adminToken !== 'vercel-spa-admin') {
+        await fetch(`/api/admin/posts/${encodeURIComponent(postId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }).catch(() => {});
+      }
+      await deleteFirestorePost(postId);
+      deletePost(postId);
+      setActivityData((prev) =>
+        prev ? { ...prev, posts: prev.posts.filter((p) => p.id !== postId) } : prev
+      );
+      setAnalytics((prev) => ({ ...prev, totalPosts: Math.max(0, prev.totalPosts - 1) }));
+      setActivityFeedback({ type: 'ok', text: 'Post removed from Firestore and feed.' });
+    } catch {
+      setActivityFeedback({ type: 'err', text: 'Could not delete post.' });
+    } finally {
+      setDeletingActivityId(null);
+    }
+  };
+
+  const handleDeleteUserReel = async (reelId: string) => {
+    if (!adminToken) return;
+    setDeletingActivityId(reelId);
+    setActivityFeedback(null);
+    try {
+      if (adminToken !== 'vercel-spa-admin') {
+        await fetch(`/api/admin/reels/${encodeURIComponent(reelId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }).catch(() => {});
+      }
+      await deleteFirestoreReel(reelId);
+      deleteReel(reelId);
+      setActivityData((prev) =>
+        prev ? { ...prev, reels: prev.reels.filter((r) => r.id !== reelId) } : prev
+      );
+      setActivityFeedback({ type: 'ok', text: 'Reel deleted from Firestore and Reels feed.' });
+    } catch {
+      setActivityFeedback({ type: 'err', text: 'Could not delete reel.' });
+    } finally {
+      setDeletingActivityId(null);
+    }
+  };
+
+  const handleDeleteUserMatch = async (matchId: string) => {
+    if (!adminToken) return;
+    setDeletingActivityId(matchId);
+    setActivityFeedback(null);
+    try {
+      if (adminToken !== 'vercel-spa-admin') {
+        await fetch(`/api/admin/matches/${encodeURIComponent(matchId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }).catch(() => {});
+      }
+      await deleteFirestoreMatchRecord(matchId);
+      setActivityData((prev) =>
+        prev ? { ...prev, matchHistory: prev.matchHistory.filter((m) => m.id !== matchId) } : prev
+      );
+      setActivityFeedback({ type: 'ok', text: 'Game match record deleted from Firestore.' });
+    } catch {
+      setActivityFeedback({ type: 'err', text: 'Could not delete match log.' });
+    } finally {
+      setDeletingActivityId(null);
+    }
+  };
+
+  const handleAnnouncementMediaPick = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    category: 'image' | 'video'
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setBroadcastFeedback(null);
+
+    const validation = validateMediaFile(file, {
+      allowedCategory: category,
+      maxSizeMb: category === 'video' ? 50 : 12,
+    });
+    if (!validation.valid) {
+      setBroadcastFeedback({ type: 'err', text: validation.error || 'Invalid media file.' });
+      return;
+    }
+
+    if (annMediaPreviewUrl && annMediaPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(annMediaPreviewUrl);
+    }
+    setAnnMediaFile(file);
+    setAnnMediaType(category);
+    setAnnMediaPreviewUrl(URL.createObjectURL(file));
+    setAnnUploadProgress(0);
+  };
+
+  const handleClearAnnouncementMedia = () => {
+    if (annMediaPreviewUrl && annMediaPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(annMediaPreviewUrl);
+    }
+    setAnnMediaFile(null);
+    setAnnMediaPreviewUrl(null);
+    setAnnMediaType('none');
+    setAnnUploadProgress(0);
+    if (annImageInputRef.current) annImageInputRef.current.value = '';
+    if (annVideoInputRef.current) annVideoInputRef.current.value = '';
   };
 
   const handlePublishAnnouncement = async (e: React.FormEvent) => {
@@ -727,43 +1048,106 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
     if (!adminToken || !annTitle.trim() || !annMessage.trim()) return;
     setSendingBroadcast(true);
     setBroadcastFeedback(null);
+    setAnnUploadProgress(0);
 
     try {
-      const res = await fetch('/api/admin/announcements', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${adminToken}`,
-        },
-        body: JSON.stringify({
-          title: annTitle.trim(),
-          message: annMessage.trim(),
-          priority: annPriority,
-          alsoPostToFeed: annPostToFeed,
-        }),
-      });
+      let mediaUrl: string | undefined;
+      let mediaType: 'image' | 'video' | 'none' = 'none';
+      let thumbnailUrl: string | undefined;
+      let expiresAt: number | undefined;
 
-      if (res.status === 401) {
-        clearSession();
-        return;
+      if (annMediaFile) {
+        const uploaded = await uploadAnnouncementMediaToCloud(annMediaFile, (pct) => {
+          setAnnUploadProgress(pct);
+        });
+        mediaUrl = uploaded.mediaUrl;
+        mediaType = uploaded.mediaType;
+        thumbnailUrl = uploaded.thumbnailUrl;
+        expiresAt = uploaded.expiresAt;
       }
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        setBroadcastFeedback({ type: 'err', text: data.error || 'Failed to publish announcement.' });
-        return;
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const annId = `ann_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
+      const fallbackAnnouncement: GlobalAnnouncement = {
+        id: annId,
+        title: annTitle.trim().slice(0, 140),
+        message: annMessage.trim().slice(0, 1000),
+        priority: annPriority,
+        authorName: 'JIT GROUP Admin',
+        createdAt: nowIso,
+        createdAtMs: nowMs,
+        ...(mediaUrl ? { mediaUrl, mediaType } : {}),
+        ...(thumbnailUrl ? { thumbnailUrl } : {}),
+        ...(typeof expiresAt === 'number' ? { expiresAt } : {}),
+      };
+
+      let publishedViaExpress = false;
+      let finalAnnouncement = fallbackAnnouncement;
+
+      if (adminToken !== 'vercel-spa-admin') {
+        try {
+          const res = await fetch('/api/admin/announcements', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              id: annId,
+              title: annTitle.trim(),
+              message: annMessage.trim(),
+              priority: annPriority,
+              alsoPostToFeed: annPostToFeed,
+              ...(mediaUrl ? { mediaUrl, mediaType } : {}),
+              ...(thumbnailUrl ? { thumbnailUrl } : {}),
+              ...(typeof expiresAt === 'number' ? { expiresAt } : {}),
+            }),
+          });
+
+          if (res.status === 401) {
+            clearSession();
+            return;
+          }
+
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+              setBroadcastFeedback({ type: 'err', text: data.error || 'Failed to publish announcement.' });
+              return;
+            }
+            publishedViaExpress = true;
+            if (data.announcement) finalAnnouncement = data.announcement;
+            if (Array.isArray(data.announcements)) {
+              setAnnouncements(data.announcements);
+            }
+          }
+        } catch {
+          // Fall back to direct Firestore publishing below
+        }
       }
 
-      if (Array.isArray(data.announcements)) {
-        setAnnouncements(data.announcements);
+      // Always ensure announcement is persisted to Firestore directly too
+      await publishFirestoreAnnouncement(finalAnnouncement);
+
+      if (!publishedViaExpress) {
+        setAnnouncements((prev) => [finalAnnouncement, ...prev.filter((a) => a.id !== finalAnnouncement.id)]);
       }
+
       setAnnTitle('');
       setAnnMessage('');
-      setBroadcastFeedback({ type: 'ok', text: 'Site-wide announcement broadcasted to all user feeds.' });
+      handleClearAnnouncementMedia();
+      setBroadcastFeedback({
+        type: 'ok',
+        text: mediaUrl
+          ? 'Media announcement broadcasted to all user feeds & popup banners.'
+          : 'Site-wide announcement broadcasted to all user feeds.',
+      });
       refreshAnnouncements().catch(() => {});
       fetchAdminUsers().catch(() => {});
     } catch {
-      setBroadcastFeedback({ type: 'err', text: 'Network error publishing announcement.' });
+      setBroadcastFeedback({ type: 'err', text: 'Failed to publish announcement. Please try again.' });
     } finally {
       setSendingBroadcast(false);
     }
@@ -772,20 +1156,23 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const handleDeleteAnnouncement = async (id: string) => {
     if (!adminToken) return;
     try {
-      const res = await fetch(`/api/admin/announcements/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${adminToken}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.announcements)) {
-          setAnnouncements(data.announcements);
-        } else {
-          setAnnouncements((prev) => prev.filter((a) => a.id !== id));
+      if (adminToken !== 'vercel-spa-admin') {
+        const res = await fetch(`/api/admin/announcements/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }).catch(() => null);
+        if (res && res.ok) {
+          const data = await res.json().catch(() => null);
+          if (Array.isArray(data?.announcements)) {
+            setAnnouncements(data.announcements);
+          }
         }
-        refreshAnnouncements().catch(() => {});
-        fetchAdminUsers().catch(() => {});
       }
+      await deleteFirestoreAnnouncement(id);
+      deletePost(`post_ann_${id}`);
+      setAnnouncements((prev) => prev.filter((a) => a.id !== id));
+      refreshAnnouncements().catch(() => {});
+      fetchAdminUsers().catch(() => {});
     } catch {
       // Ignore
     }
@@ -870,9 +1257,18 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   // Filtered messages inside Inspector Chat tab
   const inspectedMessages = useMemo(() => {
     if (!activityData?.messages) return [];
-    if (selectedThreadId === 'all') return activityData.messages;
-    return activityData.messages.filter((m) => m.conversationId === selectedThreadId);
-  }, [activityData, selectedThreadId]);
+    const q = dmSearchQuery.trim().toLowerCase();
+    return activityData.messages.filter((m) => {
+      if (selectedThreadId !== 'all' && m.conversationId !== selectedThreadId) return false;
+      if (q) {
+        const matchesText = (m.content || '').toLowerCase().includes(q);
+        const matchesSender = (m.senderName || '').toLowerCase().includes(q);
+        const matchesRecv = (m.receiverId || '').toLowerCase().includes(q);
+        if (!matchesText && !matchesSender && !matchesRecv) return false;
+      }
+      return true;
+    });
+  }, [activityData, selectedThreadId, dmSearchQuery]);
 
   // --------------------------------------------------------------------------
   // Phone-Only Admin Gate (Displayed whenever locked; normal users cannot bypass)
@@ -1175,6 +1571,82 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                 />
               </div>
 
+              {/* Photo & Video Attachment Controls */}
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    ref={annImageInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleAnnouncementMediaPick(e, 'image')}
+                    className="hidden"
+                  />
+                  <input
+                    ref={annVideoInputRef}
+                    type="file"
+                    accept="video/*"
+                    onChange={(e) => handleAnnouncementMediaPick(e, 'video')}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => annImageInputRef.current?.click()}
+                    disabled={sendingBroadcast}
+                    className="min-h-[40px] px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                  >
+                    <ImageIcon className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Attach Photo</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => annVideoInputRef.current?.click()}
+                    disabled={sendingBroadcast}
+                    className="min-h-[40px] px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                  >
+                    <Video className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Attach Video</span>
+                  </button>
+                  {annMediaType === 'video' && (
+                    <span className="text-[11px] text-amber-600 dark:text-amber-400">
+                      Video announcements auto-expire after 40 days
+                    </span>
+                  )}
+                </div>
+
+                {annMediaPreviewUrl && (
+                  <div className="relative rounded-xl overflow-hidden bg-black border border-slate-200 dark:border-slate-700 max-h-48 flex items-center justify-center">
+                    {annMediaType === 'video' ? (
+                      <video src={annMediaPreviewUrl} controls className="max-h-48 w-full object-contain" />
+                    ) : (
+                      <img src={annMediaPreviewUrl} alt="Announcement attachment" className="max-h-48 w-full object-contain" />
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleClearAnnouncementMedia}
+                      className="absolute top-2 right-2 min-w-[36px] min-h-[36px] flex items-center justify-center bg-red-600/90 hover:bg-red-700 text-white rounded-lg"
+                      aria-label="Remove attached media"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+
+                {sendingBroadcast && annMediaFile && annUploadProgress > 0 && annUploadProgress < 100 && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[11px] font-mono text-slate-500">
+                      <span>Uploading announcement media...</span>
+                      <span>{annUploadProgress}%</span>
+                    </div>
+                    <div className="h-1.5 w-full bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-600 transition-all duration-200"
+                        style={{ width: `${annUploadProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer select-none">
                 <input
                   type="checkbox"
@@ -1208,8 +1680,12 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                   disabled={sendingBroadcast || !annTitle.trim() || !annMessage.trim()}
                   className="min-h-[44px] px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2"
                 >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{sendingBroadcast ? 'Broadcasting...' : 'Broadcast to All Feeds'}</span>
+                  {sendingBroadcast ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
+                  <span>{sendingBroadcast ? 'Publishing Notice...' : 'Broadcast to All Feeds'}</span>
                 </button>
               </div>
             </form>
@@ -1226,15 +1702,28 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                   No active announcements. Use the form to broadcast a site-wide notice.
                 </div>
               ) : (
-                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                   {announcements.map((ann) => {
                     const ts = formatDateTime(ann.createdAt);
                     return (
                       <div
                         key={ann.id}
-                        className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-start justify-between gap-2"
+                        className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-start justify-between gap-2.5"
                       >
-                        <div className="min-w-0">
+                        {ann.mediaUrl && (
+                          <div className="w-12 h-12 rounded-lg overflow-hidden bg-black shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
+                            {ann.mediaType === 'video' ? (
+                              ann.thumbnailUrl ? (
+                                <img src={ann.thumbnailUrl} alt="Video notice" className="w-full h-full object-cover" />
+                              ) : (
+                                <Video className="w-4 h-4 text-white" />
+                              )
+                            ) : (
+                              <img src={ann.mediaUrl} alt="Notice media" className="w-full h-full object-cover" />
+                            )}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
                           <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
                             {ann.title}
                           </p>
@@ -1242,7 +1731,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                             {ann.message}
                           </p>
                           <p className="text-[10px] text-slate-400 font-mono tabular-nums mt-1">
-                            {ann.priority.toUpperCase()} · {ts.date} {ts.time}
+                            {ann.priority.toUpperCase()}
+                            {ann.mediaType ? ` · ${ann.mediaType.toUpperCase()}` : ''} · {ts.date} {ts.time}
                           </p>
                         </div>
                         <button
@@ -1720,8 +2210,9 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                   },
                   {
                     id: 'activity',
-                    label: `Posts & Games (${
+                    label: `Posts, Reels & Games (${
                       (activityData?.posts?.length || 0) +
+                      (activityData?.reels?.length || 0) +
                       (activityData?.matchHistory?.length || 0)
                     })`,
                   },
@@ -1817,6 +2308,33 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                           onChange={(e) => setEditFullName(e.target.value)}
                           className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
                         />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                          Username (@handle)
+                        </label>
+                        <input
+                          type="text"
+                          value={editUsername}
+                          onChange={(e) => setEditUsername(e.target.value)}
+                          placeholder="e.g. rahul_jit"
+                          className="w-full min-h-[44px] px-3.5 py-2 text-sm font-mono bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                          Account Status
+                        </label>
+                        <select
+                          value={editStatus}
+                          onChange={(e) => setEditStatus(e.target.value as 'active' | 'suspended')}
+                          className="w-full min-h-[44px] px-3.5 py-2 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        >
+                          <option value="active">Active</option>
+                          <option value="suspended">Suspended / Blocked</option>
+                        </select>
                       </div>
 
                       <div>
@@ -1979,12 +2497,24 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                     </div>
                   ) : (
                     <>
+                      {/* DM Search Filter */}
+                      <div className="relative">
+                        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                        <input
+                          type="text"
+                          value={dmSearchQuery}
+                          onChange={(e) => setDmSearchQuery(e.target.value)}
+                          placeholder="Search DMs, message content, sender or recipient..."
+                          className="w-full min-h-[40px] pl-10 pr-4 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                        />
+                      </div>
+
                       {/* Conversation Thread Filter Strip */}
                       <div className="space-y-2">
                         <div className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
                           <span>Personal DMs & Group Threads</span>
                           <span className="font-mono tabular-nums text-slate-500">
-                            {activityData?.conversations?.length ?? 0} threads
+                            {activityData?.conversations?.length ?? 0} threads · {activityData?.messages?.length ?? 0} msgs
                           </span>
                         </div>
 
@@ -2026,9 +2556,12 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
 
                       {/* Message History Log */}
                       <div className="space-y-2">
-                        <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-300">
-                          Message History
-                        </h3>
+                        <div className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
+                          <h3>Message History (Sent & Received)</h3>
+                          <span className="font-mono tabular-nums text-slate-500">
+                            {inspectedMessages.length} shown
+                          </span>
+                        </div>
                         {inspectedMessages.length === 0 ? (
                           <div className="p-6 text-center rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-500">
                             No personal messages found in selected filter.
@@ -2046,19 +2579,22 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                   className="p-3.5 bg-white dark:bg-slate-900 space-y-1.5"
                                 >
                                   <div className="flex items-center justify-between gap-2 text-[11px]">
-                                    <div className="flex items-center gap-2 min-w-0">
+                                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
                                       <span
-                                        className={`font-bold truncate ${
+                                        className={`font-semibold text-[10px] uppercase tracking-wider ${
                                           isAuthor
                                             ? 'text-blue-600 dark:text-blue-400'
-                                            : 'text-slate-800 dark:text-slate-200'
+                                            : 'text-emerald-600 dark:text-emerald-400'
                                         }`}
                                       >
+                                        {isAuthor ? 'Sent' : 'Received'}
+                                      </span>
+                                      <span className="font-bold text-slate-900 dark:text-white truncate">
                                         {msg.senderName}
                                       </span>
                                       {conv && (
                                         <span className="text-slate-400 truncate">
-                                          in {conv.name || conv.id}
+                                          in {conv.type === 'group' ? conv.name : `DM with ${conv.name}`}
                                         </span>
                                       )}
                                     </div>
@@ -2067,11 +2603,19 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                     </span>
                                   </div>
                                   {msg.mediaUrl && (
-                                    <img
-                                      src={msg.mediaUrl}
-                                      alt="Chat attachment"
-                                      className="max-h-36 rounded-lg object-contain border border-slate-200 dark:border-slate-700"
-                                    />
+                                    msg.mediaType === 'video' ? (
+                                      <ResilientVideo
+                                        src={msg.mediaUrl}
+                                        controls
+                                        className="max-h-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-black"
+                                      />
+                                    ) : (
+                                      <img
+                                        src={msg.mediaUrl}
+                                        alt="Chat attachment"
+                                        className="max-h-36 rounded-lg object-contain border border-slate-200 dark:border-slate-700"
+                                      />
+                                    )
                                   )}
                                   {msg.content && (
                                     <p className="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-words">
@@ -2113,15 +2657,33 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                 </div>
               )}
 
-              {/* TAB 3: Posts & Match History */}
+              {/* TAB 3: Posts, Reels & Match History with Admin Delete */}
               {inspectorTab === 'activity' && (
                 <div className="space-y-5">
+                  {activityFeedback && (
+                    <div
+                      className={`p-3 rounded-xl text-xs flex items-center gap-2 border ${
+                        activityFeedback.type === 'ok'
+                          ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
+                          : 'bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-900/50 text-red-700 dark:text-red-300'
+                      }`}
+                    >
+                      {activityFeedback.type === 'ok' ? (
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                      )}
+                      <span>{activityFeedback.text}</span>
+                    </div>
+                  )}
+
                   {loadingActivity ? (
                     <div className="py-10 text-center text-xs text-slate-500">
-                      Loading user posts and match history...
+                      Loading user posts, reels, and match history...
                     </div>
                   ) : (
                     <>
+                      {/* User Posts */}
                       <div className="space-y-2">
                         <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                           <FileText className="w-3.5 h-3.5 text-blue-600" />
@@ -2136,17 +2698,43 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                             {activityData?.posts.map((p) => (
                               <div
                                 key={p.id}
-                                className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 space-y-1.5"
+                                className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 space-y-2"
                               >
-                                <div className="flex items-center justify-between text-[11px] text-slate-500">
-                                  <span className="font-semibold text-slate-800 dark:text-slate-200">
-                                    {p.authorName}
-                                  </span>
-                                  <span>{p.createdAt}</span>
+                                <div className="flex items-start justify-between gap-2 text-[11px] text-slate-500">
+                                  <div>
+                                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                                      {p.authorName}
+                                    </span>
+                                    <span className="ml-2 text-slate-400">{p.createdAt}</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={deletingActivityId === p.id}
+                                    onClick={() => handleDeleteUserPost(p.id)}
+                                    className="min-h-[32px] px-2.5 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg flex items-center gap-1 shrink-0 disabled:opacity-50"
+                                    title="Delete post"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    <span>{deletingActivityId === p.id ? 'Removing...' : 'Delete'}</span>
+                                  </button>
                                 </div>
                                 <p className="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-line break-words">
                                   {p.content}
                                 </p>
+                                {p.mediaUrls && p.mediaUrls.length > 0 && (
+                                  <div className="rounded-lg overflow-hidden bg-black/90 max-h-40 flex items-center justify-center">
+                                    {p.mediaType === 'video' ? (
+                                      <ResilientVideo
+                                        src={p.mediaUrls[0]}
+                                        poster={p.thumbnailUrl}
+                                        controls
+                                        className="max-h-40 w-full object-contain"
+                                      />
+                                    ) : (
+                                      <img src={p.mediaUrls[0]} alt="Post attachment" className="max-h-40 w-full object-contain" />
+                                    )}
+                                  </div>
+                                )}
                                 <p className="text-[11px] text-slate-400 font-mono tabular-nums">
                                   {p.likesCount} likes · {p.comments?.length ?? p.commentsCount} comments
                                 </p>
@@ -2156,6 +2744,57 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                         )}
                       </div>
 
+                      {/* User Reels */}
+                      <div className="space-y-2">
+                        <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                          <Film className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Uploaded Reels ({activityData?.reels?.length ?? 0})</span>
+                        </h3>
+                        {(activityData?.reels?.length ?? 0) === 0 ? (
+                          <p className="text-xs text-slate-500 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800">
+                            No reels uploaded by this user.
+                          </p>
+                        ) : (
+                          <div className="space-y-2.5">
+                            {activityData?.reels.map((r) => (
+                              <div
+                                key={r.id}
+                                className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 flex items-start justify-between gap-3"
+                              >
+                                <div className="flex items-start gap-3 min-w-0">
+                                  <div className="w-16 h-16 rounded-lg overflow-hidden bg-black shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
+                                    {r.thumbnailUrl ? (
+                                      <img src={r.thumbnailUrl} alt={r.caption} className="w-full h-full object-cover" />
+                                    ) : (
+                                      <Film className="w-5 h-5 text-white" />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0 space-y-1">
+                                    <p className="text-xs font-semibold text-slate-900 dark:text-white line-clamp-2">
+                                      {r.caption || 'Campus Reel'}
+                                    </p>
+                                    <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                                      {r.likesCount} likes · {r.commentsCount} comments · {r.createdAt}
+                                    </p>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={deletingActivityId === r.id}
+                                  onClick={() => handleDeleteUserReel(r.id)}
+                                  className="min-h-[32px] px-2.5 py-1 text-xs font-semibold text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg flex items-center gap-1 shrink-0 disabled:opacity-50"
+                                  title="Delete reel"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>{deletingActivityId === r.id ? 'Removing...' : 'Delete'}</span>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Game Match Logs */}
                       <div className="space-y-2">
                         <h3 className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                           <Trophy className="w-3.5 h-3.5 text-amber-500" />
@@ -2184,13 +2823,25 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                       {m.scoreSummary}
                                     </p>
                                   </div>
-                                  <div className="text-right shrink-0 font-mono tabular-nums">
-                                    <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                                      +{m.pointsEarned} pts
-                                    </span>
-                                    <span className="block text-[10px] text-slate-400">
-                                      {dt.date}
-                                    </span>
+                                  <div className="flex items-center gap-3 shrink-0">
+                                    <div className="text-right font-mono tabular-nums">
+                                      <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                                        +{m.pointsEarned} pts
+                                      </span>
+                                      <span className="block text-[10px] text-slate-400">
+                                        {dt.date}
+                                      </span>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={deletingActivityId === m.id}
+                                      onClick={() => handleDeleteUserMatch(m.id)}
+                                      className="min-w-[32px] min-h-[32px] flex items-center justify-center text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg disabled:opacity-50"
+                                      title="Delete game log"
+                                      aria-label="Delete game log"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
                                   </div>
                                 </div>
                               );

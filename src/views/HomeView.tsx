@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
-import { Post, Story, NavTab, Comment } from '../types';
+import { Post, Story, NavTab, GlobalAnnouncement } from '../types';
 import { APP_CONFIG } from '../constants/branding';
 import {
   saveMediaFile,
@@ -60,6 +60,17 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
   } = useSocial();
 
   const [dismissedAnnouncementIds, setDismissedAnnouncementIds] = useState<string[]>([]);
+  const [seenAnnouncementIds, setSeenAnnouncementIds] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = localStorage.getItem('jit_seen_announcements_v1');
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [activeAnnouncementModal, setActiveAnnouncementModal] = useState<GlobalAnnouncement | null>(null);
   const [activeCategory, setActiveCategory] = useState<'all' | 'friends' | 'following' | 'popular'>('all');
 
   // New post state
@@ -83,6 +94,41 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
   const [copiedPostId, setCopiedPostId] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const markAnnouncementSeen = (annId: string) => {
+    setSeenAnnouncementIds((prev) => {
+      if (prev.includes(annId)) return prev;
+      const next = [...prev, annId].slice(-50);
+      try {
+        localStorage.setItem('jit_seen_announcements_v1', JSON.stringify(next));
+      } catch {
+        // Non-fatal
+      }
+      return next;
+    });
+  };
+
+  // Auto-open popup modal once for the newest unseen active Global Announcement
+  useEffect(() => {
+    const activeList = announcements.filter((a) => !isVideoContentExpired(a));
+    if (activeList.length === 0 || activeAnnouncementModal) return;
+    const newest = activeList[0];
+    if (newest && !seenAnnouncementIds.includes(newest.id) && !dismissedAnnouncementIds.includes(newest.id)) {
+      setActiveAnnouncementModal(newest);
+      markAnnouncementSeen(newest.id);
+    }
+  }, [announcements, seenAnnouncementIds, dismissedAnnouncementIds, activeAnnouncementModal]);
+
+  useEffect(() => {
+    if (!activeAnnouncementModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setActiveAnnouncementModal(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeAnnouncementModal]);
 
   // Handle Media Selection
   const handleMediaSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -200,7 +246,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
   const likersList = likedByPostId ? getPostLikers(likedByPostId) : [];
 
   const visibleAnnouncements = announcements.filter(
-    (a) => !dismissedAnnouncementIds.includes(a.id)
+    (a) => !dismissedAnnouncementIds.includes(a.id) && !isVideoContentExpired(a)
   );
 
   return (
@@ -225,34 +271,71 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
             return (
               <div
                 key={ann.id}
-                className={`border rounded-2xl p-4 flex items-start justify-between gap-3 ${accentClass}`}
+                className={`border rounded-2xl p-4 space-y-3 ${accentClass}`}
               >
-                <div className="flex items-start gap-3 min-w-0">
-                  <div className={`mt-0.5 shrink-0 ${iconColor}`}>
-                    <Megaphone className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                      <h3 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
-                        {ann.title}
-                      </h3>
-                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                        · {ann.authorName}
-                      </span>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div className={`mt-0.5 shrink-0 ${iconColor}`}>
+                      <Megaphone className="w-4 h-4" />
                     </div>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 mt-1 whitespace-pre-line break-words leading-relaxed">
-                      {ann.message}
-                    </p>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <h3 className="text-xs sm:text-sm font-bold text-slate-900 dark:text-white">
+                          {ann.title}
+                        </h3>
+                        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                          · {ann.authorName}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 dark:text-slate-300 mt-1 whitespace-pre-line break-words leading-relaxed">
+                        {ann.message}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        markAnnouncementSeen(ann.id);
+                        setActiveAnnouncementModal(ann);
+                      }}
+                      className="min-h-[36px] px-2.5 py-1 text-[11px] font-semibold text-blue-600 dark:text-blue-400 hover:bg-white/70 dark:hover:bg-slate-800/70 rounded-lg transition-colors"
+                    >
+                      View Notice
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        markAnnouncementSeen(ann.id);
+                        setDismissedAnnouncementIds((prev) => [...prev, ann.id]);
+                      }}
+                      className="min-w-[36px] min-h-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg shrink-0"
+                      aria-label="Dismiss announcement"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setDismissedAnnouncementIds((prev) => [...prev, ann.id])}
-                  className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-lg shrink-0"
-                  aria-label="Dismiss announcement"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+
+                {ann.mediaUrl && (
+                  <div className="rounded-xl overflow-hidden bg-black/90 border border-slate-200/70 dark:border-slate-700/70 max-h-64 flex items-center justify-center relative">
+                    {ann.mediaType === 'video' ? (
+                      <ResilientVideo
+                        src={ann.mediaUrl}
+                        poster={ann.thumbnailUrl}
+                        controls
+                        className="max-h-64 w-full object-contain"
+                      />
+                    ) : (
+                      <img
+                        src={ann.mediaUrl}
+                        alt={ann.title}
+                        onClick={() => setActiveAnnouncementModal(ann)}
+                        className="max-h-64 w-full object-contain cursor-pointer"
+                      />
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -740,6 +823,113 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
         isOpen={isAddStoryOpen}
         onClose={() => setIsAddStoryOpen(false)}
       />
+
+      {/* Official Global Announcement Popup Modal */}
+      {activeAnnouncementModal && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/65 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => {
+            markAnnouncementSeen(activeAnnouncementModal.id);
+            setActiveAnnouncementModal(null);
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="announcement-modal-title"
+            className="w-full max-w-lg max-h-[90dvh] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col"
+          >
+            <div className="p-4 sm:p-5 border-b border-slate-100 dark:border-slate-800 flex items-start justify-between gap-3 shrink-0">
+              <div className="flex items-start gap-3 min-w-0">
+                <div
+                  className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                    activeAnnouncementModal.priority === 'important'
+                      ? 'bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400'
+                      : activeAnnouncementModal.priority === 'event'
+                      ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400'
+                      : 'bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400'
+                  }`}
+                >
+                  <Megaphone className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    {activeAnnouncementModal.priority === 'important'
+                      ? 'Important Official Notice'
+                      : activeAnnouncementModal.priority === 'event'
+                      ? 'Campus Event Broadcast'
+                      : 'Official Information'}
+                  </p>
+                  <h2
+                    id="announcement-modal-title"
+                    className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-snug mt-0.5"
+                  >
+                    {activeAnnouncementModal.title}
+                  </h2>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    {activeAnnouncementModal.authorName} ·{' '}
+                    {new Date(activeAnnouncementModal.createdAt).toLocaleDateString(undefined, {
+                      month: 'short',
+                      day: '2-digit',
+                      year: 'numeric',
+                    })}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  markAnnouncementSeen(activeAnnouncementModal.id);
+                  setActiveAnnouncementModal(null);
+                }}
+                className="min-w-[44px] min-h-[44px] flex items-center justify-center rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                aria-label="Close notice modal"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 overflow-y-auto space-y-4">
+              {activeAnnouncementModal.mediaUrl && (
+                <div className="rounded-2xl overflow-hidden bg-black border border-slate-200 dark:border-slate-800 max-h-80 flex items-center justify-center">
+                  {activeAnnouncementModal.mediaType === 'video' ? (
+                    <ResilientVideo
+                      src={activeAnnouncementModal.mediaUrl}
+                      poster={activeAnnouncementModal.thumbnailUrl}
+                      controls
+                      className="max-h-80 w-full object-contain"
+                    />
+                  ) : (
+                    <img
+                      src={activeAnnouncementModal.mediaUrl}
+                      alt={activeAnnouncementModal.title}
+                      className="max-h-80 w-full object-contain"
+                    />
+                  )}
+                </div>
+              )}
+
+              <p className="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-line break-words leading-relaxed">
+                {activeAnnouncementModal.message}
+              </p>
+            </div>
+
+            <div className="p-4 sm:px-5 border-t border-slate-100 dark:border-slate-800 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  markAnnouncementSeen(activeAnnouncementModal.id);
+                  setActiveAnnouncementModal(null);
+                }}
+                className="min-h-[44px] px-5 py-2 bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 text-white text-xs sm:text-sm font-semibold rounded-xl transition-colors"
+              >
+                Got It
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

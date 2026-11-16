@@ -15,8 +15,10 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  deleteDoc,
   writeBatch,
   collection,
+  collectionGroup,
   query,
   orderBy,
   limit,
@@ -25,7 +27,17 @@ import {
   Timestamp,
 } from 'firebase/firestore/lite';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { UserProfile, LeaderboardEntry, MatchHistoryRecord, GameId } from '../types';
+import {
+  UserProfile,
+  LeaderboardEntry,
+  MatchHistoryRecord,
+  GameId,
+  Conversation,
+  Message,
+  Post,
+  Reel,
+  GlobalAnnouncement,
+} from '../types';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const dbLite = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -77,6 +89,53 @@ function sanitizeStats(stats?: Partial<UserProfile['stats']>): UserProfile['stat
   };
 }
 
+export function deriveUsername(
+  fullName: string,
+  contactNumber?: string,
+  explicitUsername?: string
+): string {
+  const cleanedExplicit = (explicitUsername || '')
+    .trim()
+    .replace(/^@+/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (cleanedExplicit.length >= 2) {
+    return cleanedExplicit.slice(0, 48);
+  }
+  const slug = (fullName || 'jit_member')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32);
+  const digits = normalizeDigitsOnly(contactNumber || '');
+  const suffix = digits.length >= 4 ? `_${digits.slice(-2)}` : '';
+  const base = slug.length >= 2 ? slug : 'jit_member';
+  return `${base}${suffix}`.slice(0, 48);
+}
+
+function buildUserDirectoryPayload(profile: UserProfile): Record<string, any> {
+  const cleanName = (profile.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
+  const username = deriveUsername(cleanName, profile.contactNumber, profile.username);
+  const digits = normalizeDigitsOnly(profile.contactNumber || '');
+  const stats = sanitizeStats(profile.stats);
+  return {
+    profileId: profile.id,
+    fullName: cleanName,
+    fullNameLower: cleanName.toLowerCase(),
+    username,
+    usernameLower: username.toLowerCase(),
+    avatarUrl: sanitizeAvatarUrl(profile.avatarUrl),
+    bio: (profile.bio || '').slice(0, 500),
+    address: (profile.address || 'JIT Campus').slice(0, 300),
+    phoneLast4: digits.length >= 4 ? digits.slice(-4) : '',
+    rewardPoints: stats.rewardPoints,
+    gamesWon: stats.gamesWon,
+    updatedAt: serverTimestamp(),
+  };
+}
+
 function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
   const lastLoginIso =
     (data.lastActiveAt && typeof data.lastActiveAt.toDate === 'function'
@@ -87,10 +146,13 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     data.joinedAt ||
     new Date().toISOString();
 
+  const fullName = String(data.fullName || 'JIT Member');
+  const contactNumber = String(data.contactNumber || '');
   return {
     id: String(data.id),
-    contactNumber: String(data.contactNumber || ''),
-    fullName: String(data.fullName || 'JIT Member'),
+    contactNumber,
+    fullName,
+    username: deriveUsername(fullName, contactNumber, typeof data.username === 'string' ? data.username : undefined),
     address: String(data.address || ''),
     bio: typeof data.bio === 'string' ? data.bio : '',
     avatarUrl:
@@ -235,6 +297,13 @@ export async function registerOrRecognizeCloudProfile(
     const prev = existing.profile;
     const cleanName = fullName.trim().slice(0, 120) || prev.fullName;
     const cleanAddr = address.trim().slice(0, 300) || prev.address;
+    const updated = {
+      ...prev,
+      fullName: cleanName,
+      address: cleanAddr,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+    };
 
     const batch = writeBatch(dbLite);
     batch.update(doc(dbLite, 'profiles', prev.id), {
@@ -247,26 +316,24 @@ export async function registerOrRecognizeCloudProfile(
     batch.update(doc(dbLite, 'phone_index', phoneKey), {
       lastLoginAt: serverTimestamp(),
     });
+    batch.set(doc(dbLite, 'user_directory', prev.id), buildUserDirectoryPayload(updated));
     await batch.commit();
 
-    const updated = {
-      ...prev,
-      fullName: cleanName,
-      address: cleanAddr,
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-    };
     await syncNodeLeaderboardEntry(updated);
     return { success: true, isExisting: true, profile: updated };
   }
 
   const profileId =
     seedProfile?.id || `usr_jit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const cleanFullName = (seedProfile?.fullName || fullName).trim().slice(0, 120);
+  const cleanContact = (seedProfile?.contactNumber || contactNumber).trim().slice(0, 30);
+  const derivedUsername = deriveUsername(cleanFullName, cleanContact, seedProfile?.username);
 
   const newProfile: UserProfile = {
     id: profileId,
-    contactNumber: (seedProfile?.contactNumber || contactNumber).trim().slice(0, 30),
-    fullName: (seedProfile?.fullName || fullName).trim().slice(0, 120),
+    contactNumber: cleanContact,
+    fullName: cleanFullName,
+    username: derivedUsername,
     address: (seedProfile?.address || address).trim().slice(0, 300),
     bio: (seedProfile?.bio || 'Proud member of JIT GROUP campus community.').slice(0, 500),
     avatarUrl: sanitizeAvatarUrl(seedProfile?.avatarUrl),
@@ -286,6 +353,7 @@ export async function registerOrRecognizeCloudProfile(
     contactNumber: newProfile.contactNumber,
     phoneKey,
     fullName: newProfile.fullName,
+    username: derivedUsername,
     address: newProfile.address,
     bio: newProfile.bio || '',
     avatarUrl: newProfile.avatarUrl,
@@ -318,6 +386,7 @@ export async function registerOrRecognizeCloudProfile(
     streakDays: newProfile.stats.streakDays,
     updatedAt: serverTimestamp(),
   });
+  batch.set(doc(dbLite, 'user_directory', newProfile.id), buildUserDirectoryPayload(newProfile));
   await batch.commit();
 
   return { success: true, isExisting: false, profile: newProfile };
@@ -347,6 +416,7 @@ export async function updateCloudProfile(
 
   const detailKeys = [
     'fullName',
+    'username',
     'bio',
     'address',
     'avatarUrl',
@@ -372,6 +442,13 @@ export async function updateCloudProfile(
       lastActiveAt: serverTimestamp(),
     };
     if (updates.fullName !== undefined) detailPatch.fullName = updates.fullName.trim().slice(0, 120);
+    if (updates.username !== undefined) {
+      detailPatch.username = deriveUsername(
+        updates.fullName || profile.fullName,
+        profile.contactNumber,
+        updates.username
+      );
+    }
     if (updates.bio !== undefined) detailPatch.bio = updates.bio.slice(0, 500);
     if (updates.address !== undefined) detailPatch.address = updates.address.trim().slice(0, 300);
     if (updates.avatarUrl !== undefined) detailPatch.avatarUrl = sanitizeAvatarUrl(updates.avatarUrl);
@@ -389,13 +466,25 @@ export async function updateCloudProfile(
       detailPatch.isAddressPublic = Boolean(updates.isAddressPublic);
     }
 
+    const mergedProfile: UserProfile = {
+      ...profile,
+      ...updates,
+      ...(detailPatch.username ? { username: detailPatch.username } : {}),
+      stats: sanitizeStats(updates.stats || profile.stats),
+    };
     const batch = writeBatch(dbLite);
     batch.update(profileRef, detailPatch);
     batch.update(indexRef, { lastLoginAt: serverTimestamp() });
+    batch.set(doc(dbLite, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
     await batch.commit();
   }
 
   if (hasStatsUpdate) {
+    const mergedProfile: UserProfile = {
+      ...profile,
+      ...updates,
+      stats: sanitizeStats(updates.stats),
+    };
     const batch = writeBatch(dbLite);
     batch.update(profileRef, {
       stats: sanitizeStats(updates.stats),
@@ -404,6 +493,7 @@ export async function updateCloudProfile(
       lastActiveAt: serverTimestamp(),
     });
     batch.update(indexRef, { lastLoginAt: serverTimestamp() });
+    batch.set(doc(dbLite, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
     await batch.commit();
   }
 
@@ -629,15 +719,17 @@ export async function fetchAllCloudProfilesForAdmin(
 }
 
 /**
- * Admin direct override for profile fields and JIT Points balance in Firestore.
+ * Admin direct override for profile fields (name, username, status, bio, photos) and JIT Points balance in Firestore.
  */
 export async function adminOverrideCloudProfile(
   baseProfile: UserProfile,
   edits: {
     fullName?: string;
+    username?: string;
     bio?: string;
     avatarUrl?: string;
     coverUrl?: string;
+    status?: UserProfile['status'];
     rewardPoints?: number;
   }
 ): Promise<UserProfile> {
@@ -646,10 +738,24 @@ export async function adminOverrideCloudProfile(
     ...baseProfile.stats,
     ...(edits.rewardPoints !== undefined ? { rewardPoints: edits.rewardPoints } : {}),
   });
+  const nextFullName =
+    edits.fullName !== undefined
+      ? edits.fullName.trim().slice(0, 120) || baseProfile.fullName
+      : baseProfile.fullName;
+  const nextUsername = deriveUsername(
+    nextFullName,
+    baseProfile.contactNumber,
+    edits.username !== undefined ? edits.username : baseProfile.username
+  );
+  const nextStatus: UserProfile['status'] =
+    edits.status && ['active', 'suspended', 'deleted'].includes(edits.status)
+      ? edits.status
+      : baseProfile.status || 'active';
 
   const nextProfile: UserProfile = {
     ...baseProfile,
-    fullName: edits.fullName !== undefined ? edits.fullName.trim().slice(0, 120) || baseProfile.fullName : baseProfile.fullName,
+    fullName: nextFullName,
+    username: nextUsername,
     bio: edits.bio !== undefined ? edits.bio.slice(0, 500) : baseProfile.bio || '',
     avatarUrl:
       edits.avatarUrl !== undefined
@@ -661,36 +767,50 @@ export async function adminOverrideCloudProfile(
         : edits.coverUrl !== undefined && edits.coverUrl.length <= 395000
         ? edits.coverUrl
         : baseProfile.coverUrl,
+    status: nextStatus,
+    suspendedReason: nextStatus === 'active' ? undefined : baseProfile.suspendedReason,
+    suspendedAt: nextStatus === 'active' ? undefined : baseProfile.suspendedAt,
     lastLoginAt: nowIso,
     lastLogin: nowIso,
     stats: nextStats,
   };
 
-  try {
-    const profileRef = doc(dbLite, 'profiles', baseProfile.id);
-    const snap = await getDoc(profileRef);
-    if (snap.exists()) {
-      const patch: Record<string, any> = {
-        fullName: nextProfile.fullName,
-        bio: nextProfile.bio || '',
-        avatarUrl: nextProfile.avatarUrl,
-        stats: nextStats,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      };
-      if (edits.coverUrl === '') {
-        patch.coverUrl = '';
-      } else if (nextProfile.coverUrl !== undefined) {
-        patch.coverUrl = nextProfile.coverUrl;
-      }
-      await updateDoc(profileRef, patch);
-    } else {
-      await ensureCloudProfileSeeded(nextProfile);
+  const profileRef = doc(dbLite, 'profiles', baseProfile.id);
+  const snap = await getDoc(profileRef);
+  if (snap.exists()) {
+    const patch: Record<string, any> = {
+      fullName: nextProfile.fullName,
+      username: nextUsername,
+      bio: nextProfile.bio || '',
+      avatarUrl: nextProfile.avatarUrl,
+      status: nextStatus,
+      suspendedReason: nextStatus === 'active' ? '' : nextProfile.suspendedReason || '',
+      suspendedAt: nextStatus === 'active' ? '' : nextProfile.suspendedAt || '',
+      stats: nextStats,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      lastActiveAt: serverTimestamp(),
+    };
+    if (edits.coverUrl === '') {
+      patch.coverUrl = '';
+    } else if (nextProfile.coverUrl !== undefined) {
+      patch.coverUrl = nextProfile.coverUrl;
     }
-    await syncNodeLeaderboardEntry(nextProfile);
-  } catch (err) {
-    console.warn('Admin Firestore profile override notice:', err);
+    await updateDoc(profileRef, patch);
+  } else {
+    await ensureCloudProfileSeeded(nextProfile);
+  }
+
+  if (nextStatus === 'deleted') {
+    await Promise.allSettled([
+      deleteDoc(doc(dbLite, 'leaderboard', baseProfile.id)),
+      deleteDoc(doc(dbLite, 'user_directory', baseProfile.id)),
+    ]);
+  } else {
+    await Promise.allSettled([
+      syncNodeLeaderboardEntry(nextProfile),
+      setDoc(doc(dbLite, 'user_directory', nextProfile.id), buildUserDirectoryPayload(nextProfile)),
+    ]);
   }
 
   return nextProfile;
@@ -715,21 +835,24 @@ export async function adminModerateCloudProfile(
       : '';
   const suspendedAt = action === 'unblock' ? '' : nowIso;
 
-  try {
-    const profileRef = doc(dbLite, 'profiles', profile.id);
-    const snap = await getDoc(profileRef);
-    if (snap.exists()) {
-      await updateDoc(profileRef, {
-        status: nextStatus,
-        suspendedReason: cleanReason,
-        suspendedAt,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      });
-    }
-  } catch (err) {
-    console.warn('Admin Firestore moderation notice:', err);
+  const profileRef = doc(dbLite, 'profiles', profile.id);
+  const snap = await getDoc(profileRef);
+  if (snap.exists()) {
+    await updateDoc(profileRef, {
+      status: nextStatus,
+      suspendedReason: cleanReason,
+      suspendedAt,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      lastActiveAt: serverTimestamp(),
+    });
+  }
+
+  if (action === 'delete') {
+    await Promise.allSettled([
+      deleteDoc(doc(dbLite, 'leaderboard', profile.id)),
+      deleteDoc(doc(dbLite, 'user_directory', profile.id)),
+    ]);
   }
 
   return {
@@ -741,3 +864,364 @@ export async function adminModerateCloudProfile(
     lastLogin: nowIso,
   };
 }
+
+function parseNodeParticipantsMap(jsonStr?: string): Record<string, { name: string; avatar?: string }> {
+  try {
+    const parsed = JSON.parse(jsonStr || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function fetchNodeUserActivity(userId: string): Promise<{
+  conversations: Conversation[];
+  messages: Array<Message & { createdAtMs?: number }>;
+  posts: Post[];
+  reels: Reel[];
+  matchHistory: MatchHistoryRecord[];
+}> {
+  const convMap = new Map<string, Conversation>();
+  const msgMap = new Map<string, Message & { createdAtMs?: number }>();
+  const now = Date.now();
+
+  const toConv = (id: string, data: Record<string, any>): Conversation => {
+    const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
+    const pMap = parseNodeParticipantsMap(data.participantsJson);
+    const type = data.type === 'group' ? 'group' : 'direct';
+    const peerId = type === 'direct' ? participantIds.find((pid) => pid !== userId) : undefined;
+    const peerInfo = peerId ? pMap[peerId] : undefined;
+    return {
+      id: String(data.id || id),
+      type,
+      name: peerInfo?.name || String(data.name || 'Conversation'),
+      avatarUrl: peerInfo?.avatar || (typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
+      participantIds,
+      participantsMap: pMap,
+      lastMessage: data.lastMessageText
+        ? {
+            text: String(data.lastMessageText),
+            senderId: String(data.lastMessageSenderId || ''),
+            createdAt: String(data.lastMessageAt || ''),
+            isRead: true,
+          }
+        : undefined,
+      unreadCount: 0,
+      updatedAt: String(data.lastMessageAt || 'Recent'),
+      updatedAtMs: Number(data.updatedAtMs || 0),
+    };
+  };
+
+  const toMsg = (id: string, fallbackConvId: string, data: Record<string, any>): Message & { createdAtMs?: number } => ({
+    id: String(data.id || id),
+    conversationId: String(data.conversationId || fallbackConvId),
+    senderId: String(data.senderId || ''),
+    receiverId: typeof data.receiverId === 'string' ? data.receiverId : undefined,
+    senderName: String(data.senderName || 'JIT Member'),
+    senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
+    content: String(data.content || ''),
+    mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
+    mediaType: data.mediaType as Message['mediaType'],
+    createdAt: String(data.createdAt || ''),
+    createdAtMs: Number(data.createdAtMs || 0),
+    status: (data.status as Message['status']) || 'delivered',
+  });
+
+  // 1. Conversations matching participantIds + recent threads scan
+  const [partRes, recentRes] = await Promise.allSettled([
+    getDocs(query(collection(dbLite, 'conversations'), where('participantIds', 'array-contains', userId), limit(100))),
+    getDocs(query(collection(dbLite, 'conversations'), limit(100))),
+  ]);
+
+  if (partRes.status === 'fulfilled') {
+    partRes.value.forEach((d) => {
+      const conv = toConv(d.id, d.data());
+      convMap.set(conv.id, conv);
+    });
+  }
+  if (recentRes.status === 'fulfilled') {
+    recentRes.value.forEach((d) => {
+      const data = d.data();
+      const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
+      const pMap = parseNodeParticipantsMap(data.participantsJson);
+      const matchesUser =
+        participantIds.includes(userId) ||
+        data.lastMessageSenderId === userId ||
+        d.id.includes(userId) ||
+        Boolean(pMap[userId]);
+      if (matchesUser && !convMap.has(String(data.id || d.id))) {
+        const conv = toConv(d.id, data);
+        convMap.set(conv.id, conv);
+      }
+    });
+  }
+
+  // 2. Fetch messages inside matched conversations
+  const convIds = Array.from(convMap.keys());
+  for (let i = 0; i < convIds.length; i += 10) {
+    const slice = convIds.slice(i, i + 10);
+    await Promise.all(
+      slice.map(async (cid) => {
+        try {
+          const snap = await getDocs(
+            query(collection(dbLite, 'conversations', cid, 'messages'), where('createdAtMs', '>=', 0), limit(200))
+          );
+          snap.forEach((d) => {
+            const msg = toMsg(d.id, cid, d.data());
+            msgMap.set(msg.id, msg);
+          });
+        } catch {
+          // ignore
+        }
+      })
+    );
+  }
+
+  // 3. CollectionGroup query for senderId == userId or receiverId == userId
+  try {
+    const [sentCg, recvCg] = await Promise.allSettled([
+      getDocs(query(collectionGroup(dbLite, 'messages'), where('senderId', '==', userId), limit(200))),
+      getDocs(query(collectionGroup(dbLite, 'messages'), where('receiverId', '==', userId), limit(200))),
+    ]);
+    const extraConvIds = new Set<string>();
+    const absorb = (snap: any) => {
+      snap.forEach((d: any) => {
+        const data = d.data();
+        const convId = String(data.conversationId || d.ref.parent?.parent?.id || '');
+        const msg = toMsg(d.id, convId, data);
+        msgMap.set(msg.id, msg);
+        if (convId && !convMap.has(convId)) extraConvIds.add(convId);
+      });
+    };
+    if (sentCg.status === 'fulfilled') absorb(sentCg.value);
+    if (recvCg.status === 'fulfilled') absorb(recvCg.value);
+
+    for (const cid of Array.from(extraConvIds)) {
+      try {
+        const cSnap = await getDoc(doc(dbLite, 'conversations', cid));
+        if (cSnap.exists()) {
+          convMap.set(cid, toConv(cid, cSnap.data()));
+        }
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // CollectionGroup index optional
+  }
+
+  // 4. Posts & Reels authored/interacted by user in Firestore
+  const postsList: Post[] = [];
+  const reelsList: Reel[] = [];
+
+  try {
+    const postsSnap = await getDocs(query(collection(dbLite, 'posts'), where('createdAtMs', '>=', 0), limit(150)));
+    postsSnap.forEach((d) => {
+      const data = d.data();
+      const mediaType = (data.mediaType as Post['mediaType']) || 'none';
+      const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+      if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) return;
+      let comments: any[] = [];
+      try {
+        const parsed = JSON.parse(data.commentsJson || '[]');
+        if (Array.isArray(parsed)) comments = parsed;
+      } catch {
+        comments = [];
+      }
+      const hasComment = comments.some(
+        (c: any) => c.authorId === userId || (Array.isArray(c.replies) && c.replies.some((r: any) => r.authorId === userId))
+      );
+      if (data.authorId === userId || hasComment) {
+        postsList.push({
+          id: String(data.id || d.id),
+          authorId: String(data.authorId || ''),
+          authorName: String(data.authorName || 'JIT Member'),
+          authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
+          authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
+          content: String(data.content || ''),
+          mediaUrls: Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined,
+          mediaType,
+          thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+          category: (data.category as Post['category']) || 'all',
+          likesCount: Number(data.likesCount || 0),
+          commentsCount: Number(data.commentsCount || 0),
+          sharesCount: Number(data.sharesCount || 0),
+          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
+          comments,
+          createdAt: String(data.createdAt || 'Just now'),
+          createdAtMs: Number(data.createdAtMs || 0),
+          expiresAt,
+        });
+      }
+    });
+  } catch {
+    // non-fatal
+  }
+
+  try {
+    const reelsSnap = await getDocs(query(collection(dbLite, 'reels'), where('createdAtMs', '>=', 0), limit(100)));
+    reelsSnap.forEach((d) => {
+      const data = d.data();
+      const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+      if (expiresAt !== undefined && expiresAt <= now) return;
+      if (data.creatorId !== userId) return;
+      let comments: any[] = [];
+      try {
+        const parsed = JSON.parse(data.commentsJson || '[]');
+        if (Array.isArray(parsed)) comments = parsed;
+      } catch {
+        comments = [];
+      }
+      reelsList.push({
+        id: String(data.id || d.id),
+        creatorId: String(data.creatorId || ''),
+        creatorName: String(data.creatorName || 'JIT Member'),
+        creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
+        videoUrl: String(data.videoUrl || ''),
+        thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+        caption: String(data.caption || ''),
+        musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
+        likesCount: Number(data.likesCount || 0),
+        commentsCount: Number(data.commentsCount || 0),
+        sharesCount: Number(data.sharesCount || 0),
+        viewsCount: Number(data.viewsCount || 1),
+        likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
+        comments,
+        createdAt: String(data.createdAt || 'Just now'),
+        createdAtMs: Number(data.createdAtMs || 0),
+        expiresAt,
+      });
+    });
+  } catch {
+    // non-fatal
+  }
+
+  const matchHistory = await fetchNodeMatchHistory(userId, 40).catch(() => []);
+
+  return {
+    conversations: Array.from(convMap.values()).sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)),
+    messages: Array.from(msgMap.values()).sort((a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0)),
+    posts: postsList.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)),
+    reels: reelsList.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)),
+    matchHistory,
+  };
+}
+
+export async function fetchNodePlatformCounts(): Promise<{
+  postsCount: number;
+  conversationsCount: number;
+  announcementsCount: number;
+}> {
+  const [postsRes, convRes, annRes] = await Promise.allSettled([
+    getDocs(query(collection(dbLite, 'posts'), where('createdAtMs', '>=', 0), limit(200))),
+    getDocs(query(collection(dbLite, 'conversations'), limit(100))),
+    getDocs(query(collection(dbLite, 'announcements'), where('createdAtMs', '>=', 0), limit(50))),
+  ]);
+  return {
+    postsCount: postsRes.status === 'fulfilled' ? postsRes.value.size : 0,
+    conversationsCount: convRes.status === 'fulfilled' ? convRes.value.size : 0,
+    announcementsCount: annRes.status === 'fulfilled' ? annRes.value.size : 0,
+  };
+}
+
+export async function deleteNodePost(postId: string): Promise<void> {
+  if (!postId) return;
+  await deleteDoc(doc(dbLite, 'posts', postId));
+}
+
+export async function deleteNodeReel(reelId: string): Promise<void> {
+  if (!reelId) return;
+  await deleteDoc(doc(dbLite, 'reels', reelId));
+}
+
+export async function deleteNodeMatchRecord(matchId: string): Promise<void> {
+  if (!matchId) return;
+  await deleteDoc(doc(dbLite, 'match_history', matchId));
+}
+
+export async function publishNodeAnnouncement(ann: GlobalAnnouncement, feedPost?: Post): Promise<void> {
+  const createdAtMs = ann.createdAtMs || Date.now();
+  const safeMediaUrl = ann.mediaUrl && ann.mediaUrl.length <= 740_000 ? ann.mediaUrl : undefined;
+  const safeThumb = ann.thumbnailUrl && ann.thumbnailUrl.length <= 175_000 ? ann.thumbnailUrl : undefined;
+
+  await setDoc(doc(dbLite, 'announcements', ann.id), {
+    id: ann.id,
+    title: ann.title.slice(0, 140),
+    message: ann.message.slice(0, 1000),
+    priority: ann.priority || 'important',
+    authorName: (ann.authorName || 'JIT GROUP Admin').slice(0, 120),
+    ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: ann.mediaType || 'image' } : {}),
+    ...(safeThumb ? { thumbnailUrl: safeThumb } : {}),
+    createdAt: (ann.createdAt || new Date(createdAtMs).toISOString()).slice(0, 40),
+    createdAtMs,
+    ...(typeof ann.expiresAt === 'number' ? { expiresAt: ann.expiresAt } : {}),
+    createdAtTs: serverTimestamp(),
+  });
+
+  if (feedPost) {
+    const safeFeedUrls = Array.isArray(feedPost.mediaUrls)
+      ? feedPost.mediaUrls.filter((u) => typeof u === 'string' && u.length <= 740_000).slice(0, 4)
+      : undefined;
+    await setDoc(doc(dbLite, 'posts', feedPost.id), {
+      id: feedPost.id,
+      authorId: feedPost.authorId,
+      authorName: feedPost.authorName.slice(0, 120),
+      authorAvatar: sanitizeAvatarUrl(feedPost.authorAvatar),
+      authorHandle: (feedPost.authorHandle || '@jit_announcement').slice(0, 80),
+      content: feedPost.content.slice(0, 5000),
+      ...(safeFeedUrls && safeFeedUrls.length > 0 ? { mediaUrls: safeFeedUrls } : {}),
+      mediaType: feedPost.mediaType || 'none',
+      ...(safeThumb ? { thumbnailUrl: safeThumb } : {}),
+      category: 'all',
+      likesCount: 0,
+      commentsCount: 0,
+      sharesCount: 0,
+      likedBy: [],
+      commentsJson: '[]',
+      createdAt: 'Just now',
+      createdAtMs,
+      ...(typeof feedPost.expiresAt === 'number' ? { expiresAt: feedPost.expiresAt } : {}),
+      createdAtTs: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+}
+
+export async function fetchNodeAnnouncements(): Promise<GlobalAnnouncement[]> {
+  try {
+    const snap = await getDocs(query(collection(dbLite, 'announcements'), where('createdAtMs', '>=', 0), limit(50)));
+    const now = Date.now();
+    const list: GlobalAnnouncement[] = [];
+    snap.forEach((d) => {
+      const data = d.data();
+      const mediaType = (data.mediaType as GlobalAnnouncement['mediaType']) || 'none';
+      const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+      if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) return;
+      list.push({
+        id: String(data.id || d.id),
+        title: String(data.title || 'Announcement'),
+        message: String(data.message || ''),
+        priority: (data.priority as GlobalAnnouncement['priority']) || 'important',
+        authorName: String(data.authorName || 'JIT GROUP Admin'),
+        createdAt: String(data.createdAt || new Date().toISOString()),
+        createdAtMs: Number(data.createdAtMs || 0),
+        mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
+        mediaType: mediaType !== 'none' ? mediaType : undefined,
+        thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+        expiresAt,
+      });
+    });
+    return list.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteNodeAnnouncement(id: string): Promise<void> {
+  if (!id) return;
+  await Promise.allSettled([
+    deleteDoc(doc(dbLite, 'announcements', id)),
+    deleteDoc(doc(dbLite, 'posts', `post_ann_${id}`)),
+  ]);
+}
+

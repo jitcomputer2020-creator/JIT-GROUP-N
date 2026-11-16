@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { UserProfile, GameId, MatchHistoryRecord, WalletTransaction } from '../types';
 import { INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { getSupabaseClient } from '../lib/supabase';
@@ -18,6 +18,7 @@ import {
   touchCloudLoginTimestamp,
   syncLeaderboardEntry,
   recordCloudMatchHistory,
+  subscribeToCloudProfile,
 } from '../lib/firebase';
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
@@ -134,8 +135,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const parsed = JSON.parse(saved);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            // Auto-clean any accounts inactive for >180 days on initial boot
-            return parsed.filter((p: UserProfile) => !isProfileExpired(p));
+            // Auto-clean any accounts inactive for >180 days or deleted on initial boot
+            return parsed.filter((p: UserProfile) => !isProfileExpired(p) && p.status !== 'deleted');
           }
         } catch (e) {
           console.error('Failed to parse cached profiles', e);
@@ -156,8 +157,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const parsed = JSON.parse(saved);
           if (parsed && parsed.id) {
-            // If saved profile has exceeded 180 days, auto-clear and log out
-            if (isProfileExpired(parsed)) {
+            // If saved profile has exceeded 180 days or is suspended/deleted, auto-clear and log out
+            if (isProfileExpired(parsed) || parsed.status === 'deleted' || parsed.status === 'suspended') {
               localStorage.removeItem(LS_CURRENT_USER);
               return null;
             }
@@ -170,6 +171,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     return INITIAL_USER; // Default to demo user for instantaneous interactive exploration
   });
+
+  const currentUserRef = useRef<UserProfile | null>(currentUser);
+  currentUserRef.current = currentUser;
+  const registeredProfilesRef = useRef<UserProfile[]>(registeredProfiles);
+  registeredProfilesRef.current = registeredProfiles;
+  const confirmedCloudProfileRef = useRef<string | null>(null);
 
   // Sync state to localStorage
   useEffect(() => {
@@ -198,14 +205,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await testFirestoreConnection();
 
       let cloudResolvedProfile: UserProfile | null = null;
+      const activeUser = currentUserRef.current;
 
-      // Verify & refresh current user directly from Firestore so edits/photos/logins sync across devices
-      if (currentUser && currentUser.contactNumber) {
+      // Verify & refresh current user directly from Firestore so edits/photos/logins/moderation sync across devices
+      if (activeUser && activeUser.contactNumber) {
         try {
-          const cloudCurrent = await lookupCloudProfileByPhone(currentUser.contactNumber);
+          const cloudCurrent = await lookupCloudProfileByPhone(activeUser.contactNumber);
           if (cloudCurrent.expired || (cloudCurrent.found && cloudCurrent.profile?.status === 'deleted')) {
             setCurrentUser(null);
-            setRegisteredProfiles((prev) => prev.filter((p) => p.id !== currentUser.id));
+            setRegisteredProfiles((prev) => prev.filter((p) => p.id !== activeUser.id));
             if (typeof window !== 'undefined') {
               localStorage.removeItem(LS_CURRENT_USER);
             }
@@ -219,6 +227,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
           } else if (cloudCurrent.found && cloudCurrent.profile) {
             cloudResolvedProfile = cloudCurrent.profile;
+            confirmedCloudProfileRef.current = cloudCurrent.profile.id;
             const cloudProfile = cloudCurrent.profile;
             setCurrentUser((prev) =>
               prev ? { ...prev, ...cloudProfile } : cloudProfile
@@ -227,8 +236,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               const without = prev.filter((p) => p.id !== cloudProfile.id);
               return [cloudProfile, ...without];
             });
-          } else if (!isProfileExpired(currentUser)) {
-            await ensureCloudProfileSeeded(currentUser);
+          } else if (!isProfileExpired(activeUser)) {
+            await ensureCloudProfileSeeded(activeUser);
           }
         } catch (cloudErr) {
           console.warn('Firestore current user sync notice:', cloudErr);
@@ -306,9 +315,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         });
 
         // If current user wasn't refreshed from Firestore, merge fresher server data carefully
-        if (currentUser && !cloudResolvedProfile) {
-          const matchedServer = activeServerProfiles.find(
-            (p) => p.id === currentUser.id || isPhoneNumberMatch(p.contactNumber, currentUser.contactNumber)
+        const latestActive = currentUserRef.current;
+        if (latestActive && !cloudResolvedProfile) {
+          const matchedServer = serverProfiles.find(
+            (p) => p.id === latestActive.id || isPhoneNumberMatch(p.contactNumber, latestActive.contactNumber)
           );
           if (matchedServer) {
             if (matchedServer.status === 'suspended' || matchedServer.status === 'deleted') {
@@ -344,7 +354,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       // 2. Backup valid local profiles to shared cloud backend & Firestore
-      const nonExpired = registeredProfiles.filter((p) => !isProfileExpired(p));
+      const nonExpired = registeredProfilesRef.current.filter(
+        (p) => !isProfileExpired(p) && p.status !== 'deleted'
+      );
       if (nonExpired.length > 0) {
         for (const p of nonExpired) {
           ensureCloudProfileSeeded(p).catch(() => {});
@@ -358,16 +370,66 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.warn('Initial server profiles sync notice:', err);
     }
-  }, [currentUser, registeredProfiles]);
+  }, []);
 
   useEffect(() => {
     syncServerProfiles();
-    // Run periodic sync & 180-day cleanup sweep every 10 minutes in the background
     const interval = setInterval(() => {
       syncServerProfiles();
-    }, 10 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []); // Run on mount
+    }, 30 * 1000);
+    const onFocus = () => {
+      syncServerProfiles();
+    };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [syncServerProfiles]);
+
+  // Real-time Firestore profile listener so admin overrides (points, username, photos)
+  // and moderation actions (suspend/delete) take immediate effect across active sessions
+  useEffect(() => {
+    if (!currentUser?.id) {
+      confirmedCloudProfileRef.current = null;
+      return;
+    }
+    const uid = currentUser.id;
+    const unsub = subscribeToCloudProfile(uid, (cloudProfile, exists) => {
+      if (exists && cloudProfile) {
+        confirmedCloudProfileRef.current = uid;
+        if (cloudProfile.status === 'suspended' || cloudProfile.status === 'deleted') {
+          setCurrentUser(null);
+          if (cloudProfile.status === 'deleted') {
+            setRegisteredProfiles((prev) => prev.filter((p) => p.id !== uid));
+          } else {
+            setRegisteredProfiles((prev) =>
+              prev.map((p) => (p.id === uid ? cloudProfile : p))
+            );
+          }
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem(LS_CURRENT_USER);
+            if (cloudProfile.status === 'deleted') {
+              localStorage.setItem(LS_LOGGED_OUT, 'true');
+            }
+          }
+          return;
+        }
+        setCurrentUser((prev) => (prev && prev.id === uid ? { ...prev, ...cloudProfile } : prev));
+        setRegisteredProfiles((prev) =>
+          prev.map((p) => (p.id === uid ? { ...p, ...cloudProfile } : p))
+        );
+      } else if (!exists && confirmedCloudProfileRef.current === uid) {
+        setCurrentUser(null);
+        setRegisteredProfiles((prev) => prev.filter((p) => p.id !== uid));
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem(LS_CURRENT_USER);
+          localStorage.setItem(LS_LOGGED_OUT, 'true');
+        }
+      }
+    });
+    return () => unsub();
+  }, [currentUser?.id]);
 
   // Helper to persist profile to shared backend server and Supabase (if configured)
   const persistProfileRemotely = async (

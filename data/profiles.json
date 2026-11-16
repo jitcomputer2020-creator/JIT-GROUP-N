@@ -21,7 +21,8 @@
       "gamesWon": 52,
       "rewardPoints": 1680,
       "streakDays": 14
-    }
+    },
+    "status": "active"
   },
   {
     "id": "usr_jit_primary_001",
@@ -32,8 +33,8 @@
     "avatarUrl": "/assets/aistudio/image_e64e54f2.png",
     "coverUrl": "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=1200&q=80",
     "joinedAt": "2026-01-15T08:30:00Z",
-    "lastLoginAt": "2026-11-14T05:00:35.146Z",
-    "lastLogin": "2026-11-14T05:00:35.146Z",
+    "lastLoginAt": "2026-11-14T19:22:28.235Z",
+    "lastLogin": "2026-11-14T19:22:28.235Z",
     "isContactNumberPublic": false,
     "isAddressPublic": false,
     "stats": {
@@ -42,11 +43,13 @@
       "followingCount": 195,
       "postsCount": 24,
       "reelsCount": 8,
-      "gamesPlayed": 56,
-      "gamesWon": 34,
+      "gamesPlayed": 59,
+      "gamesWon": 35,
       "rewardPoints": 1250,
       "streakDays": 7
-    }
+    },
+    "username": "prof_ramesh_sharma_10",
+    "status": "active"
   },
   {
     "id": "usr_jit_1793997636044_ifb0c",
@@ -70,7 +73,8 @@
       "gamesWon": 0,
       "rewardPoints": 110,
       "streakDays": 1
-    }
+    },
+    "status": "active"
   },
   {
     "id": "usr_jit_002",

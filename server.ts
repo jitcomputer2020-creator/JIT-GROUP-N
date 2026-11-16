@@ -26,6 +26,14 @@ import {
   fetchAllCloudProfilesForAdmin,
   adminOverrideCloudProfile,
   adminModerateCloudProfile,
+  fetchNodeUserActivity,
+  fetchNodePlatformCounts,
+  deleteNodePost,
+  deleteNodeReel,
+  deleteNodeMatchRecord,
+  publishNodeAnnouncement,
+  fetchNodeAnnouncements,
+  deleteNodeAnnouncement,
 } from './src/lib/firebaseNode.ts';
 import { INITIAL_USER, INITIAL_FRIENDS, INITIAL_POSTS } from './src/services/mockData.ts';
 
@@ -1136,8 +1144,20 @@ app.post('/api/posts/sync', (req, res) => {
   return res.json({ success: true, posts: merged });
 });
 
-app.get('/api/announcements', (req, res) => {
-  return res.json({ announcements: readAnnouncementsData() });
+app.get('/api/announcements', async (req, res) => {
+  const now = Date.now();
+  const local = readAnnouncementsData();
+  const cloud = await fetchNodeAnnouncements().catch(() => []);
+  const byId = new Map<string, any>();
+  for (const a of [...cloud, ...local]) {
+    if (!a || !a.id) continue;
+    if (a.mediaType === 'video' && typeof a.expiresAt === 'number' && a.expiresAt <= now) continue;
+    if (!byId.has(a.id)) byId.set(a.id, a);
+  }
+  const merged = Array.from(byId.values()).sort(
+    (a, b) => (b.createdAtMs || Date.parse(b.createdAt || '') || 0) - (a.createdAtMs || Date.parse(a.createdAt || '') || 0)
+  );
+  return res.json({ announcements: merged });
 });
 
 // 2. Lookup profile by contact phone (checks shared Firestore cloud database first)
@@ -1692,7 +1712,10 @@ app.get('/api/admin/users', async (req, res) => {
 
   try {
     const localMirror = readProfiles();
-    const { profiles, firebaseCount } = await fetchAllCloudProfilesForAdmin(localMirror);
+    const [{ profiles, firebaseCount }, cloudCounts] = await Promise.all([
+      fetchAllCloudProfilesForAdmin(localMirror),
+      fetchNodePlatformCounts().catch(() => ({ postsCount: 0, conversationsCount: 0, announcementsCount: 0 })),
+    ]);
 
     const nowMs = Date.now();
     const DAY_MS = 24 * 60 * 60 * 1000;
@@ -1714,10 +1737,10 @@ app.get('/api/admin/users', async (req, res) => {
       analytics: {
         totalUsers: profiles.length,
         dailyActiveUsers,
-        totalPosts: posts.length,
-        activeChatThreads: chats.conversations.length + rooms.size,
+        totalPosts: Math.max(posts.length, cloudCounts.postsCount),
+        activeChatThreads: Math.max(chats.conversations.length, cloudCounts.conversationsCount) + rooms.size,
         totalMessages: chats.messages.length,
-        activeAnnouncements: announcements.length,
+        activeAnnouncements: Math.max(announcements.length, cloudCounts.announcementsCount),
       },
       syncedAt: new Date().toISOString(),
     });
@@ -1730,14 +1753,23 @@ app.get('/api/admin/users', async (req, res) => {
   }
 });
 
-// Admin: Inspect full user profile, DMs, chat history, live game chats, posts & match history
+// Admin: Inspect full user profile, DMs, chat history, live game chats, posts, reels & match history
 app.get('/api/admin/users/:userId/activity', async (req, res) => {
   if (!requireAdminSession(req, res)) return;
   const userId = req.params.userId;
 
   try {
     const localMirror = readProfiles();
-    const { profiles } = await fetchAllCloudProfilesForAdmin(localMirror);
+    const [{ profiles }, cloudActivity] = await Promise.all([
+      fetchAllCloudProfilesForAdmin(localMirror),
+      fetchNodeUserActivity(userId).catch(() => ({
+        conversations: [] as any[],
+        messages: [] as any[],
+        posts: [] as any[],
+        reels: [] as any[],
+        matchHistory: [] as any[],
+      })),
+    ]);
     const targetUser = profiles.find((u) => u.id === userId) || localMirror.find((u) => u.id === userId);
     if (!targetUser) {
       return res.status(404).json({ success: false, error: 'User account not found.' });
@@ -1745,23 +1777,40 @@ app.get('/api/admin/users/:userId/activity', async (req, res) => {
 
     const chats = readChatsData();
     const lowerName = (targetUser.fullName || '').trim().toLowerCase();
-    const firstName = lowerName.split(' ')[0] || '';
 
-    const userConversations = chats.conversations.filter((c: any) => {
+    const localConversations = chats.conversations.filter((c: any) => {
       if (Array.isArray(c.participantIds) && c.participantIds.includes(userId)) return true;
-      if (chats.messages.some((m: any) => m.conversationId === c.id && m.senderId === userId)) return true;
+      if (chats.messages.some((m: any) => m.conversationId === c.id && (m.senderId === userId || m.receiverId === userId))) return true;
       if (lowerName && typeof c.name === 'string' && c.name.toLowerCase().includes(lowerName)) return true;
       return false;
     });
 
-    const convIdSet = new Set(userConversations.map((c: any) => c.id));
-    const userMessages = chats.messages.filter(
+    const convMap = new Map<string, any>();
+    for (const c of [...cloudActivity.conversations, ...localConversations]) {
+      if (c && c.id && !convMap.has(c.id)) {
+        convMap.set(c.id, c);
+      }
+    }
+    const mergedConversations = Array.from(convMap.values()).sort(
+      (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)
+    );
+
+    const convIdSet = new Set(mergedConversations.map((c: any) => c.id));
+    const localMessages = chats.messages.filter(
       (m: any) =>
         convIdSet.has(m.conversationId) ||
         m.senderId === userId ||
-        (firstName.length > 2 &&
-          typeof m.content === 'string' &&
-          m.content.toLowerCase().includes(firstName))
+        m.receiverId === userId
+    );
+
+    const msgMap = new Map<string, any>();
+    for (const m of [...cloudActivity.messages, ...localMessages]) {
+      if (m && m.id && !msgMap.has(m.id)) {
+        msgMap.set(m.id, m);
+      }
+    }
+    const mergedMessages = Array.from(msgMap.values()).sort(
+      (a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0)
     );
 
     const inGameMessages: Array<InGameMessage & { gameId: string }> = [];
@@ -1775,7 +1824,7 @@ app.get('/api/admin/users/:userId/activity', async (req, res) => {
     }
 
     const allPosts = readPostsData();
-    const userPosts = allPosts.filter(
+    const localPosts = allPosts.filter(
       (p: any) =>
         p.authorId === userId ||
         (Array.isArray(p.comments) &&
@@ -1786,15 +1835,26 @@ app.get('/api/admin/users/:userId/activity', async (req, res) => {
           ))
     );
 
-    const matchHistory = await fetchNodeMatchHistory(userId, 25).catch(() => []);
+    const postMap = new Map<string, any>();
+    for (const p of [...cloudActivity.posts, ...localPosts]) {
+      if (p && p.id && !postMap.has(p.id)) {
+        postMap.set(p.id, p);
+      }
+    }
+
+    const matchHistory =
+      cloudActivity.matchHistory.length > 0
+        ? cloudActivity.matchHistory
+        : await fetchNodeMatchHistory(userId, 25).catch(() => []);
 
     return res.json({
       success: true,
       user: targetUser,
-      conversations: userConversations,
-      messages: userMessages,
+      conversations: mergedConversations,
+      messages: mergedMessages,
       inGameMessages,
-      posts: userPosts,
+      posts: Array.from(postMap.values()),
+      reels: cloudActivity.reels || [],
       matchHistory,
     });
   } catch (err) {
@@ -1803,7 +1863,7 @@ app.get('/api/admin/users/:userId/activity', async (req, res) => {
   }
 });
 
-// Admin: Edit or override user's display name, profile picture, cover photo, bio, and JIT Points
+// Admin: Edit or override user's display name, username, status, profile picture, cover photo, bio, and JIT Points
 app.patch('/api/admin/users/:userId', async (req, res) => {
   if (!requireAdminSession(req, res)) return;
   const userId = req.params.userId;
@@ -1818,14 +1878,19 @@ app.patch('/api/admin/users/:userId', async (req, res) => {
 
     const edits: {
       fullName?: string;
+      username?: string;
       bio?: string;
       avatarUrl?: string;
       coverUrl?: string;
+      status?: 'active' | 'suspended';
       rewardPoints?: number;
     } = {};
 
     if (typeof req.body?.fullName === 'string' && req.body.fullName.trim()) {
       edits.fullName = req.body.fullName.trim();
+    }
+    if (typeof req.body?.username === 'string' && req.body.username.trim()) {
+      edits.username = req.body.username.trim();
     }
     if (typeof req.body?.bio === 'string') {
       edits.bio = req.body.bio;
@@ -1835,6 +1900,9 @@ app.patch('/api/admin/users/:userId', async (req, res) => {
     }
     if (typeof req.body?.coverUrl === 'string') {
       edits.coverUrl = req.body.coverUrl;
+    }
+    if (req.body?.status === 'active' || req.body?.status === 'suspended') {
+      edits.status = req.body.status;
     }
     if (req.body?.rewardPoints !== undefined && !isNaN(Number(req.body.rewardPoints))) {
       edits.rewardPoints = Math.min(1000000, Math.max(0, Math.floor(Number(req.body.rewardPoints))));
@@ -1849,7 +1917,7 @@ app.patch('/api/admin/users/:userId', async (req, res) => {
     delete mirrorRecord.source;
     upsertLocalMirror(mirrorRecord);
 
-    // Sync updated display name/avatar to persisted posts & chat sender labels
+    // Sync updated display name/avatar to persisted posts
     if (edits.fullName || edits.avatarUrl) {
       const posts = readPostsData();
       let postsChanged = false;
@@ -1871,9 +1939,12 @@ app.patch('/api/admin/users/:userId', async (req, res) => {
       success: true,
       user: updatedProfile,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error('Admin user edit error:', err);
-    return res.status(500).json({ success: false, error: 'Failed to update user profile.' });
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to update user profile in Firestore.',
+    });
   }
 });
 
@@ -1927,13 +1998,61 @@ app.post('/api/admin/users/:userId/moderate', async (req, res) => {
   }
 });
 
-// Admin: Global Announcement Broadcast System
-app.get('/api/admin/announcements', (req, res) => {
+// Admin: Delete user post, reel, or game match log
+app.delete('/api/admin/posts/:postId', async (req, res) => {
   if (!requireAdminSession(req, res)) return;
-  return res.json({ success: true, announcements: readAnnouncementsData() });
+  const postId = req.params.postId;
+  try {
+    await deleteNodePost(postId).catch(() => {});
+    const posts = readPostsData();
+    writePostsData(posts.filter((p: any) => p.id !== postId));
+    return res.json({ success: true, id: postId });
+  } catch {
+    return res.status(500).json({ success: false, error: 'Failed to delete post.' });
+  }
 });
 
-app.post('/api/admin/announcements', (req, res) => {
+app.delete('/api/admin/reels/:reelId', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const reelId = req.params.reelId;
+  try {
+    await deleteNodeReel(reelId);
+    return res.json({ success: true, id: reelId });
+  } catch {
+    return res.status(500).json({ success: false, error: 'Failed to delete reel.' });
+  }
+});
+
+app.delete('/api/admin/matches/:matchId', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const matchId = req.params.matchId;
+  try {
+    await deleteNodeMatchRecord(matchId);
+    return res.json({ success: true, id: matchId });
+  } catch {
+    return res.status(500).json({ success: false, error: 'Failed to delete game log.' });
+  }
+});
+
+// Admin: Global Announcement Broadcast System (with Photo & Video Attachments + Firestore Sync)
+app.get('/api/admin/announcements', async (req, res) => {
+  if (!requireAdminSession(req, res)) return;
+  const now = Date.now();
+  const local = readAnnouncementsData();
+  const cloud = await fetchNodeAnnouncements().catch(() => []);
+  const byId = new Map<string, any>();
+  for (const a of [...cloud, ...local]) {
+    if (!a || !a.id) continue;
+    if (a.mediaType === 'video' && typeof a.expiresAt === 'number' && a.expiresAt <= now) continue;
+    if (!byId.has(a.id)) byId.set(a.id, a);
+  }
+  const merged = Array.from(byId.values()).sort(
+    (a, b) => (b.createdAtMs || Date.parse(b.createdAt || '') || 0) - (a.createdAtMs || Date.parse(a.createdAt || '') || 0)
+  );
+  return res.json({ success: true, announcements: merged });
+});
+
+app.post('/api/admin/announcements', async (req, res) => {
   if (!requireAdminSession(req, res)) return;
 
   const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
@@ -1942,6 +2061,13 @@ app.post('/api/admin/announcements', (req, res) => {
     ? req.body.priority
     : 'important';
   const alsoPostToFeed = req.body?.alsoPostToFeed !== false;
+  const mediaUrl = typeof req.body?.mediaUrl === 'string' && req.body.mediaUrl.trim() ? req.body.mediaUrl.trim() : undefined;
+  const mediaType: 'image' | 'video' | 'none' =
+    req.body?.mediaType === 'image' || req.body?.mediaType === 'video' ? req.body.mediaType : 'none';
+  const thumbnailUrl =
+    typeof req.body?.thumbnailUrl === 'string' && req.body.thumbnailUrl.trim()
+      ? req.body.thumbnailUrl.trim()
+      : undefined;
 
   if (!title || !message) {
     return res.status(400).json({
@@ -1950,32 +2076,41 @@ app.post('/api/admin/announcements', (req, res) => {
     });
   }
 
-  const nowIso = new Date().toISOString();
-  const announcement = {
-    id: `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const expiresAt =
+    mediaType === 'video'
+      ? Number(req.body?.expiresAt) || nowMs + VIDEO_EXPIRY_MS
+      : undefined;
+
+  const announcement: any = {
+    id: `ann_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
     title: title.slice(0, 140),
     message: message.slice(0, 1000),
     priority,
     authorName: 'JIT GROUP Admin',
     createdAt: nowIso,
+    createdAtMs: nowMs,
+    ...(mediaUrl ? { mediaUrl, mediaType } : {}),
+    ...(thumbnailUrl ? { thumbnailUrl } : {}),
+    ...(typeof expiresAt === 'number' ? { expiresAt } : {}),
   };
 
-  const list = readAnnouncementsData();
-  list.unshift(announcement);
-  writeAnnouncementsData(list.slice(0, 50));
-
+  let feedPost: any = undefined;
   if (alsoPostToFeed) {
-    const posts = readPostsData();
-    posts.unshift({
+    feedPost = {
       id: `post_ann_${announcement.id}`,
       authorId: 'usr_jit_admin_system',
       authorName: 'JIT GROUP Official Notice',
       authorAvatar: '/assets/aistudio/image_e64e54f2.png',
       authorHandle: '@jit_announcement',
       content: `${announcement.title}\n\n${announcement.message}`,
-      mediaUrls: [],
-      mediaType: 'none',
+      mediaUrls: mediaUrl ? [mediaUrl] : [],
+      mediaType: mediaUrl ? mediaType : 'none',
+      ...(thumbnailUrl ? { thumbnailUrl } : {}),
       createdAt: 'Just now',
+      createdAtMs: nowMs,
+      ...(typeof expiresAt === 'number' ? { expiresAt } : {}),
       likesCount: 0,
       commentsCount: 0,
       sharesCount: 0,
@@ -1984,7 +2119,20 @@ app.post('/api/admin/announcements', (req, res) => {
       likedBy: [],
       comments: [],
       category: 'all',
-    });
+    };
+  }
+
+  await publishNodeAnnouncement(announcement, feedPost).catch((err) => {
+    console.warn('publishNodeAnnouncement notice:', err);
+  });
+
+  const list = readAnnouncementsData();
+  list.unshift(announcement);
+  writeAnnouncementsData(list.slice(0, 50));
+
+  if (feedPost) {
+    const posts = readPostsData();
+    posts.unshift(feedPost);
     writePostsData(posts);
   }
 
@@ -1995,9 +2143,12 @@ app.post('/api/admin/announcements', (req, res) => {
   });
 });
 
-app.delete('/api/admin/announcements/:id', (req, res) => {
+app.delete('/api/admin/announcements/:id', async (req, res) => {
   if (!requireAdminSession(req, res)) return;
   const id = req.params.id;
+
+  await deleteNodeAnnouncement(id).catch(() => {});
+
   const list = readAnnouncementsData();
   const next = list.filter((a: any) => a.id !== id);
   writeAnnouncementsData(next);

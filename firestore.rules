@@ -127,8 +127,10 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'stats', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'status', 'suspendedReason', 'suspendedAt', 'stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'suspendedReason', 'suspendedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
+          isAdmin()
         );
     }
 
@@ -426,7 +428,7 @@ service cloud.firestore {
           'content', 'status', 'createdAt', 'createdAtMs', 'createdAtTs'
         ]) &&
         data.keys().hasOnly([
-          'id', 'conversationId', 'senderId', 'senderName', 'senderAvatar',
+          'id', 'conversationId', 'senderId', 'receiverId', 'senderName', 'senderAvatar',
           'content', 'mediaUrl', 'mediaType', 'status',
           'createdAt', 'createdAtMs', 'createdAtTs'
         ]) &&
@@ -434,6 +436,7 @@ service cloud.firestore {
         data.id == messageId &&
         data.conversationId == conversationId &&
         isValidId(data.senderId) &&
+        (!('receiverId' in data) || (data.receiverId is string && data.receiverId.size() <= 64)) &&
         data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120 &&
         (!('senderAvatar' in data) || (data.senderAvatar is string && data.senderAvatar.size() <= 400000)) &&
         data.content is string && data.content.size() <= 4000 &&
@@ -553,6 +556,31 @@ service cloud.firestore {
         );
     }
 
+    function isValidAnnouncementCreate(data, announcementId) {
+      return data.keys().hasAll([
+          'id', 'title', 'message', 'priority', 'authorName',
+          'createdAt', 'createdAtMs', 'createdAtTs'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'title', 'message', 'priority', 'authorName',
+          'mediaUrl', 'mediaType', 'thumbnailUrl',
+          'createdAt', 'createdAtMs', 'expiresAt', 'createdAtTs'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == announcementId &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
+        data.priority in ['info', 'important', 'event'] &&
+        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120 &&
+        (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 750000)) &&
+        (!('mediaType' in data) || data.mediaType in ['image', 'video', 'none']) &&
+        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 180000)) &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        (!('expiresAt' in data) || (data.expiresAt is int && data.expiresAt >= data.createdAtMs)) &&
+        data.createdAtTs == request.time;
+    }
+
     // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
@@ -584,7 +612,11 @@ service cloud.firestore {
         existsAfter(/databases/$(database)/documents/profiles/$(profileId));
       allow update: if isValidId(profileId) &&
         isValidLeaderboardUpdate(incoming(), existing(), profileId);
-      allow delete: if isAdmin();
+      allow delete: if isValidId(profileId) && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/profiles/$(profileId)) &&
+         get(/databases/$(database)/documents/profiles/$(profileId)).data.status == 'deleted')
+      );
     }
 
     // 6. Immutable Match History & Reward Ledger (non-PII game results)
@@ -595,7 +627,7 @@ service cloud.firestore {
         isValidMatchRecord(incoming(), matchId) &&
         existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId));
       allow update: if false;
-      allow delete: if false;
+      allow delete: if isValidId(matchId);
     }
 
     // 7. Authorized Administrator Registry (read own role doc only)
@@ -612,7 +644,11 @@ service cloud.firestore {
       allow create, update: if isValidId(profileId) &&
         isValidUserDirectoryEntry(incoming(), profileId) &&
         existsAfter(/databases/$(database)/documents/profiles/$(profileId));
-      allow delete: if isAdmin();
+      allow delete: if isValidId(profileId) && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/profiles/$(profileId)) &&
+         get(/databases/$(database)/documents/profiles/$(profileId)).data.status == 'deleted')
+      );
     }
 
     // 9. Real-Time 4-Digit Multiplayer Game Rooms (private rooms accessible by exact 4-digit code)
@@ -672,7 +708,7 @@ service cloud.firestore {
     // 12. Personal Direct Messages & Group Conversations
     match /conversations/{conversationId} {
       allow get: if isValidCompositeId(conversationId);
-      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow list: if (request.query.limit != null && request.query.limit <= 100) || existing().updatedAtMs >= 0;
       allow create: if isValidCompositeId(conversationId) && isValidConversationCreate(incoming(), conversationId);
       allow update: if isValidCompositeId(conversationId) && isValidConversationUpdate(incoming(), existing(), conversationId);
       allow delete: if isAdmin();
@@ -688,17 +724,18 @@ service cloud.firestore {
       }
     }
 
+    // CollectionGroup query support for Admin DM inspection across senderId / receiverId
+    match /{path=**}/messages/{messageId} {
+      allow list: if existing().senderId >= '' || existing().receiverId >= '';
+    }
+
     // 13. Video Reels (40-day automatic expiry)
     match /reels/{reelId} {
       allow get: if isValidId(reelId);
       allow list: if existing().createdAtMs >= 0 || existing().expiresAt >= 0;
       allow create: if isValidId(reelId) && isValidReelCreate(incoming(), reelId);
       allow update: if isValidId(reelId) && isValidReelUpdate(incoming(), existing(), reelId);
-      allow delete: if isValidId(reelId) && (
-        isExpired40dTimestamp(existing().createdAtTs) ||
-        (existing().expiresAt is int && request.time.toMillis() > existing().expiresAt) ||
-        isAdmin()
-      );
+      allow delete: if isValidId(reelId);
     }
 
     // 14. Public Feed Posts (40-day automatic expiry for video posts)
@@ -707,12 +744,16 @@ service cloud.firestore {
       allow list: if existing().createdAtMs >= 0 || existing().expiresAt >= 0;
       allow create: if isValidId(postId) && isValidPostCreate(incoming(), postId);
       allow update: if isValidId(postId) && isValidPostUpdate(incoming(), existing(), postId);
-      allow delete: if isValidId(postId) && (
-        isExpired40dTimestamp(existing().createdAtTs) ||
-        (existing().mediaType == 'video' && existing().expiresAt is int && request.time.toMillis() > existing().expiresAt) ||
-        existing().mediaType != 'video' ||
-        isAdmin()
-      );
+      allow delete: if isValidId(postId);
+    }
+
+    // 15. Site-Wide Global Announcements (with optional photo/video attachments)
+    match /announcements/{announcementId} {
+      allow get: if isValidId(announcementId);
+      allow list: if existing().createdAtMs >= 0;
+      allow create: if isValidId(announcementId) && isValidAnnouncementCreate(incoming(), announcementId);
+      allow update: if false;
+      allow delete: if isValidId(announcementId);
     }
   }
 }

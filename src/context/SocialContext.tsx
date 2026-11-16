@@ -47,7 +47,9 @@ import {
   subscribeToFirestorePosts,
   updateFirestorePostInteraction,
   deleteFirestorePost,
+  deleteFirestoreReel,
   purgeExpiredCloudVideos,
+  subscribeToFirestoreAnnouncements,
 } from '../lib/firebase';
 
 export interface ActiveChatPartner {
@@ -106,6 +108,7 @@ interface SocialContextType {
     createdAtMs?: number;
     expiresAt?: number;
   }) => void;
+  deleteReel: (reelId: string) => void;
   toggleLikeReel: (reelId: string) => void;
   addReelComment: (reelId: string, content: string) => void;
   sendFriendRequest: (userId: string, targetProfile?: Partial<UserProfile>) => void;
@@ -240,6 +243,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [cloudNotifications, setCloudNotifications] = useState<InAppNotification[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const postsHydratedRef = useRef(false);
+  const deletedPostIdsRef = useRef<Set<string>>(new Set());
+  const deletedReelIdsRef = useRef<Set<string>>(new Set());
+  const cloudPostIdsSeenRef = useRef<Set<string>>(new Set());
+  const cloudReelIdsSeenRef = useRef<Set<string>>(new Set());
+  const [cloudAnnouncements, setCloudAnnouncements] = useState<GlobalAnnouncement[]>([]);
+  const [serverAnnouncements, setServerAnnouncements] = useState<GlobalAnnouncement[]>([]);
 
   const isPrimaryDemoUser = currentUser?.id === 'usr_jit_primary_001';
 
@@ -425,24 +434,36 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [currentUser?.id, demoRemovedIds]);
 
-  // Real-time Firestore Reels & Posts subscriptions (plus 40-day expiry filtering)
+  // Real-time Firestore Reels, Posts, and Announcements subscriptions (plus 40-day expiry & delete reconciliation)
   useEffect(() => {
     const unsubReels = subscribeToFirestoreReels((cloudReels) => {
+      const nextCloudIds = new Set(cloudReels.map((r) => r.id));
+      cloudReelIdsSeenRef.current.forEach((prevId) => {
+        if (!nextCloudIds.has(prevId)) {
+          deletedReelIdsRef.current.add(prevId);
+        }
+      });
+      cloudReelIdsSeenRef.current = nextCloudIds;
+
       setReels((prev) => {
         const byId = new Map<string, Reel>();
         for (const r of cloudReels) {
-          if (!isVideoContentExpired(r)) {
+          if (!deletedReelIdsRef.current.has(r.id) && !isVideoContentExpired(r)) {
             const isLiked = currentUser?.id ? (r.likedBy || []).includes(currentUser.id) : false;
             byId.set(r.id, { ...r, isLiked });
           }
         }
         for (const localR of prev) {
-          if (!byId.has(localR.id) && !isVideoContentExpired(localR)) {
+          if (
+            !byId.has(localR.id) &&
+            !deletedReelIdsRef.current.has(localR.id) &&
+            !isVideoContentExpired(localR)
+          ) {
             byId.set(localR.id, localR);
           }
         }
         for (const seedR of SEED_REELS) {
-          if (!byId.has(seedR.id)) {
+          if (!byId.has(seedR.id) && !deletedReelIdsRef.current.has(seedR.id)) {
             byId.set(seedR.id, seedR);
           }
         }
@@ -451,17 +472,29 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     const unsubPosts = subscribeToFirestorePosts((cloudPosts) => {
+      const nextCloudIds = new Set(cloudPosts.map((p) => p.id));
+      cloudPostIdsSeenRef.current.forEach((prevId) => {
+        if (!nextCloudIds.has(prevId)) {
+          deletedPostIdsRef.current.add(prevId);
+        }
+      });
+      cloudPostIdsSeenRef.current = nextCloudIds;
+
       setPosts((prev) => {
         const byId = new Map<string, Post>();
         for (const p of cloudPosts) {
-          if (!isVideoContentExpired(p)) {
+          if (!deletedPostIdsRef.current.has(p.id) && !isVideoContentExpired(p)) {
             const isLiked = currentUser?.id ? (p.likedBy || []).includes(currentUser.id) : false;
             const isSaved = savedPostIds.includes(p.id);
             byId.set(p.id, { ...p, isLiked, isSaved });
           }
         }
         for (const lp of prev) {
-          if (!byId.has(lp.id) && !isVideoContentExpired(lp)) {
+          if (
+            !byId.has(lp.id) &&
+            !deletedPostIdsRef.current.has(lp.id) &&
+            !isVideoContentExpired(lp)
+          ) {
             byId.set(lp.id, lp);
           }
         }
@@ -469,9 +502,14 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
     });
 
+    const unsubAnnouncements = subscribeToFirestoreAnnouncements((items) => {
+      setCloudAnnouncements(items.filter((a) => !isVideoContentExpired(a)));
+    });
+
     return () => {
       unsubReels();
       unsubPosts();
+      unsubAnnouncements();
     };
   }, [currentUser?.id]);
 
@@ -480,6 +518,8 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const runExpirySweep = () => {
       setReels((prev) => prev.filter((r) => !isVideoContentExpired(r)));
       setPosts((prev) => prev.filter((p) => !isVideoContentExpired(p)));
+      setCloudAnnouncements((prev) => prev.filter((a) => !isVideoContentExpired(a)));
+      setServerAnnouncements((prev) => prev.filter((a) => !isVideoContentExpired(a)));
       purgeExpiredLocalMedia().catch(() => {});
       purgeExpiredCloudVideos().catch(() => {});
     };
@@ -513,6 +553,19 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     isPrimaryDemoUser,
   ]);
 
+  useEffect(() => {
+    const byId = new Map<string, GlobalAnnouncement>();
+    for (const a of [...cloudAnnouncements, ...serverAnnouncements]) {
+      if (!isVideoContentExpired(a) && !byId.has(a.id)) {
+        byId.set(a.id, a);
+      }
+    }
+    const merged = Array.from(byId.values()).sort(
+      (a, b) => (b.createdAtMs || Date.parse(b.createdAt) || 0) - (a.createdAtMs || Date.parse(a.createdAt) || 0)
+    );
+    setAnnouncements(merged);
+  }, [cloudAnnouncements, serverAnnouncements]);
+
   const refreshAnnouncements = useCallback(async () => {
     try {
       const [annRes, postsRes] = await Promise.all([
@@ -522,7 +575,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       if (annRes.ok) {
         const annData = await annRes.json();
         if (Array.isArray(annData.announcements)) {
-          setAnnouncements(annData.announcements);
+          setServerAnnouncements(annData.announcements.filter((a: GlobalAnnouncement) => !isVideoContentExpired(a)));
         }
       }
       if (postsRes.ok) {
@@ -533,7 +586,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             const merged: Post[] = [];
             const seen = new Set<string>();
             for (const sp of postsData.posts as Post[]) {
-              if (!seen.has(sp.id) && !isVideoContentExpired(sp)) {
+              if (!seen.has(sp.id) && !deletedPostIdsRef.current.has(sp.id) && !isVideoContentExpired(sp)) {
                 seen.add(sp.id);
                 const localMatch = existingMap.get(sp.id);
                 merged.push(
@@ -544,7 +597,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               }
             }
             for (const lp of prev) {
-              if (!seen.has(lp.id) && !lp.id.startsWith('post_ann_') && !isVideoContentExpired(lp)) {
+              if (
+                !seen.has(lp.id) &&
+                !lp.id.startsWith('post_ann_') &&
+                !deletedPostIdsRef.current.has(lp.id) &&
+                !isVideoContentExpired(lp)
+              ) {
                 seen.add(lp.id);
                 merged.push(lp);
               }
@@ -794,6 +852,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   };
 
   const deletePost = (postId: string) => {
+    deletedPostIdsRef.current.add(postId);
     setPosts((prev) => prev.filter((p) => p.id !== postId));
     deleteFirestorePost(postId).catch(() => {});
   };
@@ -1009,6 +1068,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     publishFirestoreReel(newReel).catch(() => {});
   };
 
+  const deleteReel = (reelId: string) => {
+    deletedReelIdsRef.current.add(reelId);
+    setReels((prev) => prev.filter((r) => r.id !== reelId));
+    deleteFirestoreReel(reelId).catch(() => {});
+  };
+
   const toggleLikeReel = (reelId: string) => {
     if (!currentUser) return;
     const uid = currentUser.id;
@@ -1157,6 +1222,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         addStory,
         deleteStory,
         addReel,
+        deleteReel,
         toggleLikeReel,
         addReelComment,
         sendFriendRequest,

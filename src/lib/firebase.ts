@@ -29,6 +29,7 @@ import {
   onSnapshot,
   writeBatch,
   collection,
+  collectionGroup,
   query,
   orderBy,
   limit,
@@ -49,6 +50,7 @@ import {
   Message,
   Reel,
   Post,
+  GlobalAnnouncement,
 } from '../types';
 import { MultiplayerRoom, RoomPlayer, InGameChatMessage } from '../types/multiplayer';
 
@@ -603,6 +605,7 @@ export async function updateCloudProfile(
 
   const detailKeys = [
     'fullName',
+    'username',
     'bio',
     'address',
     'avatarUrl',
@@ -626,6 +629,13 @@ export async function updateCloudProfile(
         lastActiveAt: serverTimestamp(),
       };
       if (updates.fullName !== undefined) detailPatch.fullName = updates.fullName.trim().slice(0, 120);
+      if (updates.username !== undefined) {
+        detailPatch.username = deriveUsername(
+          updates.fullName || profile.fullName,
+          profile.contactNumber,
+          updates.username
+        );
+      }
       if (updates.bio !== undefined) detailPatch.bio = updates.bio.slice(0, 500);
       if (updates.address !== undefined) detailPatch.address = updates.address.trim().slice(0, 300);
       if (updates.avatarUrl !== undefined) detailPatch.avatarUrl = sanitizeAvatarUrl(updates.avatarUrl);
@@ -646,6 +656,7 @@ export async function updateCloudProfile(
       const mergedProfile: UserProfile = {
         ...profile,
         ...updates,
+        ...(detailPatch.username ? { username: detailPatch.username } : {}),
         stats: sanitizeStats(updates.stats || profile.stats),
       };
       const batch = writeBatch(db);
@@ -653,6 +664,7 @@ export async function updateCloudProfile(
       batch.update(indexRef, { lastLoginAt: serverTimestamp() });
       batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
+      invalidateDirectoryCache();
     }
 
     if (hasStatsUpdate) {
@@ -1015,6 +1027,29 @@ export async function getCloudProfileById(profileId: string): Promise<UserProfil
     // ignore
   }
   return null;
+}
+
+export function subscribeToCloudProfile(
+  profileId: string,
+  onProfile: (profile: UserProfile | null, exists: boolean) => void
+): Unsubscribe {
+  if (!profileId || profileId.length < 4) {
+    return () => {};
+  }
+  const ref = doc(db, 'profiles', profileId);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        onProfile(null, false);
+        return;
+      }
+      onProfile(firestoreDocToUserProfile(snap.data()), true);
+    },
+    (err) => {
+      console.warn('subscribeToCloudProfile notice:', err);
+    }
+  );
 }
 
 // In-memory directory cache (25s TTL) + private digit search map for instant partial matching
@@ -2444,6 +2479,14 @@ export async function sendFirestoreDirectMessage(
     createdAtTs: serverTimestamp(),
   };
 
+  const directRecipientId =
+    conversation.type !== 'group'
+      ? (conversation.participantIds || []).find((pid) => pid !== sender.id)
+      : undefined;
+  if (directRecipientId && directRecipientId.length <= 64) {
+    msgDoc.receiverId = directRecipientId;
+  }
+
   try {
     const batch = writeBatch(db);
     batch.set(doc(db, 'conversations', conversation.id, 'messages', msgId), msgDoc);
@@ -2456,7 +2499,7 @@ export async function sendFirestoreDirectMessage(
     });
 
     if (conversation.type === 'direct') {
-      const recipientId = conversation.participantIds.find((pid) => pid !== sender.id);
+      const recipientId = directRecipientId || conversation.participantIds.find((pid) => pid !== sender.id);
       if (recipientId && recipientId.length >= 8) {
         const notifId = `notif_dm_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
         batch.set(doc(db, 'notifications', notifId), {
@@ -2493,12 +2536,14 @@ export async function sendFirestoreDirectMessage(
     id: msgId,
     conversationId: conversation.id,
     senderId: sender.id,
+    ...(directRecipientId ? { receiverId: directRecipientId } : {}),
     senderName,
     senderAvatar,
     content: cleanContent,
     mediaUrl: safeMediaUrl,
     mediaType: safeMediaUrl ? payload.mediaType || 'image' : undefined,
     createdAt: timeLabel,
+    createdAtMs: nowMs,
     status: 'delivered',
   };
 }
@@ -2932,6 +2977,594 @@ export async function purgeExpiredCloudVideos(): Promise<number> {
 
   return deletedCount;
 }
+
+// ============================================================================
+// ADMIN PANEL CLIENT CONTROLS (USER EDITS, MODERATION, DM INSPECTION,
+// POSTS / REELS / MATCH LOG DELETION & GLOBAL ANNOUNCEMENTS WITH MEDIA)
+// ============================================================================
+
+export async function deleteFirestoreReel(reelId: string): Promise<void> {
+  if (!reelId) return;
+  try {
+    await deleteDoc(doc(db, 'reels', reelId));
+  } catch (err) {
+    console.warn('deleteFirestoreReel notice:', err);
+  }
+}
+
+export async function deleteFirestoreMatchRecord(matchId: string): Promise<void> {
+  if (!matchId) return;
+  try {
+    await deleteDoc(doc(db, 'match_history', matchId));
+  } catch (err) {
+    console.warn('deleteFirestoreMatchRecord notice:', err);
+  }
+}
+
+export async function adminOverrideCloudProfileClient(
+  baseProfile: UserProfile,
+  edits: {
+    fullName?: string;
+    username?: string;
+    bio?: string;
+    avatarUrl?: string;
+    coverUrl?: string;
+    status?: UserProfile['status'];
+    rewardPoints?: number;
+  }
+): Promise<UserProfile> {
+  const nowIso = new Date().toISOString();
+  const nextStats = sanitizeStats({
+    ...baseProfile.stats,
+    ...(edits.rewardPoints !== undefined ? { rewardPoints: edits.rewardPoints } : {}),
+  });
+  const nextFullName =
+    edits.fullName !== undefined
+      ? edits.fullName.trim().slice(0, 120) || baseProfile.fullName
+      : baseProfile.fullName;
+  const nextUsername = deriveUsername(
+    nextFullName,
+    baseProfile.contactNumber,
+    edits.username !== undefined ? edits.username : baseProfile.username
+  );
+  const nextStatus: UserProfile['status'] =
+    edits.status && ['active', 'suspended', 'deleted'].includes(edits.status)
+      ? edits.status
+      : baseProfile.status || 'active';
+
+  const nextProfile: UserProfile = {
+    ...baseProfile,
+    fullName: nextFullName,
+    username: nextUsername,
+    bio: edits.bio !== undefined ? edits.bio.slice(0, 500) : baseProfile.bio || '',
+    avatarUrl:
+      edits.avatarUrl !== undefined
+        ? sanitizeAvatarUrl(edits.avatarUrl)
+        : baseProfile.avatarUrl || '/assets/aistudio/image_e64e54f2.png',
+    coverUrl:
+      edits.coverUrl === ''
+        ? undefined
+        : edits.coverUrl !== undefined && edits.coverUrl.length <= 395000
+        ? edits.coverUrl
+        : baseProfile.coverUrl,
+    status: nextStatus,
+    suspendedReason: nextStatus === 'active' ? undefined : baseProfile.suspendedReason,
+    suspendedAt: nextStatus === 'active' ? undefined : baseProfile.suspendedAt,
+    lastLoginAt: nowIso,
+    lastLogin: nowIso,
+    stats: nextStats,
+  };
+
+  const profileRef = doc(db, 'profiles', baseProfile.id);
+  const snap = await getDoc(profileRef).catch(() => null);
+  if (snap && snap.exists()) {
+    const patch: Record<string, any> = {
+      fullName: nextProfile.fullName,
+      username: nextUsername,
+      bio: nextProfile.bio || '',
+      avatarUrl: nextProfile.avatarUrl,
+      status: nextStatus,
+      suspendedReason: nextStatus === 'active' ? '' : nextProfile.suspendedReason || '',
+      suspendedAt: nextStatus === 'active' ? '' : nextProfile.suspendedAt || '',
+      stats: nextStats,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      lastActiveAt: serverTimestamp(),
+    };
+    if (edits.coverUrl === '') {
+      patch.coverUrl = '';
+    } else if (nextProfile.coverUrl !== undefined) {
+      patch.coverUrl = nextProfile.coverUrl;
+    }
+    await updateDoc(profileRef, patch);
+  } else {
+    await ensureCloudProfileSeeded(nextProfile);
+  }
+
+  if (nextStatus === 'deleted') {
+    await Promise.allSettled([
+      deleteDoc(doc(db, 'user_directory', baseProfile.id)),
+      deleteDoc(doc(db, 'leaderboard', baseProfile.id)),
+    ]);
+  } else {
+    await Promise.allSettled([
+      setDoc(doc(db, 'user_directory', nextProfile.id), buildUserDirectoryPayload(nextProfile)),
+      syncLeaderboardEntry(nextProfile),
+    ]);
+  }
+  invalidateDirectoryCache();
+
+  return nextProfile;
+}
+
+export async function adminModerateCloudProfileClient(
+  profile: UserProfile,
+  action: 'suspend' | 'unblock' | 'delete',
+  reason?: string
+): Promise<UserProfile> {
+  const nowIso = new Date().toISOString();
+  const nextStatus: UserProfile['status'] =
+    action === 'suspend' ? 'suspended' : action === 'delete' ? 'deleted' : 'active';
+  const cleanReason =
+    action === 'suspend'
+      ? (reason || 'Account suspended by administrator.').trim().slice(0, 300)
+      : action === 'delete'
+      ? 'Account deleted by administrator.'
+      : '';
+  const suspendedAt = action === 'unblock' ? '' : nowIso;
+
+  const profileRef = doc(db, 'profiles', profile.id);
+  const snap = await getDoc(profileRef).catch(() => null);
+  if (snap && snap.exists()) {
+    await updateDoc(profileRef, {
+      status: nextStatus,
+      suspendedReason: cleanReason,
+      suspendedAt,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      lastActiveAt: serverTimestamp(),
+    });
+  }
+
+  if (action === 'delete') {
+    await Promise.allSettled([
+      deleteDoc(doc(db, 'user_directory', profile.id)),
+      deleteDoc(doc(db, 'leaderboard', profile.id)),
+    ]);
+  }
+  invalidateDirectoryCache();
+
+  return {
+    ...profile,
+    status: nextStatus,
+    suspendedReason: cleanReason || undefined,
+    suspendedAt: suspendedAt || undefined,
+    lastLoginAt: nowIso,
+    lastLogin: nowIso,
+  };
+}
+
+export async function adminFetchUserChatActivityClient(
+  userId: string
+): Promise<{
+  conversations: Conversation[];
+  messages: Array<Message & { createdAtMs?: number }>;
+}> {
+  const convMap = new Map<string, Conversation>();
+  const msgMap = new Map<string, Message & { createdAtMs?: number }>();
+
+  const toConv = (id: string, data: Record<string, any>): Conversation => {
+    const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
+    const pMap = parseParticipantsMap(data.participantsJson);
+    const type = data.type === 'group' ? 'group' : 'direct';
+    const peerId = type === 'direct' ? participantIds.find((pid) => pid !== userId) : undefined;
+    const peerInfo = peerId ? pMap[peerId] : undefined;
+    return {
+      id: String(data.id || id),
+      type,
+      name: peerInfo?.name || String(data.name || 'Conversation'),
+      avatarUrl: peerInfo?.avatar || (typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
+      participantIds,
+      participantsMap: pMap,
+      lastMessage: data.lastMessageText
+        ? {
+            text: String(data.lastMessageText),
+            senderId: String(data.lastMessageSenderId || ''),
+            createdAt: String(data.lastMessageAt || ''),
+            isRead: true,
+          }
+        : undefined,
+      unreadCount: 0,
+      updatedAt: String(data.lastMessageAt || 'Recent'),
+      updatedAtMs: Number(data.updatedAtMs || 0),
+    };
+  };
+
+  const toMsg = (id: string, fallbackConvId: string, data: Record<string, any>): Message & { createdAtMs?: number } => ({
+    id: String(data.id || id),
+    conversationId: String(data.conversationId || fallbackConvId),
+    senderId: String(data.senderId || ''),
+    receiverId: typeof data.receiverId === 'string' ? data.receiverId : undefined,
+    senderName: String(data.senderName || 'JIT Member'),
+    senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
+    content: String(data.content || ''),
+    mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
+    mediaType: data.mediaType as Message['mediaType'],
+    createdAt: String(data.createdAt || ''),
+    createdAtMs: Number(data.createdAtMs || 0),
+    status: (data.status as Message['status']) || 'delivered',
+  });
+
+  // 1. Primary conversation queries (participantIds array-contains + recent threads scan)
+  const [partRes, recentRes] = await Promise.allSettled([
+    getDocs(query(collection(db, 'conversations'), where('participantIds', 'array-contains', userId), limit(100))),
+    getDocs(query(collection(db, 'conversations'), limit(100))),
+  ]);
+
+  if (partRes.status === 'fulfilled') {
+    partRes.value.forEach((d) => {
+      const conv = toConv(d.id, d.data());
+      convMap.set(conv.id, conv);
+    });
+  }
+
+  if (recentRes.status === 'fulfilled') {
+    recentRes.value.forEach((d) => {
+      const data = d.data();
+      const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
+      const pMap = parseParticipantsMap(data.participantsJson);
+      const matchesUser =
+        participantIds.includes(userId) ||
+        data.lastMessageSenderId === userId ||
+        d.id.includes(userId) ||
+        Boolean(pMap[userId]);
+      if (matchesUser && !convMap.has(String(data.id || d.id))) {
+        const conv = toConv(d.id, data);
+        convMap.set(conv.id, conv);
+      }
+    });
+  }
+
+  // 2. Fetch all messages inside every matched conversation
+  const convIds = Array.from(convMap.keys());
+  const CHUNK = 10;
+  for (let i = 0; i < convIds.length; i += CHUNK) {
+    const slice = convIds.slice(i, i + CHUNK);
+    await Promise.all(
+      slice.map(async (cid) => {
+        try {
+          const snap = await getDocs(
+            query(collection(db, 'conversations', cid, 'messages'), where('createdAtMs', '>=', 0), limit(200))
+          );
+          snap.forEach((d) => {
+            const msg = toMsg(d.id, cid, d.data());
+            msgMap.set(msg.id, msg);
+          });
+        } catch {
+          // Continue cleanly
+        }
+      })
+    );
+  }
+
+  // 3. CollectionGroup fallback query matching senderId == userId or receiverId == userId
+  try {
+    const [sentCg, recvCg] = await Promise.allSettled([
+      getDocs(query(collectionGroup(db, 'messages'), where('senderId', '==', userId), limit(200))),
+      getDocs(query(collectionGroup(db, 'messages'), where('receiverId', '==', userId), limit(200))),
+    ]);
+
+    const extraConvIds = new Set<string>();
+    const absorbSnap = (snap: any) => {
+      snap.forEach((d: any) => {
+        const data = d.data();
+        const convId = String(data.conversationId || d.ref.parent?.parent?.id || '');
+        const msg = toMsg(d.id, convId, data);
+        msgMap.set(msg.id, msg);
+        if (convId && !convMap.has(convId)) {
+          extraConvIds.add(convId);
+        }
+      });
+    };
+
+    if (sentCg.status === 'fulfilled') absorbSnap(sentCg.value);
+    if (recvCg.status === 'fulfilled') absorbSnap(recvCg.value);
+
+    for (const cid of Array.from(extraConvIds)) {
+      try {
+        const cSnap = await getDoc(doc(db, 'conversations', cid));
+        if (cSnap.exists()) {
+          convMap.set(cid, toConv(cid, cSnap.data()));
+        }
+      } catch {
+        // Ignore single conversation fetch failure
+      }
+    }
+  } catch {
+    // CollectionGroup index may be unindexed in some environments; Step 1 & 2 still succeed
+  }
+
+  const conversations = Array.from(convMap.values()).sort(
+    (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)
+  );
+  const messages = Array.from(msgMap.values()).sort(
+    (a, b) => (a.createdAtMs || 0) - (b.createdAtMs || 0)
+  );
+
+  return { conversations, messages };
+}
+
+export async function adminFetchUserActivityClient(
+  userId: string
+): Promise<{
+  posts: Post[];
+  reels: Reel[];
+  matchHistory: MatchHistoryRecord[];
+}> {
+  const now = Date.now();
+  const postsList: Post[] = [];
+  const reelsList: Reel[] = [];
+
+  try {
+    const postsSnap = await getDocs(
+      query(collection(db, 'posts'), where('createdAtMs', '>=', 0), limit(150))
+    );
+    postsSnap.forEach((d) => {
+      const data = d.data();
+      const mediaType = (data.mediaType as Post['mediaType']) || 'none';
+      const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+      if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) return;
+      let comments: any[] = [];
+      try {
+        const parsed = JSON.parse(data.commentsJson || '[]');
+        if (Array.isArray(parsed)) comments = parsed;
+      } catch {
+        comments = [];
+      }
+      const hasComment = comments.some(
+        (c: any) => c.authorId === userId || (Array.isArray(c.replies) && c.replies.some((r: any) => r.authorId === userId))
+      );
+      if (data.authorId === userId || hasComment) {
+        postsList.push({
+          id: String(data.id || d.id),
+          authorId: String(data.authorId || ''),
+          authorName: String(data.authorName || 'JIT Member'),
+          authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
+          authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
+          content: String(data.content || ''),
+          mediaUrls: Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined,
+          mediaType,
+          thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+          category: (data.category as Post['category']) || 'all',
+          likesCount: Number(data.likesCount || 0),
+          commentsCount: Number(data.commentsCount || 0),
+          sharesCount: Number(data.sharesCount || 0),
+          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
+          comments,
+          createdAt: String(data.createdAt || 'Just now'),
+          createdAtMs: Number(data.createdAtMs || 0),
+          expiresAt,
+        });
+      }
+    });
+  } catch (err) {
+    console.warn('adminFetchUserActivityClient posts notice:', err);
+  }
+
+  try {
+    const reelsSnap = await getDocs(
+      query(collection(db, 'reels'), where('createdAtMs', '>=', 0), limit(100))
+    );
+    reelsSnap.forEach((d) => {
+      const data = d.data();
+      const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+      if (expiresAt !== undefined && expiresAt <= now) return;
+      if (data.creatorId !== userId) return;
+      let comments: any[] = [];
+      try {
+        const parsed = JSON.parse(data.commentsJson || '[]');
+        if (Array.isArray(parsed)) comments = parsed;
+      } catch {
+        comments = [];
+      }
+      reelsList.push({
+        id: String(data.id || d.id),
+        creatorId: String(data.creatorId || ''),
+        creatorName: String(data.creatorName || 'JIT Member'),
+        creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
+        videoUrl: String(data.videoUrl || ''),
+        thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+        caption: String(data.caption || ''),
+        musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
+        likesCount: Number(data.likesCount || 0),
+        commentsCount: Number(data.commentsCount || 0),
+        sharesCount: Number(data.sharesCount || 0),
+        viewsCount: Number(data.viewsCount || 1),
+        likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
+        comments,
+        createdAt: String(data.createdAt || 'Just now'),
+        createdAtMs: Number(data.createdAtMs || 0),
+        expiresAt,
+      });
+    });
+  } catch (err) {
+    console.warn('adminFetchUserActivityClient reels notice:', err);
+  }
+
+  const matchHistory = await fetchMatchHistory(userId, 40).catch(() => []);
+  postsList.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+  reelsList.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+
+  return { posts: postsList, reels: reelsList, matchHistory };
+}
+
+export async function uploadAnnouncementMediaToCloud(
+  file: File,
+  onProgress?: (pct: number) => void
+): Promise<{
+  mediaUrl: string;
+  mediaType: 'image' | 'video';
+  thumbnailUrl?: string;
+  expiresAt?: number;
+}> {
+  const isVideo = file.type.startsWith('video/');
+  const mediaId = `ann_med_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  if (isVideo) {
+    const expiresAt = Date.now() + VIDEO_EXPIRY_MS;
+    const { generateVideoThumbnail } = await import('../services/mediaStorage');
+    const thumb = await generateVideoThumbnail(file).catch(() => '');
+    const uploaded = await uploadVideoAssetToCloud(
+      'usr_jit_admin_system',
+      file,
+      thumb,
+      expiresAt,
+      onProgress
+    );
+    return {
+      mediaUrl: uploaded.videoUrl,
+      mediaType: 'video',
+      thumbnailUrl: uploaded.thumbnailUrl || thumb || undefined,
+      expiresAt,
+    };
+  }
+
+  // Image upload path
+  onProgress?.(20);
+  const { saveMediaFile } = await import('../services/mediaStorage');
+  const { dataUrl } = await saveMediaFile(file);
+
+  try {
+    const ext = dataUrl.startsWith('data:image/webp')
+      ? 'webp'
+      : dataUrl.startsWith('data:image/png')
+      ? 'png'
+      : 'jpg';
+    const imgRef = storageRef(storage, `announcements/${mediaId}.${ext}`);
+    const downloadUrl = await Promise.race<string>([
+      (async () => {
+        await uploadString(imgRef, dataUrl, 'data_url');
+        return await getDownloadURL(imgRef);
+      })(),
+      new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error('Storage announcement image timeout')), 5000)
+      ),
+    ]);
+    if (downloadUrl && downloadUrl.startsWith('http')) {
+      onProgress?.(100);
+      return { mediaUrl: downloadUrl, mediaType: 'image' };
+    }
+  } catch {
+    // Fall back to Express or compact Data URL
+  }
+
+  if (typeof window !== 'undefined' && typeof fetch === 'function') {
+    try {
+      onProgress?.(65);
+      const res = await fetch('/api/media/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'image/jpeg',
+          'X-Media-Mime': file.type || 'image/jpeg',
+        },
+        body: file,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.url) {
+          onProgress?.(100);
+          return { mediaUrl: String(data.url), mediaType: 'image' };
+        }
+      }
+    } catch {
+      // Fall back to inline compressed Data URL
+    }
+  }
+
+  onProgress?.(100);
+  return { mediaUrl: dataUrl, mediaType: 'image' };
+}
+
+export async function publishFirestoreAnnouncement(ann: GlobalAnnouncement): Promise<void> {
+  const createdAtMs = ann.createdAtMs || Date.now();
+  const safeMediaUrl =
+    ann.mediaUrl && ann.mediaUrl.length <= 740_000 ? ann.mediaUrl : undefined;
+  const safeThumb =
+    ann.thumbnailUrl && ann.thumbnailUrl.length <= 175_000 ? ann.thumbnailUrl : undefined;
+
+  const payload: Record<string, any> = {
+    id: ann.id,
+    title: ann.title.slice(0, 140),
+    message: ann.message.slice(0, 1000),
+    priority: ann.priority || 'important',
+    authorName: (ann.authorName || 'JIT GROUP Admin').slice(0, 120),
+    ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: ann.mediaType || 'image' } : {}),
+    ...(safeThumb ? { thumbnailUrl: safeThumb } : {}),
+    createdAt: (ann.createdAt || new Date(createdAtMs).toISOString()).slice(0, 40),
+    createdAtMs,
+    ...(typeof ann.expiresAt === 'number' ? { expiresAt: ann.expiresAt } : {}),
+    createdAtTs: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'announcements', ann.id), payload);
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.CREATE, `announcements/${ann.id}`);
+    }
+    console.warn('publishFirestoreAnnouncement notice:', err);
+  }
+}
+
+export function subscribeToFirestoreAnnouncements(
+  onUpdate: (items: GlobalAnnouncement[]) => void
+): Unsubscribe {
+  const q = query(collection(db, 'announcements'), where('createdAtMs', '>=', 0), limit(50));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const now = Date.now();
+      const items: GlobalAnnouncement[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const mediaType = (data.mediaType as GlobalAnnouncement['mediaType']) || 'none';
+        const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+        if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) {
+          deleteDoc(d.ref).catch(() => {});
+          return;
+        }
+        items.push({
+          id: String(data.id || d.id),
+          title: String(data.title || 'Announcement'),
+          message: String(data.message || ''),
+          priority: (data.priority as GlobalAnnouncement['priority']) || 'important',
+          authorName: String(data.authorName || 'JIT GROUP Admin'),
+          createdAt: String(data.createdAt || new Date().toISOString()),
+          createdAtMs: Number(data.createdAtMs || 0),
+          mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
+          mediaType: mediaType !== 'none' ? mediaType : undefined,
+          thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+          expiresAt,
+        });
+      });
+      items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+      onUpdate(items);
+    },
+    (err) => {
+      console.warn('announcements onSnapshot notice:', err);
+    }
+  );
+}
+
+export async function deleteFirestoreAnnouncement(id: string): Promise<void> {
+  if (!id) return;
+  try {
+    await deleteDoc(doc(db, 'announcements', id));
+  } catch (err) {
+    console.warn('deleteFirestoreAnnouncement notice:', err);
+  }
+}
+
 
 
 
