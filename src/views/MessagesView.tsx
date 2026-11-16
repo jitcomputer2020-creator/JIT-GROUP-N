@@ -3,12 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Conversation, Message, CallType, CallStatus, NavTab } from '../types';
-import { INITIAL_FRIENDS } from '../services/mockData';
+import { useSocial } from '../context/SocialContext';
+import { Conversation, Message, CallType, CallStatus, NavTab, UserProfile } from '../types';
+import { INITIAL_FRIENDS, INITIAL_USER } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
 import { saveMediaFile, validateMediaFile } from '../services/mediaStorage';
+import {
+  fetchPublicDirectory,
+  searchCloudUsers,
+  ensureFirestoreDirectConversation,
+  createFirestoreGroupConversation,
+  subscribeToFirestoreConversations,
+  subscribeToFirestoreMessages,
+  sendFirestoreDirectMessage,
+  deriveUsername,
+} from '../lib/firebase';
 import {
   Send,
   Phone,
@@ -17,7 +28,6 @@ import {
   MicOff,
   VideoOff,
   PhoneOff,
-  Smile,
   Paperclip,
   Search,
   CheckCheck,
@@ -27,132 +37,151 @@ import {
   MoreVertical,
   ShieldCheck,
   X,
-  Image as ImageIcon,
   ArrowLeft,
+  MessageSquarePlus,
+  Loader2,
+  LogIn,
 } from 'lucide-react';
 
 interface MessagesViewProps {
   onNavigate: (tab: NavTab) => void;
 }
 
+const DEMO_CONVERSATIONS: Conversation[] = [
+  {
+    id: 'conv_001',
+    type: 'direct',
+    name: 'Priya Mukherjee',
+    avatarUrl: INITIAL_FRIENDS[0].avatarUrl,
+    participantIds: ['usr_jit_primary_001', 'usr_jit_002'],
+    participantsMap: {
+      usr_jit_primary_001: { name: INITIAL_USER.fullName, avatar: INITIAL_USER.avatarUrl },
+      usr_jit_002: { name: INITIAL_FRIENDS[0].fullName, avatar: INITIAL_FRIENDS[0].avatarUrl },
+    },
+    lastMessage: {
+      text: 'Are we still on for the Ludo tournament practice at 7 PM?',
+      senderId: 'usr_jit_002',
+      createdAt: '10:45 AM',
+      isRead: false,
+    },
+    unreadCount: 1,
+    updatedAt: '10:45 AM',
+    updatedAtMs: 1,
+  },
+  {
+    id: 'conv_002',
+    type: 'direct',
+    name: 'Arjun Verma',
+    avatarUrl: INITIAL_FRIENDS[1].avatarUrl,
+    participantIds: ['usr_jit_primary_001', 'usr_jit_003'],
+    participantsMap: {
+      usr_jit_primary_001: { name: INITIAL_USER.fullName, avatar: INITIAL_USER.avatarUrl },
+      usr_jit_003: { name: INITIAL_FRIENDS[1].fullName, avatar: INITIAL_FRIENDS[1].avatarUrl },
+    },
+    lastMessage: {
+      text: 'Sent you the room code for Carrom: JIT-4491',
+      senderId: 'usr_jit_003',
+      createdAt: 'Yesterday',
+      isRead: true,
+    },
+    unreadCount: 0,
+    updatedAt: 'Yesterday',
+    updatedAtMs: 0,
+  },
+  {
+    id: 'conv_003',
+    type: 'group',
+    name: 'JIT Tech Club & Gamers',
+    avatarUrl: APP_CONFIG.logoUrl,
+    participantIds: ['usr_jit_primary_001', 'usr_jit_002', 'usr_jit_003'],
+    lastMessage: {
+      text: 'Ananya: Chess blitz registration closes tonight!',
+      senderId: 'usr_jit_004',
+      createdAt: '2 days ago',
+      isRead: true,
+    },
+    unreadCount: 0,
+    updatedAt: '2 days ago',
+    updatedAtMs: 0,
+  },
+];
+
+const DEMO_SEED_MESSAGES: Message[] = [
+  {
+    id: 'msg_1',
+    conversationId: 'conv_001',
+    senderId: 'usr_jit_002',
+    senderName: 'Priya Mukherjee',
+    content: 'Hi! Have you checked out the new JIT GROUP gaming and calling features?',
+    createdAt: '10:30 AM',
+    status: 'read',
+  },
+  {
+    id: 'msg_2',
+    conversationId: 'conv_001',
+    senderId: 'usr_jit_primary_001',
+    senderName: 'Prof. Ramesh Sharma',
+    content: 'Yes! The WebRTC low-latency calling and real-time state synchronization work seamlessly.',
+    createdAt: '10:35 AM',
+    status: 'read',
+  },
+  {
+    id: 'msg_3',
+    conversationId: 'conv_001',
+    senderId: 'usr_jit_002',
+    senderName: 'Priya Mukherjee',
+    content: 'Are we still on for the Ludo tournament practice at 7 PM?',
+    createdAt: '10:45 AM',
+    status: 'delivered',
+  },
+];
+
 export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
-  const { currentUser } = useAuth();
+  const { currentUser, registeredProfiles } = useAuth();
+  const {
+    activeChatPartner,
+    clearActiveChatPartner,
+    friendIds,
+    friendRequestPeers,
+  } = useSocial();
 
-  // Conversations List
-  const [conversations, setConversations] = useState<Conversation[]>([
-    {
-      id: 'conv_001',
-      type: 'direct',
-      name: 'Priya Mukherjee',
-      avatarUrl: INITIAL_FRIENDS[0].avatarUrl,
-      participantIds: ['usr_jit_primary_001', 'usr_jit_002'],
-      lastMessage: {
-        text: 'Are we still on for the Ludo tournament practice at 7 PM?',
-        senderId: 'usr_jit_002',
-        createdAt: '10:45 AM',
-        isRead: false,
-      },
-      unreadCount: 1,
-      updatedAt: '10:45 AM',
-    },
-    {
-      id: 'conv_002',
-      type: 'direct',
-      name: 'Arjun Verma',
-      avatarUrl: INITIAL_FRIENDS[1].avatarUrl,
-      participantIds: ['usr_jit_primary_001', 'usr_jit_003'],
-      lastMessage: {
-        text: 'Sent you the room code for Carrom: JIT-4491',
-        senderId: 'usr_jit_003',
-        createdAt: 'Yesterday',
-        isRead: true,
-      },
-      unreadCount: 0,
-      updatedAt: 'Yesterday',
-    },
-    {
-      id: 'conv_003',
-      type: 'group',
-      name: 'JIT Tech Club & Gamers',
-      avatarUrl: APP_CONFIG.logoUrl,
-      participantIds: ['usr_jit_primary_001', 'usr_jit_002', 'usr_jit_003'],
-      lastMessage: {
-        text: 'Ananya: Chess blitz registration closes tonight!',
-        senderId: 'usr_jit_004',
-        createdAt: '2 days ago',
-        isRead: true,
-      },
-      unreadCount: 0,
-      updatedAt: '2 days ago',
-    },
-  ]);
+  const isPrimaryDemo = currentUser?.id === 'usr_jit_primary_001';
 
-  const [activeConvId, setActiveConvId] = useState<string>('conv_001');
+  const [cloudConversations, setCloudConversations] = useState<Conversation[]>([]);
+  const [localConversations, setLocalConversations] = useState<Conversation[]>(() =>
+    isPrimaryDemo ? DEMO_CONVERSATIONS : []
+  );
+  const [activeConvId, setActiveConvId] = useState<string>(() =>
+    isPrimaryDemo ? 'conv_001' : ''
+  );
   const [mobileThreadOpen, setMobileThreadOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [messageText, setMessageText] = useState('');
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const [attachedPreview, setAttachedPreview] = useState<string | null>(null);
-  const [isNewGroupModalOpen, setIsNewGroupModalOpen] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [selectedGroupMembers, setSelectedGroupMembers] = useState<string[]>([INITIAL_FRIENDS[0].id]);
   const [attachError, setAttachError] = useState<string | null>(null);
 
+  // Modals: New DM & New Group
+  const [isNewDmOpen, setIsNewDmOpen] = useState(false);
+  const [dmUserQuery, setDmUserQuery] = useState('');
+  const [directoryUsers, setDirectoryUsers] = useState<UserProfile[]>([]);
+  const [loadingDirectory, setLoadingDirectory] = useState(false);
+  const [startingDmUserId, setStartingDmUserId] = useState<string | null>(null);
+
+  const [isNewGroupModalOpen, setIsNewGroupModalOpen] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [selectedGroupMembers, setSelectedGroupMembers] = useState<string[]>([]);
+
+  // Messages state
+  const [cloudMessages, setCloudMessages] = useState<Message[]>([]);
+  const [localMessages, setLocalMessages] = useState<Message[]>(() =>
+    isPrimaryDemo ? DEMO_SEED_MESSAGES : []
+  );
+
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Messages in active thread
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 'msg_1',
-      conversationId: 'conv_001',
-      senderId: 'usr_jit_002',
-      senderName: 'Priya Mukherjee',
-      content: 'Hi! Have you checked out the new JIT GROUP gaming and calling features?',
-      createdAt: '10:30 AM',
-      status: 'read',
-    },
-    {
-      id: 'msg_2',
-      conversationId: 'conv_001',
-      senderId: 'usr_jit_primary_001',
-      senderName: 'Prof. Ramesh Sharma',
-      content: 'Yes! The WebRTC low-latency calling and real-time state synchronization work seamlessly.',
-      createdAt: '10:35 AM',
-      status: 'read',
-    },
-    {
-      id: 'msg_3',
-      conversationId: 'conv_001',
-      senderId: 'usr_jit_002',
-      senderName: 'Priya Mukherjee',
-      content: 'Are we still on for the Ludo tournament practice at 7 PM?',
-      createdAt: '10:45 AM',
-      status: 'delivered',
-    },
-  ]);
-
-  // Load persisted conversations & messages from backend so DMs & chat logs persist across sessions
-  useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        const res = await fetch('/api/messages');
-        if (!res.ok || !active) return;
-        const data = await res.json();
-        if (Array.isArray(data.conversations) && data.conversations.length > 0) {
-          setConversations(data.conversations);
-        }
-        if (Array.isArray(data.messages) && data.messages.length > 0) {
-          setMessages(data.messages);
-        }
-      } catch {
-        // Offline fallback keeps initial messages
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // WebRTC Call state
   const [activeCall, setActiveCall] = useState<{
@@ -164,7 +193,6 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     isVideoOff: boolean;
   } | null>(null);
 
-  // Call timer effect
   useEffect(() => {
     let interval: any = null;
     if (activeCall && activeCall.status === 'connected') {
@@ -175,7 +203,249 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     return () => clearInterval(interval);
   }, [activeCall?.status]);
 
-  const activeConv = conversations.find((c) => c.id === activeConvId);
+  // Reset state smoothly when currentUser switches
+  useEffect(() => {
+    if (!currentUser?.id) {
+      setCloudConversations([]);
+      setLocalConversations([]);
+      setCloudMessages([]);
+      setActiveConvId('');
+      return;
+    }
+    if (currentUser.id === 'usr_jit_primary_001') {
+      setLocalConversations(DEMO_CONVERSATIONS);
+      setLocalMessages(DEMO_SEED_MESSAGES);
+      setActiveConvId((prev) => prev || 'conv_001');
+    } else {
+      setLocalConversations([]);
+      setLocalMessages([]);
+      setActiveConvId('');
+    }
+  }, [currentUser?.id]);
+
+  // Subscribe to real-time Firestore conversations for currentUser
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    const unsub = subscribeToFirestoreConversations(currentUser.id, (convs) => {
+      setCloudConversations(convs);
+      setActiveConvId((prev) => {
+        if (prev && (convs.some((c) => c.id === prev) || (isPrimaryDemo && prev.startsWith('conv_')))) {
+          return prev;
+        }
+        return convs[0]?.id || (isPrimaryDemo ? 'conv_001' : '');
+      });
+    });
+    return () => unsub();
+  }, [currentUser?.id, isPrimaryDemo]);
+
+  // Handle deep-linked DM target (`openDirectChat(partner)`)
+  useEffect(() => {
+    if (!activeChatPartner || !currentUser || activeChatPartner.id === currentUser.id) return;
+    let cancelled = false;
+
+    ensureFirestoreDirectConversation(currentUser, activeChatPartner)
+      .then((conv) => {
+        if (cancelled) return;
+        setLocalConversations((prev) => {
+          const filtered = prev.filter((c) => c.id !== conv.id);
+          return [conv, ...filtered];
+        });
+        setActiveConvId(conv.id);
+        setMobileThreadOpen(true);
+        clearActiveChatPartner();
+      })
+      .catch((err) => {
+        console.warn('Could not open direct conversation:', err);
+        clearActiveChatPartner();
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeChatPartner, currentUser, clearActiveChatPartner]);
+
+  // Subscribe to real-time messages for active conversation
+  useEffect(() => {
+    if (!activeConvId) {
+      setCloudMessages([]);
+      return;
+    }
+    // Demo seed threads prefixed `conv_00` only live locally unless persisted
+    const unsub = subscribeToFirestoreMessages(activeConvId, (msgs) => {
+      setCloudMessages(msgs);
+    });
+    return () => unsub();
+  }, [activeConvId]);
+
+  // Preload Express backend messages only for primary demo fallback
+  useEffect(() => {
+    if (!isPrimaryDemo) return;
+    let active = true;
+    fetch('/api/messages')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!active || !data) return;
+        if (Array.isArray(data.conversations) && data.conversations.length > 0) {
+          setLocalConversations((prev) => {
+            const map = new Map<string, Conversation>();
+            data.conversations.forEach((c: Conversation) => map.set(c.id, c));
+            prev.forEach((c) => {
+              if (!map.has(c.id)) map.set(c.id, c);
+            });
+            return Array.from(map.values());
+          });
+        }
+        if (Array.isArray(data.messages) && data.messages.length > 0) {
+          setLocalMessages(data.messages);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isPrimaryDemo]);
+
+  // Load Firebase users directory when opening New DM or New Group modal
+  useEffect(() => {
+    if (!isNewDmOpen && !isNewGroupModalOpen) return;
+    let cancelled = false;
+    setLoadingDirectory(true);
+    fetchPublicDirectory(120)
+      .then((list) => {
+        if (!cancelled) {
+          setDirectoryUsers(list);
+          setLoadingDirectory(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoadingDirectory(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isNewDmOpen, isNewGroupModalOpen]);
+
+  // Live search in New DM modal
+  useEffect(() => {
+    if (!isNewDmOpen || !dmUserQuery.trim()) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      searchCloudUsers(dmUserQuery.trim(), 25)
+        .then((res) => {
+          if (!cancelled && res.length > 0) {
+            setDirectoryUsers((prev) => {
+              const map = new Map<string, UserProfile>();
+              res.forEach((u) => map.set(u.id, u));
+              prev.forEach((u) => {
+                if (!map.has(u.id)) map.set(u.id, u);
+              });
+              return Array.from(map.values());
+            });
+          }
+        })
+        .catch(() => {});
+    }, 200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [isNewDmOpen, dmUserQuery]);
+
+  // Merge cloud + local conversations with dynamic partner resolution
+  const conversations = useMemo(() => {
+    const byId = new Map<string, Conversation>();
+    for (const c of cloudConversations) {
+      byId.set(c.id, c);
+    }
+    for (const lc of localConversations) {
+      if (!byId.has(lc.id)) {
+        byId.set(lc.id, lc);
+      }
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)
+    );
+  }, [cloudConversations, localConversations]);
+
+  const activeConv = conversations.find((c) => c.id === activeConvId) || conversations[0];
+
+  const activeMessages = useMemo(() => {
+    if (!activeConv) return [];
+    const byId = new Map<string, Message>();
+    for (const lm of localMessages) {
+      if (lm.conversationId === activeConv.id) {
+        byId.set(lm.id, lm);
+      }
+    }
+    for (const cm of cloudMessages) {
+      if (cm.conversationId === activeConv.id) {
+        byId.set(cm.id, cm);
+      }
+    }
+    return Array.from(byId.values());
+  }, [activeConv, cloudMessages, localMessages]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activeMessages.length, activeConv?.id]);
+
+  // Known peers pool for DM picker & Group member picker
+  const selectablePeers = useMemo(() => {
+    const all = [
+      ...directoryUsers,
+      ...friendRequestPeers,
+      ...(registeredProfiles || []),
+      INITIAL_USER,
+      ...INITIAL_FRIENDS,
+    ].filter(
+      (u, idx, arr) =>
+        u?.id &&
+        u.id !== currentUser?.id &&
+        u.status !== 'deleted' &&
+        arr.findIndex((x) => x.id === u.id) === idx
+    );
+
+    // Put accepted friends first
+    return all.sort((a, b) => {
+      const aFriend = friendIds.includes(a.id) ? 1 : 0;
+      const bFriend = friendIds.includes(b.id) ? 1 : 0;
+      return bFriend - aFriend;
+    });
+  }, [directoryUsers, friendRequestPeers, registeredProfiles, currentUser?.id, friendIds]);
+
+  const filteredDmPeers = useMemo(() => {
+    const q = dmUserQuery.trim().toLowerCase().replace(/^@+/, '');
+    if (!q) return selectablePeers;
+    return selectablePeers.filter((u) => {
+      const uname = (u.username || deriveUsername(u.fullName)).toLowerCase();
+      return (
+        u.fullName.toLowerCase().includes(q) ||
+        uname.includes(q) ||
+        (u.contactNumber || '').includes(q)
+      );
+    });
+  }, [selectablePeers, dmUserQuery]);
+
+  const handleStartDirectChat = async (peer: UserProfile) => {
+    if (!currentUser) return;
+    setStartingDmUserId(peer.id);
+    try {
+      const conv = await ensureFirestoreDirectConversation(currentUser, {
+        id: peer.id,
+        fullName: peer.fullName,
+        avatarUrl: peer.avatarUrl,
+      });
+      setLocalConversations((prev) => [conv, ...prev.filter((c) => c.id !== conv.id)]);
+      setActiveConvId(conv.id);
+      setMobileThreadOpen(true);
+      setIsNewDmOpen(false);
+      setDmUserQuery('');
+    } catch (err: any) {
+      setSendError(err?.message || 'Unable to start direct conversation.');
+    } finally {
+      setStartingDmUserId(null);
+    }
+  };
 
   const handleFileAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -204,7 +474,10 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if ((!messageText.trim() && !attachedFile) || !currentUser) return;
+    if ((!messageText.trim() && !attachedFile) || !currentUser || !activeConv) return;
+
+    setSendError(null);
+    setSendingMessage(true);
 
     let mediaUrl: string | undefined;
     let mediaType: 'image' | 'video' | 'file' | undefined;
@@ -215,49 +488,56 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         mediaUrl = dataUrl;
         mediaType = attachedFile.type.startsWith('image/') ? 'image' : 'file';
       } catch {
-        setAttachError('Failed to save attached media');
+        setAttachError('Failed to process attached media');
+        setSendingMessage(false);
         return;
       }
     }
 
-    const newMsg: Message = {
-      id: `msg_${Date.now()}`,
-      conversationId: activeConvId,
-      senderId: currentUser.id,
-      senderName: currentUser.fullName,
-      content: messageText.trim(),
-      mediaUrl,
-      mediaType,
-      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      status: 'delivered',
-    };
-
-    setMessages((prev) => [...prev, newMsg]);
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === activeConvId
-          ? {
-              ...c,
-              participantIds: Array.from(new Set([...(c.participantIds || []), currentUser.id])),
-              lastMessage: {
-                text: newMsg.content || (mediaUrl ? '[Image Attachment]' : ''),
-                senderId: currentUser.id,
-                createdAt: newMsg.createdAt,
-                isRead: true,
-              },
-              updatedAt: newMsg.createdAt,
-            }
-          : c
-      )
-    );
+    const contentToSend = messageText.trim();
     setMessageText('');
     clearAttachment();
 
-    fetch('/api/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: newMsg }),
-    }).catch(() => {});
+    try {
+      const sentMsg = await sendFirestoreDirectMessage(activeConv, currentUser, {
+        content: contentToSend,
+        mediaUrl,
+        mediaType,
+      });
+
+      setLocalMessages((prev) =>
+        prev.some((m) => m.id === sentMsg.id) ? prev : [...prev, sentMsg]
+      );
+      setLocalConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConv.id
+            ? {
+                ...c,
+                lastMessage: {
+                  text: sentMsg.content || (mediaUrl ? '[Image Attachment]' : ''),
+                  senderId: currentUser.id,
+                  createdAt: sentMsg.createdAt,
+                  isRead: true,
+                },
+                updatedAt: sentMsg.createdAt,
+                updatedAtMs: Date.now(),
+              }
+            : c
+        )
+      );
+
+      // Best-effort Express mirror for Admin inspection
+      fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: sentMsg }),
+      }).catch(() => {});
+    } catch (err: any) {
+      setMessageText(contentToSend);
+      setSendError(err?.message || 'Message failed to send. Please check connection and retry.');
+    } finally {
+      setSendingMessage(false);
+    }
   };
 
   const startCall = (type: CallType) => {
@@ -285,59 +565,99 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     return `${mins.toString().padStart(2, '0')}:${remainder.toString().padStart(2, '0')}`;
   };
 
-  const handleCreateGroup = (e: React.FormEvent) => {
+  const handleCreateGroup = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newGroupName.trim() || !currentUser) return;
-    const newConvId = `conv_grp_${Date.now()}`;
-    const newConv: Conversation = {
-      id: newConvId,
-      type: 'group',
-      name: newGroupName.trim(),
-      avatarUrl: APP_CONFIG.logoUrl,
-      participantIds: [currentUser.id, ...selectedGroupMembers],
-      lastMessage: {
-        text: 'Group created. Welcome to JIT Group Chat!',
-        senderId: currentUser.id,
-        createdAt: 'Just now',
-        isRead: true,
-      },
-      unreadCount: 0,
-      updatedAt: 'Just now',
-    };
-    setConversations((prev) => [newConv, ...prev]);
-    setActiveConvId(newConvId);
-    setMobileThreadOpen(true);
-    setNewGroupName('');
-    setIsNewGroupModalOpen(false);
 
-    fetch('/api/conversations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation: newConv }),
-    }).catch(() => {});
+    const participantsMap: Record<string, { name: string; avatar?: string }> = {
+      [currentUser.id]: { name: currentUser.fullName, avatar: currentUser.avatarUrl },
+    };
+    selectedGroupMembers.forEach((mid) => {
+      const peer = selectablePeers.find((p) => p.id === mid);
+      if (peer) {
+        participantsMap[mid] = { name: peer.fullName, avatar: peer.avatarUrl };
+      }
+    });
+
+    try {
+      const newConv = await createFirestoreGroupConversation(
+        currentUser,
+        newGroupName.trim(),
+        selectedGroupMembers,
+        participantsMap
+      );
+      setLocalConversations((prev) => [newConv, ...prev]);
+      setActiveConvId(newConv.id);
+      setMobileThreadOpen(true);
+      setNewGroupName('');
+      setSelectedGroupMembers([]);
+      setIsNewGroupModalOpen(false);
+
+      fetch('/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversation: newConv }),
+      }).catch(() => {});
+    } catch (err: any) {
+      setSendError(err?.message || 'Failed to create group chat.');
+    }
   };
 
+  if (!currentUser) {
+    return (
+      <div className="max-w-md mx-auto py-14 px-6 text-center bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
+        <MessageSquarePlus className="w-12 h-12 text-blue-600 mx-auto" />
+        <h3 className="text-lg font-bold text-slate-900 dark:text-white">
+          Sign In to Message Campus Friends
+        </h3>
+        <p className="text-xs text-slate-500">
+          Log in with your JIT GROUP account to send direct messages and start group chats in real time.
+        </p>
+        <button
+          onClick={() => onNavigate('login')}
+          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs inline-flex items-center gap-1.5"
+        >
+          <LogIn className="w-4 h-4" />
+          <span>Sign In</span>
+        </button>
+      </div>
+    );
+  }
+
   const filteredConversations = conversations.filter((c) =>
-    c.name?.toLowerCase().includes(searchQuery.toLowerCase())
+    (c.name || '').toLowerCase().includes(searchQuery.toLowerCase())
   );
-  const activeMessages = messages.filter((m) => m.conversationId === activeConvId);
 
   return (
     <div className="relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-140px)] min-h-[460px] flex">
       {/* 1. Left Conversation List */}
-      <div className={`w-full sm:w-80 md:w-96 border-r border-slate-100 dark:border-slate-800 ${mobileThreadOpen ? 'hidden sm:flex' : 'flex'} flex-col shrink-0`}>
+      <div
+        className={`w-full sm:w-80 md:w-96 border-r border-slate-100 dark:border-slate-800 ${
+          mobileThreadOpen ? 'hidden sm:flex' : 'flex'
+        } flex-col shrink-0`}
+      >
         <div className="p-4 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              Chats & Groups
+              Chats &amp; Groups
             </h3>
-            <button
-              onClick={() => setIsNewGroupModalOpen(true)}
-              className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-xl transition-colors"
-              title="Create New Group"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setIsNewDmOpen(true)}
+                className="px-2.5 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors flex items-center gap-1 shadow-sm"
+                title="Start New Direct Message"
+              >
+                <MessageSquarePlus className="w-3.5 h-3.5" />
+                <span>New DM</span>
+              </button>
+              <button
+                onClick={() => setIsNewGroupModalOpen(true)}
+                className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-xl transition-colors"
+                title="Create New Group"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <div className="relative">
@@ -354,235 +674,298 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
         {/* Conversation List */}
         <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 no-scrollbar">
-          {filteredConversations.map((conv) => {
-            const isSelected = conv.id === activeConvId;
-            return (
+          {filteredConversations.length === 0 ? (
+            <div className="p-8 text-center space-y-3">
+              <MessageSquarePlus className="w-8 h-8 text-slate-400 mx-auto" />
+              <p className="text-xs text-slate-500">
+                No conversations yet. Start a direct chat with a campus friend!
+              </p>
               <button
-                key={conv.id}
-                onClick={() => {
-                  setActiveConvId(conv.id);
-                  setMobileThreadOpen(true);
-                }}
-                className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
-                  isSelected
-                    ? 'bg-blue-50/70 dark:bg-blue-950/30'
-                    : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                }`}
+                onClick={() => setIsNewDmOpen(true)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold"
               >
-                <div className="relative shrink-0">
-                  <img
-                    src={conv.avatarUrl || APP_CONFIG.logoUrl}
-                    alt={conv.name}
-                    className="w-11 h-11 rounded-2xl object-cover border border-slate-200 dark:border-slate-700"
-                  />
-                  {conv.type === 'group' && (
-                    <div className="absolute -bottom-1 -right-1 p-0.5 bg-blue-600 text-white rounded-md">
-                      <Users className="w-2.5 h-2.5" />
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between mb-0.5">
-                    <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                      {conv.name}
-                    </h4>
-                    <span className="text-[10px] text-slate-400 font-mono shrink-0">
-                      {conv.updatedAt}
-                    </span>
-                  </div>
-                  <p className="text-[11px] text-slate-500 truncate">
-                    {conv.lastMessage?.text || 'No messages yet'}
-                  </p>
-                </div>
-
-                {conv.unreadCount > 0 && (
-                  <span className="shrink-0 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center font-mono">
-                    {conv.unreadCount}
-                  </span>
-                )}
+                Start Direct Message
               </button>
-            );
-          })}
+            </div>
+          ) : (
+            filteredConversations.map((conv) => {
+              const isSelected = conv.id === activeConv?.id;
+              return (
+                <button
+                  key={conv.id}
+                  onClick={() => {
+                    setActiveConvId(conv.id);
+                    setMobileThreadOpen(true);
+                  }}
+                  className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
+                    isSelected
+                      ? 'bg-blue-50/70 dark:bg-blue-950/30'
+                      : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                  }`}
+                >
+                  <div className="relative shrink-0">
+                    <img
+                      src={conv.avatarUrl || APP_CONFIG.logoUrl}
+                      alt={conv.name}
+                      className="w-11 h-11 rounded-2xl object-cover border border-slate-200 dark:border-slate-700"
+                    />
+                    {conv.type === 'group' && (
+                      <div className="absolute -bottom-1 -right-1 p-0.5 bg-blue-600 text-white rounded-md">
+                        <Users className="w-2.5 h-2.5" />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                        {conv.name || 'JIT Member'}
+                      </h4>
+                      <span className="text-[10px] text-slate-400 font-mono shrink-0">
+                        {conv.updatedAt}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 truncate">
+                      {conv.lastMessage?.text || 'Start chatting...'}
+                    </p>
+                  </div>
+
+                  {conv.unreadCount > 0 && (
+                    <span className="shrink-0 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center font-mono">
+                      {conv.unreadCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })
+          )}
         </div>
       </div>
 
       {/* 2. Active Chat Thread */}
-      <div className={`${mobileThreadOpen ? 'flex' : 'hidden sm:flex'} flex-1 flex-col justify-between bg-slate-50/40 dark:bg-slate-950/20`}>
-        {/* Thread Header */}
-        <div className="p-3.5 px-4 sm:px-5 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+      <div
+        className={`${
+          mobileThreadOpen ? 'flex' : 'hidden sm:flex'
+        } flex-1 flex-col justify-between bg-slate-50/40 dark:bg-slate-950/20`}
+      >
+        {!activeConv ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
+            <MessageSquarePlus className="w-12 h-12 text-blue-500/80" />
+            <h4 className="text-sm font-bold text-slate-900 dark:text-white">
+              Select a conversation or start a New DM
+            </h4>
+            <p className="text-xs text-slate-500 max-w-xs">
+              Real-time personal messaging synced with Firebase Firestore across all your devices.
+            </p>
             <button
-              onClick={() => setMobileThreadOpen(false)}
-              className="sm:hidden p-1.5 -ml-1 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors shrink-0"
-              title="Back to conversations"
+              onClick={() => setIsNewDmOpen(true)}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold"
             >
-              <ArrowLeft className="w-4 h-4" />
-            </button>
-            <img
-              src={activeConv?.avatarUrl || APP_CONFIG.logoUrl}
-              alt={activeConv?.name}
-              className="w-10 h-10 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
-            />
-            <div className="min-w-0">
-              <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                {activeConv?.name}
-              </h4>
-              <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate">
-                Active in JIT Network
-              </p>
-            </div>
-          </div>
-
-          {/* WebRTC Calling Actions */}
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => startCall('voice')}
-              className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
-              title="Start WebRTC Voice Call"
-            >
-              <Phone className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => startCall('video')}
-              className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
-              title="Start WebRTC HD Video Call"
-            >
-              <Video className="w-4 h-4" />
-            </button>
-            <button className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
-              <MoreVertical className="w-4 h-4" />
+              Message a Friend
             </button>
           </div>
-        </div>
-
-        {/* Message Bubble Feed */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 no-scrollbar">
-          <div className="flex justify-center my-2">
-            <span className="text-[10px] text-slate-500 bg-slate-100 dark:bg-slate-800/80 px-3 py-1 rounded-full flex items-center gap-1.5 border border-slate-200 dark:border-slate-700">
-              <ShieldCheck className="w-3.5 h-3.5 text-blue-500" />
-              <span>Local Demo Mode · Chat and media persisted with IndexedDB</span>
-            </span>
-          </div>
-
-          {activeMessages.map((msg) => {
-            const isMe = msg.senderId === currentUser?.id;
-            return (
-              <div
-                key={msg.id}
-                className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
-              >
-                <div
-                  className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed break-words ${
-                    isMe
-                      ? 'bg-blue-600 text-white rounded-tr-sm shadow-sm'
-                      : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-sm border border-slate-200 dark:border-slate-700 shadow-sm'
-                  }`}
+        ) : (
+          <>
+            {/* Thread Header */}
+            <div className="p-3.5 px-4 sm:px-5 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+                <button
+                  onClick={() => setMobileThreadOpen(false)}
+                  className="sm:hidden p-1.5 -ml-1 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors shrink-0"
+                  title="Back to conversations"
                 >
-                  {!isMe && (
-                    <p className="text-[10px] font-bold text-blue-500 mb-0.5">
-                      {msg.senderName}
-                    </p>
-                  )}
-
-                  {/* Attached Media */}
-                  {msg.mediaUrl && (
-                    <div className="mb-2 rounded-xl overflow-hidden bg-black/20">
-                      <img
-                        src={msg.mediaUrl}
-                        alt="Attachment"
-                        className="max-h-48 w-auto rounded-xl object-contain"
-                      />
-                    </div>
-                  )}
-
-                  {msg.content && <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
-                </div>
-                <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
-                  <span>{msg.createdAt}</span>
-                  {isMe && (
-                    <span>
-                      {msg.status === 'read' ? (
-                        <CheckCheck className="w-3 h-3 text-blue-500 inline" />
-                      ) : (
-                        <Check className="w-3 h-3 text-slate-400 inline" />
-                      )}
-                    </span>
-                  )}
+                  <ArrowLeft className="w-4 h-4" />
+                </button>
+                <img
+                  src={activeConv.avatarUrl || APP_CONFIG.logoUrl}
+                  alt={activeConv.name}
+                  className="w-10 h-10 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                />
+                <div className="min-w-0">
+                  <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                    {activeConv.name}
+                  </h4>
+                  <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate">
+                    Real-Time Sync Active
+                  </p>
                 </div>
               </div>
-            );
-          })}
-        </div>
 
-        {/* Attachment preview if user picked a file */}
-        {attachedPreview && (
-          <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <img
-                src={attachedPreview}
-                alt="Upload preview"
-                className="w-10 h-10 rounded-lg object-cover border border-slate-300 dark:border-slate-600"
-              />
-              <span className="text-xs text-slate-700 dark:text-slate-300 truncate max-w-[200px]">
-                {attachedFile?.name}
-              </span>
+              {/* WebRTC Calling Actions */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => startCall('voice')}
+                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
+                  title="Start WebRTC Voice Call"
+                >
+                  <Phone className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => startCall('video')}
+                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
+                  title="Start WebRTC HD Video Call"
+                >
+                  <Video className="w-4 h-4" />
+                </button>
+                <button className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+                  <MoreVertical className="w-4 h-4" />
+                </button>
+              </div>
             </div>
-            <button
-              onClick={clearAttachment}
-              className="p-1 text-slate-400 hover:text-red-500"
+
+            {/* Message Bubble Feed */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 no-scrollbar">
+              <div className="flex justify-center my-2">
+                <span className="text-[10px] text-slate-500 bg-slate-100 dark:bg-slate-800/80 px-3 py-1 rounded-full flex items-center gap-1.5 border border-slate-200 dark:border-slate-700">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>Firebase Cloud Sync · Direct &amp; Group Messages</span>
+                </span>
+              </div>
+
+              {activeMessages.length === 0 ? (
+                <p className="text-center text-xs text-slate-400 py-8">
+                  Say hello to {activeConv.name}! Messages sync instantaneously.
+                </p>
+              ) : (
+                activeMessages.map((msg) => {
+                  const isMe = msg.senderId === currentUser.id;
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                    >
+                      <div
+                        className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed break-words ${
+                          isMe
+                            ? 'bg-blue-600 text-white rounded-tr-sm shadow-sm'
+                            : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-sm border border-slate-200 dark:border-slate-700 shadow-sm'
+                        }`}
+                      >
+                        {!isMe && (
+                          <p className="text-[10px] font-bold text-blue-500 mb-0.5">
+                            {msg.senderName}
+                          </p>
+                        )}
+
+                        {msg.mediaUrl && (
+                          <div className="mb-2 rounded-xl overflow-hidden bg-black/20">
+                            <img
+                              src={msg.mediaUrl}
+                              alt="Attachment"
+                              className="max-h-48 w-auto rounded-xl object-contain"
+                            />
+                          </div>
+                        )}
+
+                        {msg.content && (
+                          <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
+                        <span>{msg.createdAt}</span>
+                        {isMe && (
+                          <span>
+                            {msg.status === 'read' ? (
+                              <CheckCheck className="w-3 h-3 text-blue-500 inline" />
+                            ) : (
+                              <Check className="w-3 h-3 text-slate-400 inline" />
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Attachment preview */}
+            {attachedPreview && (
+              <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <img
+                    src={attachedPreview}
+                    alt="Upload preview"
+                    className="w-10 h-10 rounded-lg object-cover border border-slate-300 dark:border-slate-600"
+                  />
+                  <span className="text-xs text-slate-700 dark:text-slate-300 truncate max-w-[200px]">
+                    {attachedFile?.name}
+                  </span>
+                </div>
+                <button
+                  onClick={clearAttachment}
+                  className="p-1 text-slate-400 hover:text-red-500"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {(attachError || sendError) && (
+              <div className="px-4 py-1.5 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 flex items-center justify-between">
+                <span>{attachError || sendError}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAttachError(null);
+                    setSendError(null);
+                  }}
+                  className="p-0.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Message Input Bar */}
+            <form
+              onSubmit={handleSendMessage}
+              className="p-3 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2"
             >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                title="Attach Image"
+              >
+                <Paperclip className="w-4 h-4" />
+              </button>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileAttach}
+                accept="image/*"
+                className="hidden"
+              />
+
+              <input
+                type="text"
+                placeholder="Type your message..."
+                value={messageText}
+                onChange={(e) => setMessageText(e.target.value)}
+                className="flex-1 px-3.5 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
+              />
+              <button
+                type="submit"
+                disabled={(!messageText.trim() && !attachedFile) || sendingMessage}
+                className="p-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl shadow-sm transition-colors"
+              >
+                {sendingMessage ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Send className="w-4 h-4" />
+                )}
+              </button>
+            </form>
+          </>
         )}
-
-        {attachError && (
-          <div className="px-4 py-1 text-xs text-red-500 bg-red-50 dark:bg-red-950/40">
-            {attachError}
-          </div>
-        )}
-
-        {/* Message Input Bar */}
-        <form onSubmit={handleSendMessage} className="p-3 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            title="Attach Image"
-          >
-            <Paperclip className="w-4 h-4" />
-          </button>
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileAttach}
-            accept="image/*"
-            className="hidden"
-          />
-
-          <input
-            type="text"
-            placeholder="Type your message..."
-            value={messageText}
-            onChange={(e) => setMessageText(e.target.value)}
-            className="flex-1 px-3.5 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
-          />
-          <button
-            type="submit"
-            disabled={!messageText.trim() && !attachedFile}
-            className="p-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl shadow-sm transition-colors"
-          >
-            <Send className="w-4 h-4" />
-          </button>
-        </form>
       </div>
 
       {/* 3. WebRTC Active Calling Modal Screen */}
       {activeCall && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
           <div className="relative w-full max-w-md max-h-[90dvh] overflow-y-auto bg-slate-900 text-white rounded-3xl p-5 sm:p-6 flex flex-col items-center justify-between min-h-[400px] sm:min-h-[460px] border border-slate-800 shadow-2xl">
-            {/* Top info */}
             <div className="flex flex-col items-center mt-4">
               <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 mb-1">
                 {activeCall.type === 'video' ? 'WebRTC HD Video Call' : 'WebRTC HD Voice Call'}
@@ -590,12 +973,11 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               <h3 className="text-lg font-bold">{activeCall.participantName}</h3>
               <p className="text-xs text-slate-400 mt-1 text-center max-w-xs">
                 {activeCall.status === 'calling'
-                  ? 'Simulating audio/video stream setup...'
-                  : `Preview Active · ${formatDuration(activeCall.duration)} (Live remote call requires signaling server)`}
+                  ? 'Connecting audio/video stream...'
+                  : `Call Active · ${formatDuration(activeCall.duration)}`}
               </p>
             </div>
 
-            {/* Video preview / Avatar pulse */}
             <div className="relative my-8">
               {activeCall.type === 'video' && !activeCall.isVideoOff ? (
                 <div className="w-48 h-48 rounded-3xl bg-slate-800 border-2 border-blue-500/40 flex items-center justify-center overflow-hidden shadow-xl">
@@ -613,14 +995,15 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               )}
             </div>
 
-            {/* In-Call Controls */}
             <div className="flex items-center gap-4 mb-4">
               <button
                 onClick={() =>
                   setActiveCall((prev) => (prev ? { ...prev, isMuted: !prev.isMuted } : null))
                 }
                 className={`p-3.5 rounded-2xl transition-colors ${
-                  activeCall.isMuted ? 'bg-red-500 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                  activeCall.isMuted
+                    ? 'bg-red-500 text-white'
+                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
                 }`}
                 title={activeCall.isMuted ? 'Unmute' : 'Mute'}
               >
@@ -630,14 +1013,22 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               {activeCall.type === 'video' && (
                 <button
                   onClick={() =>
-                    setActiveCall((prev) => (prev ? { ...prev, isVideoOff: !prev.isVideoOff } : null))
+                    setActiveCall((prev) =>
+                      prev ? { ...prev, isVideoOff: !prev.isVideoOff } : null
+                    )
                   }
                   className={`p-3.5 rounded-2xl transition-colors ${
-                    activeCall.isVideoOff ? 'bg-red-500 text-white' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
+                    activeCall.isVideoOff
+                      ? 'bg-red-500 text-white'
+                      : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
                   }`}
                   title={activeCall.isVideoOff ? 'Enable Camera' : 'Disable Camera'}
                 >
-                  {activeCall.isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+                  {activeCall.isVideoOff ? (
+                    <VideoOff className="w-5 h-5" />
+                  ) : (
+                    <Video className="w-5 h-5" />
+                  )}
                 </button>
               )}
 
@@ -653,6 +1044,98 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         </div>
       )}
 
+      {/* Start New Direct Message Modal */}
+      {isNewDmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-md max-h-[85dvh] flex flex-col bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-2xl space-y-3">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-blue-50 dark:bg-blue-950/50 text-blue-600 rounded-xl">
+                  <MessageSquarePlus className="w-4 h-4" />
+                </div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Start Direct Message
+                </h3>
+              </div>
+              <button
+                onClick={() => setIsNewDmOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                type="text"
+                autoFocus
+                placeholder="Search any registered user by name or @username..."
+                value={dmUserQuery}
+                onChange={(e) => setDmUserQuery(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white"
+              />
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-h-72">
+              {loadingDirectory && filteredDmPeers.length === 0 ? (
+                <div className="py-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                  <span>Loading JIT members...</span>
+                </div>
+              ) : filteredDmPeers.length === 0 ? (
+                <div className="py-8 text-center text-xs text-slate-400">
+                  No matching members found.
+                </div>
+              ) : (
+                filteredDmPeers.map((peer) => {
+                  const isConnectedFriend = friendIds.includes(peer.id);
+                  return (
+                    <button
+                      key={peer.id}
+                      type="button"
+                      disabled={startingDmUserId === peer.id}
+                      onClick={() => handleStartDirectChat(peer)}
+                      className="w-full p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/70 hover:bg-blue-50 dark:hover:bg-blue-950/30 flex items-center justify-between gap-2 text-left transition-colors"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <img
+                          src={peer.avatarUrl || APP_CONFIG.logoUrl}
+                          alt={peer.fullName}
+                          className="w-9 h-9 rounded-full object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                              {peer.fullName}
+                            </p>
+                            {isConnectedFriend && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400">
+                                Friend
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] font-mono text-slate-500 truncate">
+                            @{peer.username || deriveUsername(peer.fullName)}
+                          </p>
+                        </div>
+                      </div>
+                      {startingDmUserId === peer.id ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+                      ) : (
+                        <span className="px-2.5 py-1 rounded-xl bg-blue-600 text-white text-[10px] font-bold shrink-0">
+                          Message
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Create New Group Chat Modal */}
       {isNewGroupModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
@@ -662,7 +1145,9 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                 <div className="p-1.5 bg-blue-50 dark:bg-blue-950/50 text-blue-600 rounded-xl">
                   <Users className="w-4 h-4" />
                 </div>
-                <h3 className="text-sm font-bold text-slate-900 dark:text-white">Create Campus Group Chat</h3>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Create Campus Group Chat
+                </h3>
               </div>
               <button
                 onClick={() => setIsNewGroupModalOpen(false)}
@@ -674,7 +1159,9 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
             <form onSubmit={handleCreateGroup} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">Group Name</label>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                  Group Name
+                </label>
                 <input
                   type="text"
                   required
@@ -686,9 +1173,11 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">Select Members</label>
+                <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+                  Select Members
+                </label>
                 <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
-                  {INITIAL_FRIENDS.map((friend) => {
+                  {selectablePeers.map((friend) => {
                     const isChecked = selectedGroupMembers.includes(friend.id);
                     return (
                       <label
@@ -697,11 +1186,13 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                       >
                         <div className="flex items-center gap-2">
                           <img
-                            src={friend.avatarUrl}
+                            src={friend.avatarUrl || APP_CONFIG.logoUrl}
                             alt={friend.fullName}
                             className="w-7 h-7 rounded-full object-cover"
                           />
-                          <span className="font-medium text-slate-800 dark:text-slate-200">{friend.fullName}</span>
+                          <span className="font-medium text-slate-800 dark:text-slate-200">
+                            {friend.fullName}
+                          </span>
                         </div>
                         <input
                           type="checkbox"
@@ -710,7 +1201,9 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                             if (e.target.checked) {
                               setSelectedGroupMembers((prev) => [...prev, friend.id]);
                             } else {
-                              setSelectedGroupMembers((prev) => prev.filter((id) => id !== friend.id));
+                              setSelectedGroupMembers((prev) =>
+                                prev.filter((id) => id !== friend.id)
+                              );
                             }
                           }}
                           className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"

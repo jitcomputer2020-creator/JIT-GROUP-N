@@ -9,6 +9,8 @@ import { useSocial } from '../context/SocialContext';
 import { NavTab } from '../types';
 import { APP_CONFIG } from '../constants/branding';
 import { AddReelModal } from '../components/modals/AddReelModal';
+import { ResilientVideo } from '../components/common/ResilientVideo';
+import { isVideoContentExpired } from '../lib/firebase';
 import {
   Heart,
   MessageCircle,
@@ -23,6 +25,7 @@ import {
   Check,
   X,
   Video,
+  Clock,
 } from 'lucide-react';
 
 interface ReelsViewProps {
@@ -51,11 +54,12 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const touchStartYRef = useRef<number | null>(null);
 
-  const safeIndex = Math.min(currentIndex, Math.max(0, reels.length - 1));
-  const currentReel = reels[safeIndex] || reels[0];
+  const activeReels = reels.filter((r) => !isVideoContentExpired(r));
+  const safeIndex = Math.min(currentIndex, Math.max(0, activeReels.length - 1));
+  const currentReel = activeReels[safeIndex] || activeReels[0];
 
   const handleNextReel = () => {
-    if (currentIndex < reels.length - 1) {
+    if (currentIndex < activeReels.length - 1) {
       setCurrentIndex(currentIndex + 1);
     } else {
       setCurrentIndex(0); // loop
@@ -152,8 +156,14 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
               JIT Reels
             </span>
             <span className="text-[11px] text-white/80">
-              {safeIndex + 1}/{reels.length}
+              {safeIndex + 1}/{activeReels.length}
             </span>
+            {typeof currentReel.expiresAt === 'number' && currentReel.expiresAt > Date.now() && (
+              <span className="text-[10px] font-semibold bg-black/45 backdrop-blur-md text-amber-300 px-2 py-0.5 rounded-lg flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                {Math.max(1, Math.ceil((currentReel.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))}d
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -175,13 +185,17 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
 
         {/* Video Element */}
         <div className="relative w-full h-full cursor-pointer" onClick={togglePlay}>
-          <video
-            ref={videoRef}
+          <ResilientVideo
+            key={currentReel.id}
+            videoRef={videoRef}
             src={currentReel.videoUrl}
+            poster={currentReel.thumbnailUrl}
+            controls={false}
             autoPlay
             loop
             muted={isMuted}
             playsInline
+            onLoadedData={() => setIsPlaying(true)}
             className="w-full h-full object-cover"
           />
 
@@ -214,7 +228,10 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  sendFriendRequest(currentReel.creatorId);
+                  sendFriendRequest(currentReel.creatorId, {
+                    fullName: currentReel.creatorName,
+                    avatarUrl: currentReel.creatorAvatar,
+                  });
                 }}
                 className="absolute -bottom-1 -right-1 p-0.5 bg-blue-600 rounded-full text-white"
                 title="Connect"

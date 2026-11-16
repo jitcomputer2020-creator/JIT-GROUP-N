@@ -5,9 +5,17 @@
 
 import React, { useState, useRef } from 'react';
 import { Post } from '../../types';
+import { useAuth } from '../../context/AuthContext';
 import { useSocial } from '../../context/SocialContext';
-import { saveMediaFile, validateMediaFile } from '../../services/mediaStorage';
-import { X, Image as ImageIcon, Video, Trash2, Check } from 'lucide-react';
+import {
+  saveMediaFile,
+  validateMediaFile,
+  generateVideoThumbnail,
+  VIDEO_EXPIRY_MS,
+} from '../../services/mediaStorage';
+import { uploadVideoAssetToCloud } from '../../lib/firebase';
+import { ResilientVideo } from '../common/ResilientVideo';
+import { X, Image as ImageIcon, Trash2, Check } from 'lucide-react';
 
 interface EditPostModalProps {
   post: Post | null;
@@ -15,6 +23,7 @@ interface EditPostModalProps {
 }
 
 export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) => {
+  const { currentUser } = useAuth();
   const { editPost } = useSocial();
   const [content, setContent] = useState(post?.content || '');
   const [mediaUrls, setMediaUrls] = useState<string[]>(post?.mediaUrls || []);
@@ -31,7 +40,8 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
     if (!file) return;
 
     setErrorMsg(null);
-    const validation = validateMediaFile(file, { maxSizeMb: 25 });
+    const isVid = file.type.startsWith('video/');
+    const validation = validateMediaFile(file, { maxSizeMb: isVid ? 50 : 15 });
     if (!validation.valid) {
       setErrorMsg(validation.error || 'Invalid file');
       return;
@@ -39,9 +49,21 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
 
     try {
       setIsUploading(true);
-      const { dataUrl } = await saveMediaFile(file);
-      setMediaUrls([dataUrl]);
-      setMediaType(file.type.startsWith('video/') ? 'video' : 'image');
+      if (isVid && currentUser) {
+        const thumb = await generateVideoThumbnail(file);
+        const uploaded = await uploadVideoAssetToCloud(
+          currentUser.id,
+          file,
+          thumb,
+          Date.now() + VIDEO_EXPIRY_MS
+        );
+        setMediaUrls([uploaded.videoUrl]);
+        setMediaType('video');
+      } else {
+        const { dataUrl } = await saveMediaFile(file);
+        setMediaUrls([dataUrl]);
+        setMediaType(isVid ? 'video' : 'image');
+      }
     } catch {
       setErrorMsg('Failed to process media file. Please try again.');
     } finally {
@@ -96,7 +118,7 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
           {mediaUrls.length > 0 && (
             <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-black max-h-60 flex items-center justify-center">
               {mediaType === 'video' ? (
-                <video src={mediaUrls[0]} controls className="max-h-60 w-auto object-contain" />
+                <ResilientVideo src={mediaUrls[0]} poster={post.thumbnailUrl} controls className="max-h-60 w-auto object-contain" />
               ) : (
                 <img src={mediaUrls[0]} alt="Post media" className="max-h-60 w-auto object-contain" />
               )}

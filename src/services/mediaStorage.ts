@@ -11,13 +11,17 @@ const DB_NAME = 'jit_media_database';
 const DB_VERSION = 1;
 const STORE_NAME = 'media_files';
 
+export const VIDEO_EXPIRY_MS = 40 * 24 * 60 * 60 * 1000;
+
 interface StoredMediaRecord {
   id: string;
-  dataUrl: string;
+  dataUrl?: string;
+  blob?: Blob;
   mimeType: string;
   fileName: string;
   size: number;
   createdAt: number;
+  expiresAt?: number;
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -305,11 +309,180 @@ export async function getMediaFile(id: string): Promise<string | null> {
       const req = store.get(id);
       req.onsuccess = () => {
         const record = req.result as StoredMediaRecord | undefined;
-        resolve(record ? record.dataUrl : null);
+        if (!record) {
+          resolve(null);
+          return;
+        }
+        if (typeof record.expiresAt === 'number' && record.expiresAt <= Date.now()) {
+          resolve(null);
+          return;
+        }
+        if (record.blob) {
+          resolve(URL.createObjectURL(record.blob));
+        } else {
+          resolve(record.dataUrl || null);
+        }
       };
       req.onerror = () => resolve(null);
     });
   } catch {
     return null;
+  }
+}
+
+/**
+ * Generates a compact JPEG thumbnail (<= 140KB) from a browser video File.
+ * Never throws; returns empty string if decoding is unavailable.
+ */
+export async function generateVideoThumbnail(file: File): Promise<string> {
+  if (typeof document === 'undefined' || !file.type.startsWith('video/')) {
+    return '';
+  }
+
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    const tempUrl = URL.createObjectURL(file);
+    let settled = false;
+
+    const finish = (result: string) => {
+      if (settled) return;
+      settled = true;
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch {
+        // Ignore cleanup errors
+      }
+      URL.revokeObjectURL(tempUrl);
+      resolve(result);
+    };
+
+    const timer = window.setTimeout(() => finish(''), 4000);
+
+    const captureFrame = () => {
+      try {
+        const w = video.videoWidth || 480;
+        const h = video.videoHeight || 640;
+        const maxDim = 480;
+        const ratio = Math.min(maxDim / w, maxDim / h, 1);
+        const targetW = Math.max(64, Math.round(w * ratio));
+        const targetH = Math.max(64, Math.round(h * ratio));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          window.clearTimeout(timer);
+          finish('');
+          return;
+        }
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        const jpeg = canvas.toDataURL('image/jpeg', 0.72);
+        window.clearTimeout(timer);
+        finish(jpeg.length <= 170_000 ? jpeg : canvas.toDataURL('image/jpeg', 0.45));
+      } catch {
+        window.clearTimeout(timer);
+        finish('');
+      }
+    };
+
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+
+    video.onloadedmetadata = () => {
+      try {
+        if (video.duration && isFinite(video.duration) && video.duration > 0.25) {
+          video.currentTime = Math.min(0.6, video.duration * 0.2);
+        } else {
+          captureFrame();
+        }
+      } catch {
+        captureFrame();
+      }
+    };
+    video.onseeked = captureFrame;
+    video.onloadeddata = () => {
+      if (!video.currentTime) {
+        // fallback if seeked doesn't fire
+        setTimeout(captureFrame, 120);
+      }
+    };
+    video.onerror = () => {
+      window.clearTimeout(timer);
+      finish('');
+    };
+
+    video.src = tempUrl;
+  });
+}
+
+/**
+ * Stores a video File directly as a Blob in IndexedDB (avoids giant Base64 memory spikes)
+ * with a 40-day expiry timestamp, returning an `idb://<id>` reference.
+ */
+export async function saveVideoBlobLocally(
+  file: File,
+  expiresAt: number = Date.now() + VIDEO_EXPIRY_MS
+): Promise<{ id: string; uri: string }> {
+  const id = `vid_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  try {
+    const db = await getDb();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const record: StoredMediaRecord = {
+      id,
+      blob: file,
+      mimeType: file.type || 'video/mp4',
+      fileName: file.name,
+      size: file.size,
+      createdAt: Date.now(),
+      expiresAt,
+    };
+    await new Promise<void>((resolve, reject) => {
+      const req = store.put(record);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } catch (err) {
+    console.warn('IndexedDB video blob save notice:', err);
+  }
+  return { id, uri: `idb://${id}` };
+}
+
+/**
+ * Resolves `idb://<id>` URIs into playable Object URLs; passes HTTP/Data URLs straight through.
+ */
+export async function resolveLocalMediaUrl(url?: string): Promise<string> {
+  if (!url) return '';
+  if (!url.startsWith('idb://')) return url;
+  const id = url.slice('idb://'.length);
+  const resolved = await getMediaFile(id);
+  return resolved || '';
+}
+
+/**
+ * Purges expired local media records (>40 days) from IndexedDB.
+ */
+export async function purgeExpiredLocalMedia(): Promise<void> {
+  try {
+    const db = await getDb();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const now = Date.now();
+    const req = store.openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return;
+      const val = cursor.value as StoredMediaRecord;
+      if (typeof val?.expiresAt === 'number' && val.expiresAt <= now) {
+        cursor.delete();
+      }
+      cursor.continue();
+    };
+  } catch {
+    // Non-fatal
   }
 }

@@ -32,12 +32,20 @@ service cloud.firestore {
       return id is string && id.size() >= 8 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidCompositeId(id) {
+      return id is string && id.size() >= 8 && id.size() <= 140 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
     function isValidPhoneKey(phoneKey) {
       return phoneKey is string && phoneKey.size() >= 7 && phoneKey.size() <= 15 && phoneKey.matches('^[0-9]{7,15}$');
     }
 
     function isExpiredTimestamp(ts) {
       return ts is timestamp && request.time > ts + duration.value(180, 'd');
+    }
+
+    function isExpired40dTimestamp(ts) {
+      return ts is timestamp && request.time > ts + duration.value(40, 'd');
     }
 
     function isValidStats(stats) {
@@ -293,6 +301,258 @@ service cloud.firestore {
         data.createdAt == request.time;
     }
 
+    function isValidFriendRequestSchema(data, requestId) {
+      return data.keys().hasAll([
+          'id', 'fromUserId', 'fromUserName', 'toUserId', 'toUserName',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'fromUserId', 'fromUserName', 'fromUserAvatar',
+          'toUserId', 'toUserName', 'toUserAvatar', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidCompositeId(data.id) &&
+        data.id == requestId &&
+        isValidId(data.fromUserId) &&
+        isValidId(data.toUserId) &&
+        data.fromUserId != data.toUserId &&
+        data.fromUserName is string && data.fromUserName.size() >= 1 && data.fromUserName.size() <= 120 &&
+        data.toUserName is string && data.toUserName.size() >= 1 && data.toUserName.size() <= 120 &&
+        (!('fromUserAvatar' in data) || (data.fromUserAvatar is string && data.fromUserAvatar.size() <= 400000)) &&
+        (!('toUserAvatar' in data) || (data.toUserAvatar is string && data.toUserAvatar.size() <= 400000)) &&
+        data.status in ['pending', 'accepted', 'declined'] &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidFriendRequestCreate(data, requestId) {
+      return isValidFriendRequestSchema(data, requestId) &&
+        data.status == 'pending' &&
+        data.createdAt == request.time;
+    }
+
+    function isValidFriendRequestUpdate(data, prev, requestId) {
+      return isValidFriendRequestSchema(data, requestId) &&
+        data.id == prev.id &&
+        data.fromUserId == prev.fromUserId &&
+        data.toUserId == prev.toUserId &&
+        data.createdAt == prev.createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'fromUserName', 'fromUserAvatar', 'toUserName', 'toUserAvatar', 'updatedAt']);
+    }
+
+    function isValidNotificationSchema(data, notificationId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'type', 'title', 'message',
+          'isRead', 'createdAtIso', 'createdAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'fromUserId', 'fromUserName', 'fromUserAvatar',
+          'type', 'title', 'message', 'isRead', 'createdAtIso', 'createdAtMs',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidCompositeId(data.id) &&
+        data.id == notificationId &&
+        isValidId(data.userId) &&
+        (!('fromUserId' in data) || (data.fromUserId is string && data.fromUserId.size() <= 64)) &&
+        (!('fromUserName' in data) || (data.fromUserName is string && data.fromUserName.size() <= 120)) &&
+        (!('fromUserAvatar' in data) || (data.fromUserAvatar is string && data.fromUserAvatar.size() <= 400000)) &&
+        data.type in ['friend_request', 'friend_accept', 'like', 'comment', 'message', 'call', 'game_invite', 'tournament', 'reward', 'achievement'] &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 400 &&
+        data.isRead is bool &&
+        data.createdAtIso is string && data.createdAtIso.size() >= 10 && data.createdAtIso.size() <= 40 &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidNotificationCreate(data, notificationId) {
+      return isValidNotificationSchema(data, notificationId) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidNotificationUpdate(data, prev, notificationId) {
+      return isValidNotificationSchema(data, notificationId) &&
+        data.id == prev.id &&
+        data.userId == prev.userId &&
+        data.type == prev.type &&
+        data.createdAt == prev.createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt']);
+    }
+
+    function isValidConversationSchema(data, conversationId) {
+      return data.keys().hasAll([
+          'id', 'type', 'name', 'participantIds', 'participantsJson',
+          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt',
+          'updatedAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'type', 'name', 'avatarUrl', 'participantIds', 'participantsJson',
+          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt',
+          'updatedAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidCompositeId(data.id) &&
+        data.id == conversationId &&
+        data.type in ['direct', 'group'] &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
+        data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 50 &&
+        data.participantIds[0] is string &&
+        data.participantsJson is string && data.participantsJson.size() >= 2 && data.participantsJson.size() <= 30000 &&
+        data.lastMessageText is string && data.lastMessageText.size() <= 500 &&
+        data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 64 &&
+        data.lastMessageAt is string && data.lastMessageAt.size() <= 40 &&
+        data.updatedAtMs is int && data.updatedAtMs >= 0 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidConversationCreate(data, conversationId) {
+      return isValidConversationSchema(data, conversationId) &&
+        data.createdAt == request.time;
+    }
+
+    function isValidConversationUpdate(data, prev, conversationId) {
+      return isValidConversationSchema(data, conversationId) &&
+        data.id == prev.id &&
+        data.type == prev.type &&
+        data.createdAt == prev.createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'avatarUrl', 'participantIds', 'participantsJson',
+          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt',
+          'updatedAtMs', 'updatedAt'
+        ]);
+    }
+
+    function isValidChatMessage(data, conversationId, messageId) {
+      return data.keys().hasAll([
+          'id', 'conversationId', 'senderId', 'senderName',
+          'content', 'status', 'createdAt', 'createdAtMs', 'createdAtTs'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'conversationId', 'senderId', 'senderName', 'senderAvatar',
+          'content', 'mediaUrl', 'mediaType', 'status',
+          'createdAt', 'createdAtMs', 'createdAtTs'
+        ]) &&
+        isValidCompositeId(data.id) &&
+        data.id == messageId &&
+        data.conversationId == conversationId &&
+        isValidId(data.senderId) &&
+        data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120 &&
+        (!('senderAvatar' in data) || (data.senderAvatar is string && data.senderAvatar.size() <= 400000)) &&
+        data.content is string && data.content.size() <= 4000 &&
+        (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 400000)) &&
+        (!('mediaType' in data) || data.mediaType in ['image', 'video', 'file']) &&
+        data.status in ['sent', 'delivered', 'read'] &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        data.createdAtTs == request.time;
+    }
+
+    function isValidReelSchema(data, reelId) {
+      return data.keys().hasAll([
+          'id', 'creatorId', 'creatorName', 'videoUrl', 'caption',
+          'likesCount', 'commentsCount', 'sharesCount', 'viewsCount',
+          'likedBy', 'createdAt', 'createdAtMs', 'expiresAt', 'createdAtTs', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'creatorId', 'creatorName', 'creatorAvatar', 'videoUrl', 'thumbnailUrl',
+          'caption', 'musicTitle', 'likesCount', 'commentsCount', 'sharesCount',
+          'viewsCount', 'likedBy', 'commentsJson', 'createdAt', 'createdAtMs',
+          'expiresAt', 'createdAtTs', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == reelId &&
+        isValidId(data.creatorId) &&
+        data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 120 &&
+        (!('creatorAvatar' in data) || (data.creatorAvatar is string && data.creatorAvatar.size() <= 400000)) &&
+        data.videoUrl is string && data.videoUrl.size() >= 1 && data.videoUrl.size() <= 750000 &&
+        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 180000)) &&
+        data.caption is string && data.caption.size() >= 1 && data.caption.size() <= 1000 &&
+        (!('musicTitle' in data) || (data.musicTitle is string && data.musicTitle.size() <= 120)) &&
+        data.likesCount is int && data.likesCount >= 0 &&
+        data.commentsCount is int && data.commentsCount >= 0 &&
+        data.sharesCount is int && data.sharesCount >= 0 &&
+        data.viewsCount is int && data.viewsCount >= 0 &&
+        data.likedBy is list && data.likedBy.size() <= 500 &&
+        (data.likedBy.size() == 0 || data.likedBy[0] is string) &&
+        (!('commentsJson' in data) || (data.commentsJson is string && data.commentsJson.size() <= 100000)) &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        data.expiresAt is int && data.expiresAt >= data.createdAtMs &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidReelCreate(data, reelId) {
+      return isValidReelSchema(data, reelId) &&
+        data.createdAtTs == request.time;
+    }
+
+    function isValidReelUpdate(data, prev, reelId) {
+      return isValidReelSchema(data, reelId) &&
+        data.id == prev.id &&
+        data.creatorId == prev.creatorId &&
+        data.createdAtMs == prev.createdAtMs &&
+        data.createdAtTs == prev.createdAtTs &&
+        data.expiresAt == prev.expiresAt &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['likedBy', 'likesCount', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['commentsJson', 'commentsCount', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['viewsCount', 'sharesCount', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['creatorName', 'creatorAvatar', 'updatedAt'])
+        );
+    }
+
+    function isValidPostSchema(data, postId) {
+      return data.keys().hasAll([
+          'id', 'authorId', 'authorName', 'content', 'mediaType', 'category',
+          'likesCount', 'commentsCount', 'sharesCount', 'likedBy',
+          'createdAt', 'createdAtMs', 'createdAtTs', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'authorId', 'authorName', 'authorAvatar', 'authorHandle',
+          'content', 'mediaUrls', 'mediaType', 'thumbnailUrl', 'category',
+          'likesCount', 'commentsCount', 'sharesCount', 'likedBy', 'commentsJson',
+          'createdAt', 'createdAtMs', 'expiresAt', 'createdAtTs', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == postId &&
+        isValidId(data.authorId) &&
+        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120 &&
+        (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 400000)) &&
+        (!('authorHandle' in data) || (data.authorHandle is string && data.authorHandle.size() <= 80)) &&
+        data.content is string && data.content.size() <= 5000 &&
+        (!('mediaUrls' in data) || (data.mediaUrls is list && data.mediaUrls.size() <= 4 && (data.mediaUrls.size() == 0 || (data.mediaUrls[0] is string && data.mediaUrls[0].size() <= 750000)))) &&
+        data.mediaType in ['image', 'video', 'none'] &&
+        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 180000)) &&
+        data.category in ['all', 'friends', 'following', 'popular'] &&
+        data.likesCount is int && data.likesCount >= 0 &&
+        data.commentsCount is int && data.commentsCount >= 0 &&
+        data.sharesCount is int && data.sharesCount >= 0 &&
+        data.likedBy is list && data.likedBy.size() <= 500 &&
+        (data.likedBy.size() == 0 || data.likedBy[0] is string) &&
+        (!('commentsJson' in data) || (data.commentsJson is string && data.commentsJson.size() <= 100000)) &&
+        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        (!('expiresAt' in data) || (data.expiresAt is int && data.expiresAt >= data.createdAtMs)) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidPostCreate(data, postId) {
+      return isValidPostSchema(data, postId) &&
+        data.createdAtTs == request.time;
+    }
+
+    function isValidPostUpdate(data, prev, postId) {
+      return isValidPostSchema(data, postId) &&
+        data.id == prev.id &&
+        data.authorId == prev.authorId &&
+        data.createdAtMs == prev.createdAtMs &&
+        data.createdAtTs == prev.createdAtTs &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['likedBy', 'likesCount', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['commentsJson', 'commentsCount', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['content', 'mediaUrls', 'mediaType', 'thumbnailUrl', 'expiresAt', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['authorName', 'authorAvatar', 'updatedAt'])
+        );
+    }
+
     // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
@@ -387,6 +647,72 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isValidRoomCode(roomCode) && isValidId(signalId);
       }
+    }
+
+    // 10. Real-Time Friend Requests
+    match /friendRequests/{requestId} {
+      allow get: if isValidCompositeId(requestId);
+      allow list: if existing().toUserId >= '' || existing().fromUserId >= '';
+      allow create: if isValidCompositeId(requestId) &&
+        isValidFriendRequestCreate(incoming(), requestId) &&
+        existsAfter(/databases/$(database)/documents/profiles/$(incoming().toUserId));
+      allow update: if isValidCompositeId(requestId) && isValidFriendRequestUpdate(incoming(), existing(), requestId);
+      allow delete: if isValidCompositeId(requestId) && (existing().status in ['pending', 'accepted', 'declined']);
+    }
+
+    // 11. Real-Time User Notifications
+    match /notifications/{notificationId} {
+      allow get: if isValidCompositeId(notificationId);
+      allow list: if existing().userId >= '';
+      allow create: if isValidCompositeId(notificationId) && isValidNotificationCreate(incoming(), notificationId);
+      allow update: if isValidCompositeId(notificationId) && isValidNotificationUpdate(incoming(), existing(), notificationId);
+      allow delete: if isValidCompositeId(notificationId) && (existing().isRead == true || isExpiredTimestamp(existing().createdAt) || isAdmin());
+    }
+
+    // 12. Personal Direct Messages & Group Conversations
+    match /conversations/{conversationId} {
+      allow get: if isValidCompositeId(conversationId);
+      allow list: if request.query.limit != null && request.query.limit <= 100;
+      allow create: if isValidCompositeId(conversationId) && isValidConversationCreate(incoming(), conversationId);
+      allow update: if isValidCompositeId(conversationId) && isValidConversationUpdate(incoming(), existing(), conversationId);
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow get: if isValidCompositeId(conversationId) && isValidCompositeId(messageId);
+        allow list: if isValidCompositeId(conversationId) && existing().createdAtMs >= 0;
+        allow create: if isValidCompositeId(conversationId) && isValidCompositeId(messageId) &&
+          exists(/databases/$(database)/documents/conversations/$(conversationId)) &&
+          isValidChatMessage(incoming(), conversationId, messageId);
+        allow update: if false;
+        allow delete: if isAdmin();
+      }
+    }
+
+    // 13. Video Reels (40-day automatic expiry)
+    match /reels/{reelId} {
+      allow get: if isValidId(reelId);
+      allow list: if existing().createdAtMs >= 0 || existing().expiresAt >= 0;
+      allow create: if isValidId(reelId) && isValidReelCreate(incoming(), reelId);
+      allow update: if isValidId(reelId) && isValidReelUpdate(incoming(), existing(), reelId);
+      allow delete: if isValidId(reelId) && (
+        isExpired40dTimestamp(existing().createdAtTs) ||
+        (existing().expiresAt is int && request.time.toMillis() > existing().expiresAt) ||
+        isAdmin()
+      );
+    }
+
+    // 14. Public Feed Posts (40-day automatic expiry for video posts)
+    match /posts/{postId} {
+      allow get: if isValidId(postId);
+      allow list: if existing().createdAtMs >= 0 || existing().expiresAt >= 0;
+      allow create: if isValidId(postId) && isValidPostCreate(incoming(), postId);
+      allow update: if isValidId(postId) && isValidPostUpdate(incoming(), existing(), postId);
+      allow delete: if isValidId(postId) && (
+        isExpired40dTimestamp(existing().createdAtTs) ||
+        (existing().mediaType == 'video' && existing().expiresAt is int && request.time.toMillis() > existing().expiresAt) ||
+        existing().mediaType != 'video' ||
+        isAdmin()
+      );
     }
   }
 }

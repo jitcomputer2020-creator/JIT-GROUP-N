@@ -9,7 +9,14 @@
 
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
-import { getStorage, ref as storageRef, uploadString, getDownloadURL } from 'firebase/storage';
+import {
+  getStorage,
+  ref as storageRef,
+  uploadString,
+  uploadBytes,
+  uploadBytesResumable,
+  getDownloadURL,
+} from 'firebase/storage';
 import {
   getFirestore,
   doc,
@@ -31,7 +38,18 @@ import {
   Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { UserProfile, LeaderboardEntry, MatchHistoryRecord, GameId } from '../types';
+import {
+  UserProfile,
+  LeaderboardEntry,
+  MatchHistoryRecord,
+  GameId,
+  FriendRequest,
+  InAppNotification,
+  Conversation,
+  Message,
+  Reel,
+  Post,
+} from '../types';
 import { MultiplayerRoom, RoomPlayer, InGameChatMessage } from '../types/multiplayer';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
@@ -40,6 +58,7 @@ export const auth = getAuth(app);
 export const storage = getStorage(app);
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
+export const VIDEO_EXPIRY_MS = 40 * 24 * 60 * 60 * 1000; // 40 days auto-delete for videos & reels
 
 export enum OperationType {
   CREATE = 'create',
@@ -1797,5 +1816,1122 @@ export function subscribeToFirestoreVoiceSignals(
     }
   );
 }
+
+// ============================================================================
+// REAL-TIME FRIEND REQUESTS & NOTIFICATIONS (FIRESTORE)
+// ============================================================================
+
+export function buildFriendRequestId(fromUserId: string, toUserId: string): string {
+  const cleanFrom = (fromUserId || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  const cleanTo = (toUserId || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  return `${cleanFrom}__${cleanTo}`.slice(0, 140);
+}
+
+export async function sendFirestoreFriendRequest(
+  fromUser: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
+  toUser: { id: string; fullName?: string; avatarUrl?: string }
+): Promise<void> {
+  if (!fromUser?.id || !toUser?.id || fromUser.id === toUser.id) return;
+
+  // Verify recipient profile exists in Firestore (auto-seed if missing in profiles collection? Rules require existsAfter profiles/toUserId)
+  let resolvedToName = (toUser.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
+  let resolvedToAvatar = sanitizeAvatarUrl(toUser.avatarUrl);
+  try {
+    const toSnap = await getDocFromServer(doc(db, 'profiles', toUser.id)).catch(() =>
+      getDoc(doc(db, 'profiles', toUser.id))
+    );
+    if (!toSnap.exists()) {
+      // Cannot create Firestore friendRequest if recipient profile doc doesn't exist yet
+      console.info('Recipient profile not yet in Firestore profiles collection:', toUser.id);
+      return;
+    }
+    const pData = toSnap.data();
+    if (pData?.fullName) resolvedToName = String(pData.fullName).slice(0, 120);
+    if (pData?.avatarUrl) resolvedToAvatar = sanitizeAvatarUrl(String(pData.avatarUrl));
+  } catch {
+    return;
+  }
+
+  const requestId = buildFriendRequestId(fromUser.id, toUser.id);
+  const reqRef = doc(db, 'friendRequests', requestId);
+  const fromName = (fromUser.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
+  const fromAvatar = sanitizeAvatarUrl(fromUser.avatarUrl);
+  const nowIso = new Date().toISOString();
+  const notifId = `notif_fr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+
+  try {
+    const existing = await getDoc(reqRef).catch(() => null);
+    const batch = writeBatch(db);
+    if (existing && existing.exists()) {
+      batch.update(reqRef, {
+        status: 'pending',
+        fromUserName: fromName,
+        fromUserAvatar: fromAvatar,
+        toUserName: resolvedToName,
+        toUserAvatar: resolvedToAvatar,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      batch.set(reqRef, {
+        id: requestId,
+        fromUserId: fromUser.id,
+        fromUserName: fromName,
+        fromUserAvatar: fromAvatar,
+        toUserId: toUser.id,
+        toUserName: resolvedToName,
+        toUserAvatar: resolvedToAvatar,
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    batch.set(doc(db, 'notifications', notifId), {
+      id: notifId,
+      userId: toUser.id,
+      fromUserId: fromUser.id,
+      fromUserName: fromName,
+      fromUserAvatar: fromAvatar,
+      type: 'friend_request',
+      title: 'New Friend Request',
+      message: `${fromName} sent you a friend request`,
+      isRead: false,
+      createdAtIso: nowIso,
+      createdAtMs: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    await batch.commit();
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `friendRequests/${requestId}`);
+    }
+    throw err;
+  }
+}
+
+export async function respondToFirestoreFriendRequest(
+  fromUserId: string,
+  currentUser: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
+  action: 'accepted' | 'declined'
+): Promise<void> {
+  if (!fromUserId || !currentUser?.id) return;
+  const requestId = buildFriendRequestId(fromUserId, currentUser.id);
+  const reqRef = doc(db, 'friendRequests', requestId);
+
+  try {
+    const snap = await getDoc(reqRef);
+    if (!snap.exists()) return;
+    const batch = writeBatch(db);
+    batch.update(reqRef, {
+      status: action,
+      updatedAt: serverTimestamp(),
+    });
+
+    if (action === 'accepted') {
+      const myName = (currentUser.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
+      const notifId = `notif_fa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+      batch.set(doc(db, 'notifications', notifId), {
+        id: notifId,
+        userId: fromUserId,
+        fromUserId: currentUser.id,
+        fromUserName: myName,
+        fromUserAvatar: sanitizeAvatarUrl(currentUser.avatarUrl),
+        type: 'friend_accept',
+        title: 'Friend Request Accepted',
+        message: `${myName} accepted your friend request!`,
+        isRead: false,
+        createdAtIso: new Date().toISOString(),
+        createdAtMs: Date.now(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    await batch.commit();
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `friendRequests/${requestId}`);
+    }
+    console.warn('Firestore respondToFriendRequest notice:', err);
+  }
+}
+
+export async function removeFirestoreFriendship(
+  myUserId: string,
+  friendUserId: string
+): Promise<void> {
+  if (!myUserId || !friendUserId) return;
+  const canonicalId = buildFriendRequestId(myUserId, friendUserId);
+  try {
+    const reqRef = doc(db, 'friendRequests', canonicalId);
+    const snap = await getDoc(reqRef);
+    if (snap.exists()) {
+      await deleteDoc(reqRef);
+    }
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.DELETE, `friendRequests/${canonicalId}`);
+    }
+  }
+}
+
+export function subscribeToFirestoreFriendRequests(
+  userId: string,
+  onUpdate: (state: {
+    incomingPendingIds: string[];
+    outgoingPendingIds: string[];
+    acceptedFriendIds: string[];
+    requests: FriendRequest[];
+  }) => void
+): Unsubscribe {
+  if (!userId) return () => {};
+  const incomingDocs = new Map<string, FriendRequest>();
+  const outgoingDocs = new Map<string, FriendRequest>();
+
+  const emit = () => {
+    const incomingPendingIds: string[] = [];
+    const outgoingPendingIds: string[] = [];
+    const acceptedSet = new Set<string>();
+    const allRequests: FriendRequest[] = [];
+
+    incomingDocs.forEach((req) => {
+      allRequests.push(req);
+      if (req.status === 'pending') incomingPendingIds.push(req.fromUserId);
+      if (req.status === 'accepted') acceptedSet.add(req.fromUserId);
+    });
+    outgoingDocs.forEach((req) => {
+      allRequests.push(req);
+      if (req.status === 'pending') outgoingPendingIds.push(req.toUserId);
+      if (req.status === 'accepted') acceptedSet.add(req.toUserId);
+    });
+
+    onUpdate({
+      incomingPendingIds: Array.from(new Set(incomingPendingIds)),
+      outgoingPendingIds: Array.from(new Set(outgoingPendingIds)),
+      acceptedFriendIds: Array.from(acceptedSet),
+      requests: allRequests,
+    });
+  };
+
+  const toFriendReq = (id: string, data: Record<string, any>): FriendRequest => ({
+    id,
+    fromUserId: String(data.fromUserId || ''),
+    fromUserName: String(data.fromUserName || 'JIT Member'),
+    fromUserAvatar: typeof data.fromUserAvatar === 'string' ? data.fromUserAvatar : undefined,
+    toUserId: String(data.toUserId || ''),
+    toUserName: String(data.toUserName || 'JIT Member'),
+    toUserAvatar: typeof data.toUserAvatar === 'string' ? data.toUserAvatar : undefined,
+    status: (data.status as FriendRequest['status']) || 'pending',
+    createdAtIso:
+      data.createdAt && typeof data.createdAt.toDate === 'function'
+        ? data.createdAt.toDate().toISOString()
+        : undefined,
+  });
+
+  const qIn = query(collection(db, 'friendRequests'), where('toUserId', '==', userId));
+  const qOut = query(collection(db, 'friendRequests'), where('fromUserId', '==', userId));
+
+  const unsubIn = onSnapshot(
+    qIn,
+    (snap) => {
+      incomingDocs.clear();
+      snap.forEach((d) => {
+        incomingDocs.set(d.id, toFriendReq(d.id, d.data()));
+      });
+      emit();
+    },
+    (err) => {
+      console.warn('friendRequests incoming onSnapshot notice:', err);
+    }
+  );
+
+  const unsubOut = onSnapshot(
+    qOut,
+    (snap) => {
+      outgoingDocs.clear();
+      snap.forEach((d) => {
+        outgoingDocs.set(d.id, toFriendReq(d.id, d.data()));
+      });
+      emit();
+    },
+    (err) => {
+      console.warn('friendRequests outgoing onSnapshot notice:', err);
+    }
+  );
+
+  return () => {
+    unsubIn();
+    unsubOut();
+  };
+}
+
+export function subscribeToFirestoreNotifications(
+  userId: string,
+  onNotifications: (items: InAppNotification[]) => void
+): Unsubscribe {
+  if (!userId) return () => {};
+  const q = query(collection(db, 'notifications'), where('userId', '==', userId), limit(60));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items: InAppNotification[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const ms = Number(data.createdAtMs || 0);
+        const iso = String(data.createdAtIso || '');
+        items.push({
+          id: String(data.id || d.id),
+          userId: String(data.userId || userId),
+          fromUserId: typeof data.fromUserId === 'string' ? data.fromUserId : undefined,
+          fromUserName: typeof data.fromUserName === 'string' ? data.fromUserName : undefined,
+          fromUserAvatar: typeof data.fromUserAvatar === 'string' ? data.fromUserAvatar : undefined,
+          type: (data.type as InAppNotification['type']) || 'friend_request',
+          title: String(data.title || 'Notification'),
+          message: String(data.message || ''),
+          createdAt: iso
+            ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : 'Just now',
+          createdAtIso: iso,
+          createdAtMs: ms,
+          isRead: Boolean(data.isRead),
+        });
+      });
+      items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+      onNotifications(items);
+    },
+    (err) => {
+      console.warn('notifications onSnapshot notice:', err);
+    }
+  );
+}
+
+export async function markFirestoreNotificationRead(notificationId: string): Promise<void> {
+  if (!notificationId) return;
+  try {
+    await updateDoc(doc(db, 'notifications', notificationId), {
+      isRead: true,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('markFirestoreNotificationRead notice:', err);
+  }
+}
+
+export async function markAllFirestoreNotificationsRead(notificationIds: string[]): Promise<void> {
+  if (!notificationIds.length) return;
+  try {
+    const batch = writeBatch(db);
+    notificationIds.slice(0, 40).forEach((id) => {
+      batch.update(doc(db, 'notifications', id), {
+        isRead: true,
+        updatedAt: serverTimestamp(),
+      });
+    });
+    await batch.commit();
+  } catch (err) {
+    console.warn('markAllFirestoreNotificationsRead notice:', err);
+  }
+}
+
+// ============================================================================
+// PERSONAL MESSAGING (DMs) & GROUP CONVERSATIONS (FIRESTORE)
+// ============================================================================
+
+export function buildDirectConversationId(uidA: string, uidB: string): string {
+  const cleanA = (uidA || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  const cleanB = (uidB || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  const sorted = [cleanA, cleanB].sort();
+  return `dm_${sorted[0]}__${sorted[1]}`.slice(0, 140);
+}
+
+function parseParticipantsMap(jsonStr?: string): Record<string, { name: string; avatar?: string }> {
+  try {
+    const parsed = JSON.parse(jsonStr || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function ensureFirestoreDirectConversation(
+  me: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
+  partner: { id: string; fullName?: string; avatarUrl?: string }
+): Promise<Conversation> {
+  const convId = buildDirectConversationId(me.id, partner.id);
+  const convRef = doc(db, 'conversations', convId);
+
+  let partnerName = (partner.fullName || '').trim();
+  let partnerAvatar = partner.avatarUrl || '';
+  if (!partnerName || !partnerAvatar) {
+    try {
+      const snap = await getDoc(doc(db, 'profiles', partner.id));
+      if (snap.exists()) {
+        const d = snap.data();
+        if (!partnerName && d?.fullName) partnerName = String(d.fullName);
+        if (!partnerAvatar && d?.avatarUrl) partnerAvatar = String(d.avatarUrl);
+      }
+    } catch {
+      // Fallback gracefully
+    }
+  }
+  partnerName = (partnerName || 'JIT Member').slice(0, 120);
+  partnerAvatar = sanitizeAvatarUrl(partnerAvatar);
+
+  const participantsMap: Record<string, { name: string; avatar?: string }> = {
+    [me.id]: {
+      name: (me.fullName || 'JIT Member').slice(0, 120),
+      avatar: sanitizeAvatarUrl(me.avatarUrl),
+    },
+    [partner.id]: {
+      name: partnerName,
+      avatar: partnerAvatar,
+    },
+  };
+
+  try {
+    const existing = await getDocFromServer(convRef).catch(() => getDoc(convRef));
+    if (existing.exists()) {
+      const data = existing.data();
+      const map = { ...parseParticipantsMap(data.participantsJson), ...participantsMap };
+      return {
+        id: convId,
+        type: 'direct',
+        name: partnerName,
+        avatarUrl: partnerAvatar,
+        participantIds: Array.isArray(data.participantIds) ? data.participantIds : [me.id, partner.id],
+        participantsMap: map,
+        lastMessage: data.lastMessageText
+          ? {
+              text: String(data.lastMessageText),
+              senderId: String(data.lastMessageSenderId || ''),
+              createdAt: String(data.lastMessageAt || ''),
+              isRead: true,
+            }
+          : undefined,
+        unreadCount: 0,
+        updatedAt: String(data.lastMessageAt || 'Just now'),
+        updatedAtMs: Number(data.updatedAtMs || Date.now()),
+      };
+    }
+
+    const nowMs = Date.now();
+    await setDoc(convRef, {
+      id: convId,
+      type: 'direct',
+      name: partnerName,
+      avatarUrl: partnerAvatar,
+      participantIds: [me.id, partner.id].sort(),
+      participantsJson: JSON.stringify(participantsMap),
+      lastMessageText: '',
+      lastMessageSenderId: '',
+      lastMessageAt: 'Just now',
+      updatedAtMs: nowMs,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `conversations/${convId}`);
+    }
+    throw err;
+  }
+
+  return {
+    id: convId,
+    type: 'direct',
+    name: partnerName,
+    avatarUrl: partnerAvatar,
+    participantIds: [me.id, partner.id].sort(),
+    participantsMap,
+    unreadCount: 0,
+    updatedAt: 'Just now',
+    updatedAtMs: Date.now(),
+  };
+}
+
+export async function createFirestoreGroupConversation(
+  creator: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
+  name: string,
+  memberIds: string[],
+  participantsMap: Record<string, { name: string; avatar?: string }>
+): Promise<Conversation> {
+  const convId = `conv_grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`.slice(0, 120);
+  const cleanName = name.trim().slice(0, 120) || 'JIT Group Chat';
+  const participantIds = Array.from(new Set([creator.id, ...memberIds])).slice(0, 50);
+  const nowMs = Date.now();
+
+  try {
+    await setDoc(doc(db, 'conversations', convId), {
+      id: convId,
+      type: 'group',
+      name: cleanName,
+      avatarUrl: '/assets/aistudio/image_e64e54f2.png',
+      participantIds,
+      participantsJson: JSON.stringify(participantsMap).slice(0, 29500),
+      lastMessageText: 'Group created. Welcome!',
+      lastMessageSenderId: creator.id,
+      lastMessageAt: 'Just now',
+      updatedAtMs: nowMs,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.CREATE, `conversations/${convId}`);
+    }
+    throw err;
+  }
+
+  return {
+    id: convId,
+    type: 'group',
+    name: cleanName,
+    avatarUrl: '/assets/aistudio/image_e64e54f2.png',
+    participantIds,
+    participantsMap,
+    lastMessage: {
+      text: 'Group created. Welcome!',
+      senderId: creator.id,
+      createdAt: 'Just now',
+      isRead: true,
+    },
+    unreadCount: 0,
+    updatedAt: 'Just now',
+    updatedAtMs: nowMs,
+  };
+}
+
+export function subscribeToFirestoreConversations(
+  userId: string,
+  onConversations: (convs: Conversation[]) => void
+): Unsubscribe {
+  if (!userId) return () => {};
+  const q = query(
+    collection(db, 'conversations'),
+    where('participantIds', 'array-contains', userId),
+    limit(60)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: Conversation[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
+        const pMap = parseParticipantsMap(data.participantsJson);
+        const type = data.type === 'group' ? 'group' : 'direct';
+        const peerId = type === 'direct' ? participantIds.find((pid) => pid !== userId) : undefined;
+        const peerInfo = peerId ? pMap[peerId] : undefined;
+
+        list.push({
+          id: String(data.id || d.id),
+          type,
+          name: peerInfo?.name || String(data.name || 'JIT Member'),
+          avatarUrl: peerInfo?.avatar || (typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
+          participantIds,
+          participantsMap: pMap,
+          lastMessage: data.lastMessageText
+            ? {
+                text: String(data.lastMessageText),
+                senderId: String(data.lastMessageSenderId || ''),
+                createdAt: String(data.lastMessageAt || ''),
+                isRead: true,
+              }
+            : undefined,
+          unreadCount: 0,
+          updatedAt: String(data.lastMessageAt || 'Just now'),
+          updatedAtMs: Number(data.updatedAtMs || 0),
+        });
+      });
+      list.sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
+      onConversations(list);
+    },
+    (err) => {
+      console.warn('conversations onSnapshot notice:', err);
+    }
+  );
+}
+
+export function subscribeToFirestoreMessages(
+  conversationId: string,
+  onMessages: (msgs: Message[]) => void
+): Unsubscribe {
+  if (!conversationId) return () => {};
+  const q = query(
+    collection(db, 'conversations', conversationId, 'messages'),
+    where('createdAtMs', '>=', 0),
+    limit(200)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list: Array<Message & { _ms: number }> = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        list.push({
+          id: String(data.id || d.id),
+          conversationId: String(data.conversationId || conversationId),
+          senderId: String(data.senderId || ''),
+          senderName: String(data.senderName || 'JIT Member'),
+          senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
+          content: String(data.content || ''),
+          mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
+          mediaType: data.mediaType as Message['mediaType'],
+          createdAt: String(data.createdAt || ''),
+          status: (data.status as Message['status']) || 'delivered',
+          _ms: Number(data.createdAtMs || 0),
+        });
+      });
+      list.sort((a, b) => a._ms - b._ms);
+      onMessages(list.map(({ _ms: _, ...m }) => m));
+    },
+    (err) => {
+      console.warn('messages onSnapshot notice:', err);
+    }
+  );
+}
+
+export async function sendFirestoreDirectMessage(
+  conversation: Conversation,
+  sender: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
+  payload: { content: string; mediaUrl?: string; mediaType?: 'image' | 'video' | 'file' }
+): Promise<Message> {
+  const nowMs = Date.now();
+  const timeLabel = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const msgId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+  const senderName = (sender.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
+  const senderAvatar = sanitizeAvatarUrl(sender.avatarUrl);
+  const cleanContent = (payload.content || '').trim().slice(0, 4000);
+  const safeMediaUrl =
+    payload.mediaUrl && payload.mediaUrl.length <= 400000 ? payload.mediaUrl : undefined;
+
+  const convRef = doc(db, 'conversations', conversation.id);
+  const existingConv = await getDoc(convRef).catch(() => null);
+  if (!existingConv || !existingConv.exists()) {
+    const pIds =
+      conversation.participantIds?.length >= 2
+        ? conversation.participantIds
+        : [sender.id, conversation.id.replace(/^dm_/, '')];
+    await setDoc(convRef, {
+      id: conversation.id,
+      type: conversation.type || 'direct',
+      name: (conversation.name || 'JIT Chat').slice(0, 120),
+      avatarUrl: sanitizeAvatarUrl(conversation.avatarUrl),
+      participantIds: pIds,
+      participantsJson: JSON.stringify(conversation.participantsMap || {}).slice(0, 29500),
+      lastMessageText: (cleanContent || '[Media Attachment]').slice(0, 500),
+      lastMessageSenderId: sender.id,
+      lastMessageAt: timeLabel,
+      updatedAtMs: nowMs,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+  }
+
+  const msgDoc: Record<string, any> = {
+    id: msgId,
+    conversationId: conversation.id,
+    senderId: sender.id,
+    senderName,
+    senderAvatar,
+    content: cleanContent,
+    ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: payload.mediaType || 'image' } : {}),
+    status: 'delivered',
+    createdAt: timeLabel,
+    createdAtMs: nowMs,
+    createdAtTs: serverTimestamp(),
+  };
+
+  try {
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'conversations', conversation.id, 'messages', msgId), msgDoc);
+    batch.update(convRef, {
+      lastMessageText: (cleanContent || '[Media Attachment]').slice(0, 500),
+      lastMessageSenderId: sender.id,
+      lastMessageAt: timeLabel,
+      updatedAtMs: nowMs,
+      updatedAt: serverTimestamp(),
+    });
+
+    if (conversation.type === 'direct') {
+      const recipientId = conversation.participantIds.find((pid) => pid !== sender.id);
+      if (recipientId && recipientId.length >= 8) {
+        const notifId = `notif_dm_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+        batch.set(doc(db, 'notifications', notifId), {
+          id: notifId,
+          userId: recipientId,
+          fromUserId: sender.id,
+          fromUserName: senderName,
+          fromUserAvatar: senderAvatar,
+          type: 'message',
+          title: `Message from ${senderName}`,
+          message: (cleanContent || 'Sent an attachment').slice(0, 390),
+          isRead: false,
+          createdAtIso: new Date(nowMs).toISOString(),
+          createdAtMs: nowMs,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }
+
+    await batch.commit();
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(
+        err,
+        OperationType.WRITE,
+        `conversations/${conversation.id}/messages/${msgId}`
+      );
+    }
+    throw err;
+  }
+
+  return {
+    id: msgId,
+    conversationId: conversation.id,
+    senderId: sender.id,
+    senderName,
+    senderAvatar,
+    content: cleanContent,
+    mediaUrl: safeMediaUrl,
+    mediaType: safeMediaUrl ? payload.mediaType || 'image' : undefined,
+    createdAt: timeLabel,
+    status: 'delivered',
+  };
+}
+
+// ============================================================================
+// VIDEO / REEL UPLOAD (FIREBASE STORAGE + FALLBACKS) & 40-DAY AUTO-EXPIRY
+// ============================================================================
+
+export async function uploadVideoAssetToCloud(
+  userId: string,
+  file: File,
+  thumbnailDataUrl: string,
+  expiresAt: number,
+  onProgress?: (pct: number) => void
+): Promise<{ videoUrl: string; thumbnailUrl: string; storageSource: 'firebase' | 'server' | 'firestore' | 'idb' }> {
+  const mediaId = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const ext = (file.name.split('.').pop() || 'mp4').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'mp4';
+
+  let finalThumb = thumbnailDataUrl && thumbnailDataUrl.length <= 170_000 ? thumbnailDataUrl : '';
+
+  // 1. Try Firebase Storage first (uploads video & thumbnail with progress & fast failback)
+  try {
+    onProgress?.(10);
+    const videoPath = `videos/${userId}/${mediaId}.${ext}`;
+    const videoRef = storageRef(storage, videoPath);
+
+    const videoDownloadUrl = await new Promise<string>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        try {
+          task.cancel();
+        } catch {
+          // ignore
+        }
+        reject(new Error('Firebase Storage upload timed out'));
+      }, 15000);
+
+      const task = uploadBytesResumable(videoRef, file, {
+        contentType: file.type || 'video/mp4',
+        customMetadata: {
+          userId,
+          expiresAt: String(expiresAt),
+        },
+      });
+
+      task.on(
+        'state_changed',
+        (snap) => {
+          if (snap.totalBytes > 0) {
+            const pct = Math.min(90, Math.max(10, Math.round((snap.bytesTransferred / snap.totalBytes) * 85)));
+            onProgress?.(pct);
+          }
+        },
+        (err) => {
+          window.clearTimeout(timeoutId);
+          reject(err);
+        },
+        async () => {
+          window.clearTimeout(timeoutId);
+          try {
+            const url = await getDownloadURL(task.snapshot.ref);
+            resolve(url);
+          } catch (e) {
+            reject(e);
+          }
+        }
+      );
+    });
+
+    if (videoDownloadUrl && videoDownloadUrl.startsWith('http')) {
+      if (finalThumb && finalThumb.startsWith('data:image/')) {
+        try {
+          const thumbRef = storageRef(storage, `thumbnails/${userId}/${mediaId}.jpg`);
+          await uploadString(thumbRef, finalThumb, 'data_url');
+          const thumbUrl = await getDownloadURL(thumbRef);
+          if (thumbUrl && thumbUrl.startsWith('http')) {
+            finalThumb = thumbUrl;
+          }
+        } catch {
+          // Keep compact inline JPEG thumbnail
+        }
+      }
+      onProgress?.(100);
+      return { videoUrl: videoDownloadUrl, thumbnailUrl: finalThumb, storageSource: 'firebase' };
+    }
+  } catch (err) {
+    console.info('Firebase Storage video upload fallback engaged:', err);
+  }
+
+  // 2. Try Express binary /api/media/upload (persisted with Range streaming & 40-day expiry)
+  if (typeof window !== 'undefined' && typeof fetch === 'function') {
+    try {
+      onProgress?.(55);
+      const res = await fetch('/api/media/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+          'X-Media-Mime': file.type || 'video/mp4',
+          'X-Expires-At': String(expiresAt),
+        },
+        body: file,
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.url) {
+          onProgress?.(100);
+          return { videoUrl: String(data.url), thumbnailUrl: finalThumb, storageSource: 'server' };
+        }
+      }
+    } catch {
+      // Continue to static/serverless fallback
+    }
+  }
+
+  // 3. Static serverless fallback: inline Data URL for small videos (<= 500KB) for cross-device Firestore sync
+  if (file.size <= 500_000) {
+    try {
+      onProgress?.(85);
+      const { fileToDataUrl } = await import('../services/mediaStorage');
+      const dataUrl = await fileToDataUrl(file);
+      if (dataUrl.length <= 720_000) {
+        onProgress?.(100);
+        return { videoUrl: dataUrl, thumbnailUrl: finalThumb, storageSource: 'firestore' };
+      }
+    } catch {
+      // Fallback to IndexedDB Blob
+    }
+  }
+
+  // 4. Large video fallback without Storage/Express: store Blob in IndexedDB cleanly (never overflows localStorage)
+  onProgress?.(90);
+  const { saveVideoBlobLocally } = await import('../services/mediaStorage');
+  const { uri } = await saveVideoBlobLocally(file, expiresAt);
+  onProgress?.(100);
+  return { videoUrl: uri, thumbnailUrl: finalThumb, storageSource: 'idb' };
+}
+
+export function isVideoContentExpired(item: {
+  expiresAt?: number | string;
+  mediaType?: string;
+}): boolean {
+  if (typeof item.expiresAt === 'number' && item.expiresAt > 0) {
+    return Date.now() >= item.expiresAt;
+  }
+  return false;
+}
+
+export async function publishFirestoreReel(reel: Reel): Promise<void> {
+  const createdAtMs = reel.createdAtMs || Date.now();
+  const expiresAt = reel.expiresAt || createdAtMs + VIDEO_EXPIRY_MS;
+  const safeVideoUrl =
+    reel.videoUrl && reel.videoUrl.length <= 740_000 ? reel.videoUrl : `idb://${reel.id}`;
+  const safeThumb =
+    reel.thumbnailUrl && reel.thumbnailUrl.length <= 175_000 ? reel.thumbnailUrl : '';
+
+  const payload: Record<string, any> = {
+    id: reel.id,
+    creatorId: reel.creatorId,
+    creatorName: (reel.creatorName || 'JIT Member').slice(0, 120),
+    creatorAvatar: sanitizeAvatarUrl(reel.creatorAvatar),
+    videoUrl: safeVideoUrl,
+    ...(safeThumb ? { thumbnailUrl: safeThumb } : {}),
+    caption: (reel.caption || 'JIT Campus Reel').slice(0, 1000),
+    musicTitle: (reel.musicTitle || 'JIT Original Sound').slice(0, 120),
+    likesCount: Math.max(0, Number(reel.likesCount || 0)),
+    commentsCount: Math.max(0, Number(reel.commentsCount || 0)),
+    sharesCount: Math.max(0, Number(reel.sharesCount || 0)),
+    viewsCount: Math.max(0, Number(reel.viewsCount || 1)),
+    likedBy: Array.isArray(reel.likedBy) ? reel.likedBy.slice(0, 500) : [],
+    commentsJson: JSON.stringify(reel.comments || []).slice(0, 95000),
+    createdAt: (reel.createdAt || 'Just now').slice(0, 40),
+    createdAtMs,
+    expiresAt,
+    createdAtTs: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'reels', reel.id), payload);
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.CREATE, `reels/${reel.id}`);
+    }
+    console.warn('publishFirestoreReel notice:', err);
+  }
+}
+
+export function subscribeToFirestoreReels(
+  onReels: (reels: Reel[]) => void
+): Unsubscribe {
+  const q = query(collection(db, 'reels'), where('createdAtMs', '>=', 0), limit(80));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const now = Date.now();
+      const active: Reel[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+        if (expiresAt !== undefined && expiresAt <= now) {
+          // Auto-remove expired reel (>40 days old) from Firestore
+          deleteDoc(d.ref).catch(() => {});
+          return;
+        }
+        let comments: any[] = [];
+        try {
+          const parsed = JSON.parse(data.commentsJson || '[]');
+          if (Array.isArray(parsed)) comments = parsed;
+        } catch {
+          comments = [];
+        }
+        active.push({
+          id: String(data.id || d.id),
+          creatorId: String(data.creatorId || ''),
+          creatorName: String(data.creatorName || 'JIT Member'),
+          creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
+          videoUrl: String(data.videoUrl || ''),
+          thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+          caption: String(data.caption || ''),
+          musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
+          likesCount: Number(data.likesCount || 0),
+          commentsCount: Number(data.commentsCount || 0),
+          sharesCount: Number(data.sharesCount || 0),
+          viewsCount: Number(data.viewsCount || 1),
+          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
+          comments,
+          createdAt: String(data.createdAt || 'Just now'),
+          createdAtMs: Number(data.createdAtMs || 0),
+          expiresAt,
+        });
+      });
+      active.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+      onReels(active);
+    },
+    (err) => {
+      console.warn('reels onSnapshot notice:', err);
+    }
+  );
+}
+
+export async function updateFirestoreReelInteraction(
+  reelId: string,
+  patch: {
+    likedBy?: string[];
+    likesCount?: number;
+    commentsJson?: string;
+    commentsCount?: number;
+  }
+): Promise<void> {
+  if (!reelId) return;
+  try {
+    await updateDoc(doc(db, 'reels', reelId), {
+      ...patch,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('updateFirestoreReelInteraction notice:', err);
+  }
+}
+
+export async function publishFirestorePost(post: Post): Promise<void> {
+  const createdAtMs = post.createdAtMs || Date.now();
+  const expiresAt =
+    post.mediaType === 'video' ? post.expiresAt || createdAtMs + VIDEO_EXPIRY_MS : post.expiresAt;
+  const safeMediaUrls = Array.isArray(post.mediaUrls)
+    ? post.mediaUrls.filter((u) => typeof u === 'string' && u.length <= 740_000).slice(0, 4)
+    : undefined;
+  const safeThumb =
+    post.thumbnailUrl && post.thumbnailUrl.length <= 175_000 ? post.thumbnailUrl : undefined;
+
+  const payload: Record<string, any> = {
+    id: post.id,
+    authorId: post.authorId,
+    authorName: (post.authorName || 'JIT Member').slice(0, 120),
+    authorAvatar: sanitizeAvatarUrl(post.authorAvatar),
+    authorHandle: (post.authorHandle || '@jit_member').slice(0, 80),
+    content: (post.content || '').slice(0, 5000),
+    ...(safeMediaUrls && safeMediaUrls.length > 0 ? { mediaUrls: safeMediaUrls } : {}),
+    mediaType: post.mediaType || 'none',
+    ...(safeThumb ? { thumbnailUrl: safeThumb } : {}),
+    category: post.category || 'all',
+    likesCount: Math.max(0, Number(post.likesCount || 0)),
+    commentsCount: Math.max(0, Number(post.commentsCount || 0)),
+    sharesCount: Math.max(0, Number(post.sharesCount || 0)),
+    likedBy: Array.isArray(post.likedBy) ? post.likedBy.slice(0, 500) : [],
+    commentsJson: JSON.stringify(post.comments || []).slice(0, 95000),
+    createdAt: (post.createdAt || 'Just now').slice(0, 40),
+    createdAtMs,
+    ...(typeof expiresAt === 'number' ? { expiresAt } : {}),
+    createdAtTs: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+
+  try {
+    await setDoc(doc(db, 'posts', post.id), payload);
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.CREATE, `posts/${post.id}`);
+    }
+    console.warn('publishFirestorePost notice:', err);
+  }
+}
+
+export function subscribeToFirestorePosts(
+  onPosts: (posts: Post[]) => void
+): Unsubscribe {
+  const q = query(collection(db, 'posts'), where('createdAtMs', '>=', 0), limit(100));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const now = Date.now();
+      const active: Post[] = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        const mediaType = (data.mediaType as Post['mediaType']) || 'none';
+        const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
+        if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) {
+          // Auto-remove expired video post (>40 days old) from Firestore
+          deleteDoc(d.ref).catch(() => {});
+          return;
+        }
+        let comments: any[] = [];
+        try {
+          const parsed = JSON.parse(data.commentsJson || '[]');
+          if (Array.isArray(parsed)) comments = parsed;
+        } catch {
+          comments = [];
+        }
+        active.push({
+          id: String(data.id || d.id),
+          authorId: String(data.authorId || ''),
+          authorName: String(data.authorName || 'JIT Member'),
+          authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
+          authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
+          content: String(data.content || ''),
+          mediaUrls: Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined,
+          mediaType,
+          thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+          category: (data.category as Post['category']) || 'all',
+          likesCount: Number(data.likesCount || 0),
+          commentsCount: Number(data.commentsCount || 0),
+          sharesCount: Number(data.sharesCount || 0),
+          likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
+          comments,
+          createdAt: String(data.createdAt || 'Just now'),
+          createdAtMs: Number(data.createdAtMs || 0),
+          expiresAt,
+        });
+      });
+      active.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+      onPosts(active);
+    },
+    (err) => {
+      console.warn('posts onSnapshot notice:', err);
+    }
+  );
+}
+
+export async function updateFirestorePostInteraction(
+  postId: string,
+  patch: Record<string, any>
+): Promise<void> {
+  if (!postId) return;
+  try {
+    await updateDoc(doc(db, 'posts', postId), {
+      ...patch,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('updateFirestorePostInteraction notice:', err);
+  }
+}
+
+export async function deleteFirestorePost(postId: string): Promise<void> {
+  if (!postId) return;
+  try {
+    await deleteDoc(doc(db, 'posts', postId));
+  } catch (err) {
+    console.warn('deleteFirestorePost notice:', err);
+  }
+}
+
+/**
+ * Sweeps Firestore `reels` and `posts` for any video whose 40-day `expiresAt`
+ * timestamp has passed and deletes them automatically.
+ */
+export async function purgeExpiredCloudVideos(): Promise<number> {
+  const now = Date.now();
+  let deletedCount = 0;
+
+  try {
+    const expiredReelsQ = query(
+      collection(db, 'reels'),
+      where('expiresAt', '>=', 0),
+      where('expiresAt', '<=', now),
+      limit(50)
+    );
+    const reelsSnap = await getDocs(expiredReelsQ);
+    for (const d of reelsSnap.docs) {
+      try {
+        await deleteDoc(d.ref);
+        deletedCount++;
+      } catch {
+        // Ignore if already deleted
+      }
+    }
+  } catch (err) {
+    console.warn('purgeExpiredCloudVideos reels notice:', err);
+  }
+
+  try {
+    const expiredPostsQ = query(
+      collection(db, 'posts'),
+      where('expiresAt', '>=', 0),
+      where('expiresAt', '<=', now),
+      limit(50)
+    );
+    const postsSnap = await getDocs(expiredPostsQ);
+    for (const d of postsSnap.docs) {
+      try {
+        if (d.data()?.mediaType === 'video') {
+          await deleteDoc(d.ref);
+          deletedCount++;
+        }
+      } catch {
+        // Ignore if already deleted
+      }
+    }
+  } catch (err) {
+    console.warn('purgeExpiredCloudVideos posts notice:', err);
+  }
+
+  return deletedCount;
+}
+
 
 

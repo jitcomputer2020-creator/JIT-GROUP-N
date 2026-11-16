@@ -9,7 +9,8 @@ import { useSocial } from '../context/SocialContext';
 import { NavTab, UserProfile } from '../types';
 import { INITIAL_ACHIEVEMENTS, INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
-import { getCloudProfileById, deriveUsername } from '../lib/firebase';
+import { getCloudProfileById, deriveUsername, isVideoContentExpired } from '../lib/firebase';
+import { ResilientVideo } from '../components/common/ResilientVideo';
 import {
   Edit3,
   Calendar,
@@ -51,6 +52,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
     hasPendingOutgoing,
     sendFriendRequest,
     removeFriend,
+    openDirectChat,
   } = useSocial();
 
   const [activeTab, setActiveTab] = useState<'posts' | 'reels' | 'achievements'>('posts');
@@ -114,10 +116,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
     ? localOtherMatch || fetchedOtherUser
     : currentUser;
 
-  // Filter posts and reels belonging to this profile
+  // Filter posts and reels belonging to this profile (excluding expired 40-day videos)
   const profileUserId = targetUser?.id || '';
-  const userPosts = posts.filter((p) => p.authorId === profileUserId);
-  const userReels = reels.filter((r) => r.creatorId === profileUserId);
+  const userPosts = posts.filter((p) => p.authorId === profileUserId && !isVideoContentExpired(p));
+  const userReels = reels.filter((r) => r.creatorId === profileUserId && !isVideoContentExpired(r));
 
   const handleOpenPhotoModal = (mode: 'avatar' | 'cover') => {
     setPhotoModalState({ isOpen: true, mode });
@@ -314,7 +316,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                     </button>
                   ) : (
                     <button
-                      onClick={() => sendFriendRequest(user.id)}
+                      onClick={() => sendFriendRequest(user.id, user)}
                       className="px-4 py-2 min-h-[44px] bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                     >
                       <UserPlus className="w-3.5 h-3.5" />
@@ -323,7 +325,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                   )}
 
                   <button
-                    onClick={() => onNavigate('messages')}
+                    onClick={() => {
+                      openDirectChat({
+                        id: user.id,
+                        fullName: user.fullName,
+                        avatarUrl: user.avatarUrl,
+                      });
+                      onNavigate('messages');
+                    }}
                     className="px-4 py-2 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
@@ -522,7 +531,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                 {post.mediaUrls && post.mediaUrls.length > 0 && (
                   <div className="mt-3 rounded-2xl overflow-hidden bg-black max-h-60 flex items-center justify-center">
                     {post.mediaType === 'video' ? (
-                      <video src={post.mediaUrls[0]} controls className="max-h-60 w-auto object-contain" />
+                      <ResilientVideo
+                        src={post.mediaUrls[0]}
+                        poster={post.thumbnailUrl}
+                        controls
+                        className="max-h-60 w-auto object-contain"
+                      />
                     ) : (
                       <img src={post.mediaUrls[0]} alt="Post media" className="max-h-60 w-auto object-contain" />
                     )}
@@ -555,9 +569,23 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                 onClick={() => onNavigate('reels')}
                 className="relative aspect-[9/16] rounded-2xl overflow-hidden bg-black cursor-pointer group"
               >
-                <video src={reel.videoUrl} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-                <div className="absolute bottom-2 left-2 right-2 text-white">
+                {reel.thumbnailUrl ? (
+                  <img
+                    src={reel.thumbnailUrl}
+                    alt={reel.caption}
+                    className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
+                  />
+                ) : (
+                  <ResilientVideo
+                    src={reel.videoUrl}
+                    controls={false}
+                    muted
+                    playsInline
+                    className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
+                  />
+                )}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent pointer-events-none" />
+                <div className="absolute bottom-2 left-2 right-2 text-white pointer-events-none">
                   <p className="text-xs font-semibold line-clamp-1">{reel.caption}</p>
                   <p className="text-[10px] text-slate-300 font-mono">{reel.viewsCount} views</p>
                 </div>

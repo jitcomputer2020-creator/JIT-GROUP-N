@@ -1,23 +1,74 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
+ *
  * JIT GROUP - Centralized Social Context
- * Coordinates posts, stories, reels, comments, likes, friendships, and user profile viewing
- * with full local persistence across page refreshes.
+ * Coordinates posts, stories, reels, comments, likes, friendships, notifications,
+ * DM partner routing, and 40-day video expiration with Firebase Firestore real-time sync.
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { Post, Story, Reel, Comment, UserProfile, GlobalAnnouncement } from '../types';
-import { INITIAL_POSTS, INITIAL_STORIES, INITIAL_REELS, INITIAL_FRIENDS, INITIAL_USER } from '../services/mockData';
+import {
+  Post,
+  Story,
+  Reel,
+  Comment,
+  UserProfile,
+  GlobalAnnouncement,
+  InAppNotification,
+  FriendRequest,
+} from '../types';
+import {
+  INITIAL_POSTS,
+  INITIAL_STORIES,
+  INITIAL_REELS,
+  INITIAL_FRIENDS,
+  INITIAL_USER,
+  INITIAL_NOTIFICATIONS,
+} from '../services/mockData';
 import { useAuth } from './AuthContext';
 import { APP_CONFIG } from '../constants/branding';
+import { purgeExpiredLocalMedia } from '../services/mediaStorage';
+import {
+  VIDEO_EXPIRY_MS,
+  deriveUsername,
+  isVideoContentExpired,
+  sendFirestoreFriendRequest,
+  respondToFirestoreFriendRequest,
+  removeFirestoreFriendship,
+  subscribeToFirestoreFriendRequests,
+  subscribeToFirestoreNotifications,
+  markFirestoreNotificationRead,
+  markAllFirestoreNotificationsRead,
+  publishFirestoreReel,
+  subscribeToFirestoreReels,
+  updateFirestoreReelInteraction,
+  publishFirestorePost,
+  subscribeToFirestorePosts,
+  updateFirestorePostInteraction,
+  deleteFirestorePost,
+  purgeExpiredCloudVideos,
+} from '../lib/firebase';
+
+export interface ActiveChatPartner {
+  id: string;
+  fullName?: string;
+  avatarUrl?: string;
+}
 
 interface SocialContextType {
   posts: Post[];
   stories: Story[];
   reels: Reel[];
   announcements: GlobalAnnouncement[];
+  notifications: InAppNotification[];
+  unreadNotificationCount: number;
+  friendRequestPeers: UserProfile[];
+  activeChatPartner: ActiveChatPartner | null;
+  openDirectChat: (partner: ActiveChatPartner) => void;
+  clearActiveChatPartner: () => void;
+  markNotificationRead: (notificationId: string) => void;
+  markAllNotificationsRead: () => void;
   refreshAnnouncements: () => Promise<void>;
   savedPostIds: string[];
   friendIds: string[];
@@ -29,6 +80,9 @@ interface SocialContextType {
     content: string;
     mediaUrls?: string[];
     mediaType?: 'image' | 'video' | 'none';
+    thumbnailUrl?: string;
+    createdAtMs?: number;
+    expiresAt?: number;
     category?: 'all' | 'friends' | 'following' | 'popular';
   }) => void;
   editPost: (
@@ -44,10 +98,17 @@ interface SocialContextType {
   toggleSavePost: (postId: string) => void;
   addStory: (params: { mediaUrl: string; mediaType: 'image' | 'video'; caption?: string }) => void;
   deleteStory: (storyId: string) => void;
-  addReel: (params: { videoUrl: string; caption: string; musicTitle?: string }) => void;
+  addReel: (params: {
+    videoUrl: string;
+    thumbnailUrl?: string;
+    caption: string;
+    musicTitle?: string;
+    createdAtMs?: number;
+    expiresAt?: number;
+  }) => void;
   toggleLikeReel: (reelId: string) => void;
   addReelComment: (reelId: string, content: string) => void;
-  sendFriendRequest: (userId: string) => void;
+  sendFriendRequest: (userId: string, targetProfile?: Partial<UserProfile>) => void;
   acceptFriendRequest: (userId: string) => void;
   rejectFriendRequest: (userId: string) => void;
   removeFriend: (userId: string) => void;
@@ -65,6 +126,38 @@ const LS_SAVED_POSTS = 'jit_saved_posts_v2';
 const LS_FRIENDS = 'jit_friends_store_v2';
 const LS_PENDING_OUT = 'jit_pending_outgoing_v2';
 const LS_PENDING_IN = 'jit_pending_incoming_v2';
+const LS_REMOVED_DEMO_FRIENDS = 'jit_removed_demo_friends_v1';
+
+function safeSetLocalStorage(key: string, value: unknown): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized.length > 2_500_000) return;
+    localStorage.setItem(key, serialized);
+  } catch {
+    // Prevent QuotaExceededError from crashing React during large video uploads
+  }
+}
+
+function sanitizePostsForCache(list: Post[]): Post[] {
+  return list
+    .filter((p) => !isVideoContentExpired(p))
+    .slice(0, 60)
+    .map((p) => ({
+      ...p,
+      mediaUrls: p.mediaUrls?.map((u) => (u.startsWith('data:video/') && u.length > 250_000 ? `idb://${p.id}` : u)),
+    }));
+}
+
+function sanitizeReelsForCache(list: Reel[]): Reel[] {
+  return list
+    .filter((r) => !isVideoContentExpired(r))
+    .slice(0, 50)
+    .map((r) => ({
+      ...r,
+      videoUrl: r.videoUrl.startsWith('data:video/') && r.videoUrl.length > 250_000 ? `idb://${r.id}` : r.videoUrl,
+    }));
+}
 
 const SEED_COMMENTS: Record<string, Comment[]> = {
   post_001: [
@@ -116,30 +209,56 @@ const SEED_COMMENTS: Record<string, Comment[]> = {
   ],
 };
 
+const SEED_POSTS: Post[] = INITIAL_POSTS.map((p) => ({
+  ...p,
+  likedBy: p.isLiked ? ['usr_jit_primary_001', 'usr_jit_002', 'usr_jit_003'] : ['usr_jit_002', 'usr_jit_004'],
+  comments: SEED_COMMENTS[p.id] || [],
+}));
+
+const SEED_REELS: Reel[] = INITIAL_REELS.map((r) => ({
+  ...r,
+  likedBy: r.isLiked ? ['usr_jit_primary_001', 'usr_jit_003'] : ['usr_jit_002'],
+  comments: [
+    {
+      id: `rc_${r.id}_1`,
+      postId: r.id,
+      authorId: 'usr_jit_004',
+      authorName: 'Ananya Sen',
+      authorAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
+      content: 'Awesome gameplay highlight! 🔥',
+      createdAt: '1h ago',
+      likesCount: 4,
+    },
+  ],
+}));
+
 export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { currentUser, registeredProfiles } = useAuth();
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
   const [announcements, setAnnouncements] = useState<GlobalAnnouncement[]>([]);
+  const [activeChatPartner, setActiveChatPartner] = useState<ActiveChatPartner | null>(null);
+  const [cloudNotifications, setCloudNotifications] = useState<InAppNotification[]>([]);
+  const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const postsHydratedRef = useRef(false);
 
-  // 1. Posts state
+  const isPrimaryDemoUser = currentUser?.id === 'usr_jit_primary_001';
+
+  // 1. Posts state (filtered by 40-day expiry)
   const [posts, setPosts] = useState<Post[]>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(LS_POSTS);
       if (saved) {
         try {
-          return JSON.parse(saved);
+          const parsed = JSON.parse(saved) as Post[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return parsed.filter((p) => !isVideoContentExpired(p));
+          }
         } catch (e) {
           console.error('Failed to parse cached posts', e);
         }
       }
     }
-    // Enrich INITIAL_POSTS with default likedBy and comments
-    return INITIAL_POSTS.map((p) => ({
-      ...p,
-      likedBy: p.isLiked ? ['usr_jit_primary_001', 'usr_jit_002', 'usr_jit_003'] : ['usr_jit_002', 'usr_jit_004'],
-      comments: SEED_COMMENTS[p.id] || [],
-    }));
+    return SEED_POSTS;
   });
 
   // 2. Stories state
@@ -157,34 +276,22 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return INITIAL_STORIES;
   });
 
-  // 3. Reels state
+  // 3. Reels state (filtered by 40-day expiry)
   const [reels, setReels] = useState<Reel[]>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(LS_REELS);
       if (saved) {
         try {
-          return JSON.parse(saved);
+          const parsed = JSON.parse(saved) as Reel[];
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return parsed.filter((r) => !isVideoContentExpired(r));
+          }
         } catch (e) {
           console.error('Failed to parse cached reels', e);
         }
       }
     }
-    return INITIAL_REELS.map((r) => ({
-      ...r,
-      likedBy: r.isLiked ? ['usr_jit_primary_001', 'usr_jit_003'] : ['usr_jit_002'],
-      comments: [
-        {
-          id: `rc_${r.id}_1`,
-          postId: r.id,
-          authorId: 'usr_jit_004',
-          authorName: 'Ananya Sen',
-          authorAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
-          content: 'Awesome gameplay highlight! 🔥',
-          createdAt: '1h ago',
-          likesCount: 4,
-        },
-      ],
-    }));
+    return SEED_REELS;
   });
 
   // 4. Saved posts
@@ -202,61 +309,209 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return ['post_001'];
   });
 
-  // 5. Friendships state
-  const [friendIds, setFriendIds] = useState<string[]>(() => {
+  // 5. Friendships state (Cloud-first + demo user support)
+  const [demoRemovedIds, setDemoRemovedIds] = useState<string[]>(() => {
     if (typeof window !== 'undefined') {
+      try {
+        const raw = localStorage.getItem(LS_REMOVED_DEMO_FRIENDS);
+        if (raw) return JSON.parse(raw);
+      } catch {
+        // ignore
+      }
+    }
+    return [];
+  });
+
+  const [friendIds, setFriendIds] = useState<string[]>(() => {
+    if (typeof window !== 'undefined' && isPrimaryDemoUser) {
       const saved = localStorage.getItem(LS_FRIENDS);
       if (saved) {
         try {
           return JSON.parse(saved);
-        } catch (e) {
-          console.error('Failed to parse friends', e);
+        } catch {
+          // ignore
         }
       }
     }
-    return ['usr_jit_002', 'usr_jit_003'];
+    return isPrimaryDemoUser ? ['usr_jit_002', 'usr_jit_003'] : [];
   });
 
   const [pendingIncomingRequestIds, setPendingIncomingRequestIds] = useState<string[]>(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && isPrimaryDemoUser) {
       const saved = localStorage.getItem(LS_PENDING_IN);
       if (saved) {
         try {
           return JSON.parse(saved);
-        } catch (e) {
-          console.error('Failed to parse pending incoming', e);
+        } catch {
+          // ignore
         }
       }
     }
-    return ['usr_jit_004'];
+    return isPrimaryDemoUser ? ['usr_jit_004'] : [];
   });
 
   const [pendingOutgoingRequestIds, setPendingOutgoingRequestIds] = useState<string[]>(() => {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && isPrimaryDemoUser) {
       const saved = localStorage.getItem(LS_PENDING_OUT);
       if (saved) {
         try {
           return JSON.parse(saved);
-        } catch (e) {
-          console.error('Failed to parse pending outgoing', e);
+        } catch {
+          // ignore
         }
       }
     }
     return [];
   });
 
-  // Sync to local storage
+  // Reset per-user friend lists cleanly when switching accounts
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(LS_POSTS, JSON.stringify(posts));
-      localStorage.setItem(LS_STORIES, JSON.stringify(stories));
-      localStorage.setItem(LS_REELS, JSON.stringify(reels));
-      localStorage.setItem(LS_SAVED_POSTS, JSON.stringify(savedPostIds));
-      localStorage.setItem(LS_FRIENDS, JSON.stringify(friendIds));
-      localStorage.setItem(LS_PENDING_IN, JSON.stringify(pendingIncomingRequestIds));
-      localStorage.setItem(LS_PENDING_OUT, JSON.stringify(pendingOutgoingRequestIds));
+    if (!currentUser) {
+      setFriendIds([]);
+      setPendingIncomingRequestIds([]);
+      setPendingOutgoingRequestIds([]);
+      setCloudNotifications([]);
+      setFriendRequests([]);
+      return;
     }
-  }, [posts, stories, reels, savedPostIds, friendIds, pendingIncomingRequestIds, pendingOutgoingRequestIds]);
+    if (currentUser.id === 'usr_jit_primary_001') {
+      const blocked = new Set(demoRemovedIds);
+      setFriendIds((prev) =>
+        Array.from(new Set([...prev, ...['usr_jit_002', 'usr_jit_003'].filter((id) => !blocked.has(id))]))
+      );
+      setPendingIncomingRequestIds((prev) =>
+        Array.from(new Set([...prev, ...['usr_jit_004'].filter((id) => !blocked.has(id))]))
+      );
+    } else {
+      setFriendIds([]);
+      setPendingIncomingRequestIds([]);
+      setPendingOutgoingRequestIds([]);
+    }
+  }, [currentUser?.id]);
+
+  // Real-time Firestore Friend Requests & Notifications subscriptions
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    const uid = currentUser.id;
+    const isDemo = uid === 'usr_jit_primary_001';
+    const blockedDemo = new Set(demoRemovedIds);
+
+    const unsubReqs = subscribeToFirestoreFriendRequests(uid, (state) => {
+      setFriendRequests(state.requests);
+      if (isDemo) {
+        const defaultFriends = ['usr_jit_002', 'usr_jit_003'].filter(
+          (id) => !blockedDemo.has(id) && !state.incomingPendingIds.includes(id)
+        );
+        const defaultIn = ['usr_jit_004'].filter(
+          (id) => !blockedDemo.has(id) && !state.acceptedFriendIds.includes(id)
+        );
+        setFriendIds(Array.from(new Set([...state.acceptedFriendIds, ...defaultFriends])));
+        setPendingIncomingRequestIds(Array.from(new Set([...state.incomingPendingIds, ...defaultIn])));
+        setPendingOutgoingRequestIds(state.outgoingPendingIds);
+      } else {
+        setFriendIds(state.acceptedFriendIds);
+        setPendingIncomingRequestIds(state.incomingPendingIds);
+        setPendingOutgoingRequestIds(state.outgoingPendingIds);
+      }
+    });
+
+    const unsubNotifs = subscribeToFirestoreNotifications(uid, (items) => {
+      setCloudNotifications(items);
+    });
+
+    return () => {
+      unsubReqs();
+      unsubNotifs();
+    };
+  }, [currentUser?.id, demoRemovedIds]);
+
+  // Real-time Firestore Reels & Posts subscriptions (plus 40-day expiry filtering)
+  useEffect(() => {
+    const unsubReels = subscribeToFirestoreReels((cloudReels) => {
+      setReels((prev) => {
+        const byId = new Map<string, Reel>();
+        for (const r of cloudReels) {
+          if (!isVideoContentExpired(r)) {
+            const isLiked = currentUser?.id ? (r.likedBy || []).includes(currentUser.id) : false;
+            byId.set(r.id, { ...r, isLiked });
+          }
+        }
+        for (const localR of prev) {
+          if (!byId.has(localR.id) && !isVideoContentExpired(localR)) {
+            byId.set(localR.id, localR);
+          }
+        }
+        for (const seedR of SEED_REELS) {
+          if (!byId.has(seedR.id)) {
+            byId.set(seedR.id, seedR);
+          }
+        }
+        return Array.from(byId.values()).sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+      });
+    });
+
+    const unsubPosts = subscribeToFirestorePosts((cloudPosts) => {
+      setPosts((prev) => {
+        const byId = new Map<string, Post>();
+        for (const p of cloudPosts) {
+          if (!isVideoContentExpired(p)) {
+            const isLiked = currentUser?.id ? (p.likedBy || []).includes(currentUser.id) : false;
+            const isSaved = savedPostIds.includes(p.id);
+            byId.set(p.id, { ...p, isLiked, isSaved });
+          }
+        }
+        for (const lp of prev) {
+          if (!byId.has(lp.id) && !isVideoContentExpired(lp)) {
+            byId.set(lp.id, lp);
+          }
+        }
+        return Array.from(byId.values()).sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+      });
+    });
+
+    return () => {
+      unsubReels();
+      unsubPosts();
+    };
+  }, [currentUser?.id]);
+
+  // Background 40-day video auto-expiry cleanup (Firestore + IndexedDB + in-memory UI state)
+  useEffect(() => {
+    const runExpirySweep = () => {
+      setReels((prev) => prev.filter((r) => !isVideoContentExpired(r)));
+      setPosts((prev) => prev.filter((p) => !isVideoContentExpired(p)));
+      purgeExpiredLocalMedia().catch(() => {});
+      purgeExpiredCloudVideos().catch(() => {});
+    };
+
+    runExpirySweep();
+    const timer = window.setInterval(runExpirySweep, 5 * 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Safe LocalStorage caching (never crashes on large videos)
+  useEffect(() => {
+    safeSetLocalStorage(LS_POSTS, sanitizePostsForCache(posts));
+    safeSetLocalStorage(LS_STORIES, stories.slice(0, 30));
+    safeSetLocalStorage(LS_REELS, sanitizeReelsForCache(reels));
+    safeSetLocalStorage(LS_SAVED_POSTS, savedPostIds);
+    safeSetLocalStorage(LS_REMOVED_DEMO_FRIENDS, demoRemovedIds);
+    if (isPrimaryDemoUser) {
+      safeSetLocalStorage(LS_FRIENDS, friendIds);
+      safeSetLocalStorage(LS_PENDING_IN, pendingIncomingRequestIds);
+      safeSetLocalStorage(LS_PENDING_OUT, pendingOutgoingRequestIds);
+    }
+  }, [
+    posts,
+    stories,
+    reels,
+    savedPostIds,
+    friendIds,
+    pendingIncomingRequestIds,
+    pendingOutgoingRequestIds,
+    demoRemovedIds,
+    isPrimaryDemoUser,
+  ]);
 
   const refreshAnnouncements = useCallback(async () => {
     try {
@@ -277,9 +532,8 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             const existingMap = new Map(prev.map((p) => [p.id, p]));
             const merged: Post[] = [];
             const seen = new Set<string>();
-            // Prefer official admin broadcasts & newly added server posts first
             for (const sp of postsData.posts as Post[]) {
-              if (!seen.has(sp.id)) {
+              if (!seen.has(sp.id) && !isVideoContentExpired(sp)) {
                 seen.add(sp.id);
                 const localMatch = existingMap.get(sp.id);
                 merged.push(
@@ -290,7 +544,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               }
             }
             for (const lp of prev) {
-              if (!seen.has(lp.id) && !lp.id.startsWith('post_ann_')) {
+              if (!seen.has(lp.id) && !lp.id.startsWith('post_ann_') && !isVideoContentExpired(lp)) {
                 seen.add(lp.id);
                 merged.push(lp);
               }
@@ -319,7 +573,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       fetch('/api/posts/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ posts }),
+        body: JSON.stringify({ posts: sanitizePostsForCache(posts) }),
       }).catch(() => {});
     }, 500);
     return () => clearTimeout(timeout);
@@ -379,29 +633,126 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     }
   }, [currentUser?.id, currentUser?.avatarUrl, currentUser?.fullName]);
 
+  // Synthesize peer UserProfile entries from Firestore FriendRequest documents
+  // so brand-new senders are always visible in FriendsView even before directory refresh
+  const friendRequestPeers: UserProfile[] = React.useMemo(() => {
+    if (!currentUser?.id) return [];
+    const map = new Map<string, UserProfile>();
+    for (const req of friendRequests) {
+      const isIncoming = req.toUserId === currentUser.id;
+      const peerId = isIncoming ? req.fromUserId : req.toUserId;
+      const peerName = isIncoming ? req.fromUserName : req.toUserName;
+      const peerAvatar = isIncoming ? req.fromUserAvatar : req.toUserAvatar;
+      if (!peerId || peerId === currentUser.id || map.has(peerId)) continue;
+      map.set(peerId, {
+        id: peerId,
+        contactNumber: 'Private',
+        fullName: peerName || 'JIT Member',
+        username: deriveUsername(peerName || 'JIT Member'),
+        address: 'JIT Campus',
+        bio: 'JIT Campus Member',
+        avatarUrl: peerAvatar || APP_CONFIG.logoUrl,
+        joinedAt: req.createdAtIso || new Date().toISOString(),
+        lastLoginAt: new Date().toISOString(),
+        stats: {
+          friendsCount: 1,
+          followersCount: 1,
+          followingCount: 1,
+          postsCount: 0,
+          reelsCount: 0,
+          gamesPlayed: 0,
+          gamesWon: 0,
+          rewardPoints: 100,
+          streakDays: 1,
+        },
+      });
+    }
+    return Array.from(map.values());
+  }, [friendRequests, currentUser?.id]);
+
+  // Combine cloud notifications with initial demo notifications for the demo user
+  const notifications: InAppNotification[] = React.useMemo(() => {
+    if (!currentUser?.id) return [];
+    const seen = new Set<string>();
+    const combined: InAppNotification[] = [];
+    for (const n of cloudNotifications) {
+      if (!seen.has(n.id)) {
+        seen.add(n.id);
+        combined.push(n);
+      }
+    }
+    if (isPrimaryDemoUser) {
+      for (const n of INITIAL_NOTIFICATIONS) {
+        if (!seen.has(n.id)) {
+          seen.add(n.id);
+          combined.push(n);
+        }
+      }
+    }
+    return combined;
+  }, [cloudNotifications, currentUser?.id, isPrimaryDemoUser]);
+
+  const unreadNotificationCount =
+    notifications.filter((n) => !n.isRead).length + pendingIncomingRequestIds.length;
+
+  const markNotificationRead = useCallback((notificationId: string) => {
+    setCloudNotifications((prev) =>
+      prev.map((n) => (n.id === notificationId ? { ...n, isRead: true } : n))
+    );
+    markFirestoreNotificationRead(notificationId).catch(() => {});
+  }, []);
+
+  const markAllNotificationsRead = useCallback(() => {
+    const unreadIds = cloudNotifications.filter((n) => !n.isRead).map((n) => n.id);
+    setCloudNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
+    if (unreadIds.length > 0) {
+      markAllFirestoreNotificationsRead(unreadIds).catch(() => {});
+    }
+  }, [cloudNotifications]);
+
+  const openDirectChat = useCallback((partner: ActiveChatPartner) => {
+    setActiveChatPartner(partner);
+  }, []);
+
+  const clearActiveChatPartner = useCallback(() => {
+    setActiveChatPartner(null);
+  }, []);
+
   // Helpers
   const createPost = ({
     content,
     mediaUrls = [],
     mediaType = 'none',
+    thumbnailUrl,
+    createdAtMs,
+    expiresAt,
     category = 'all',
   }: {
     content: string;
     mediaUrls?: string[];
     mediaType?: 'image' | 'video' | 'none';
+    thumbnailUrl?: string;
+    createdAtMs?: number;
+    expiresAt?: number;
     category?: 'all' | 'friends' | 'following' | 'popular';
   }) => {
     if (!currentUser) return;
+    const nowMs = createdAtMs || Date.now();
+    const resolvedExpiresAt =
+      mediaType === 'video' ? expiresAt || nowMs + VIDEO_EXPIRY_MS : expiresAt;
     const newPost: Post = {
-      id: `post_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `post_${nowMs}_${Math.random().toString(36).substring(2, 6)}`,
       authorId: currentUser.id,
       authorName: currentUser.fullName,
       authorAvatar: currentUser.avatarUrl || APP_CONFIG.logoUrl,
-      authorHandle: `@${currentUser.fullName.toLowerCase().replace(/\s+/g, '_')}`,
+      authorHandle: `@${currentUser.username || deriveUsername(currentUser.fullName)}`,
       content: content.trim(),
       mediaUrls,
       mediaType,
+      ...(thumbnailUrl ? { thumbnailUrl } : {}),
       createdAt: 'Just now',
+      createdAtMs: nowMs,
+      ...(typeof resolvedExpiresAt === 'number' ? { expiresAt: resolvedExpiresAt } : {}),
       likesCount: 0,
       commentsCount: 0,
       sharesCount: 0,
@@ -413,6 +764,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
 
     setPosts((prev) => [newPost, ...prev]);
+    publishFirestorePost(newPost).catch(() => {});
   };
 
   const editPost = (
@@ -434,10 +786,16 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         return p;
       })
     );
+    updateFirestorePostInteraction(postId, {
+      content,
+      ...(mediaUrls !== undefined ? { mediaUrls } : {}),
+      ...(mediaType !== undefined ? { mediaType } : {}),
+    }).catch(() => {});
   };
 
   const deletePost = (postId: string) => {
     setPosts((prev) => prev.filter((p) => p.id !== postId));
+    deleteFirestorePost(postId).catch(() => {});
   };
 
   const toggleLikePost = (postId: string) => {
@@ -452,12 +810,18 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           const newLikedBy = alreadyLiked
             ? currentLikedBy.filter((id) => id !== uid)
             : [...currentLikedBy, uid];
+          const nextCount = Math.max(0, alreadyLiked ? p.likesCount - 1 : p.likesCount + 1);
+
+          updateFirestorePostInteraction(postId, {
+            likedBy: newLikedBy,
+            likesCount: nextCount,
+          }).catch(() => {});
 
           return {
             ...p,
             isLiked: !alreadyLiked,
             likedBy: newLikedBy,
-            likesCount: Math.max(0, alreadyLiked ? p.likesCount - 1 : p.likesCount + 1),
+            likesCount: nextCount,
           };
         }
         return p;
@@ -469,9 +833,8 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const post = posts.find((p) => p.id === postId);
     if (!post) return [];
     const likerIds = post.likedBy || [];
-    const allKnown = [INITIAL_USER, ...INITIAL_FRIENDS, ...(registeredProfiles || [])];
+    const allKnown = [INITIAL_USER, ...INITIAL_FRIENDS, ...(registeredProfiles || []), ...friendRequestPeers];
 
-    // Deduplicate by id
     const matched: UserProfile[] = [];
     const seen = new Set<string>();
 
@@ -531,7 +894,6 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           let updatedComments: Comment[];
 
           if (parentCommentId) {
-            // Append as nested reply
             updatedComments = existingComments.map((c) => {
               if (c.id === parentCommentId) {
                 return {
@@ -542,14 +904,19 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
               return c;
             });
           } else {
-            // Append as top-level comment
             updatedComments = [...existingComments, newComment];
           }
+
+          const nextCount = p.commentsCount + 1;
+          updateFirestorePostInteraction(postId, {
+            commentsJson: JSON.stringify(updatedComments).slice(0, 95000),
+            commentsCount: nextCount,
+          }).catch(() => {});
 
           return {
             ...p,
             comments: updatedComments,
-            commentsCount: p.commentsCount + 1,
+            commentsCount: nextCount,
           };
         }
         return p;
@@ -601,20 +968,29 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const addReel = ({
     videoUrl,
+    thumbnailUrl,
     caption,
     musicTitle,
+    createdAtMs,
+    expiresAt,
   }: {
     videoUrl: string;
+    thumbnailUrl?: string;
     caption: string;
     musicTitle?: string;
+    createdAtMs?: number;
+    expiresAt?: number;
   }) => {
     if (!currentUser) return;
+    const nowMs = createdAtMs || Date.now();
+    const resolvedExpiresAt = expiresAt || nowMs + VIDEO_EXPIRY_MS;
     const newReel: Reel = {
-      id: `reel_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `reel_${nowMs}_${Math.random().toString(36).substring(2, 6)}`,
       creatorId: currentUser.id,
       creatorName: currentUser.fullName,
       creatorAvatar: currentUser.avatarUrl || APP_CONFIG.logoUrl,
       videoUrl,
+      ...(thumbnailUrl ? { thumbnailUrl } : {}),
       caption: caption.trim(),
       musicTitle: musicTitle || 'JIT Campus Vibes',
       likesCount: 0,
@@ -625,9 +1001,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       likedBy: [],
       comments: [],
       createdAt: 'Just now',
+      createdAtMs: nowMs,
+      expiresAt: resolvedExpiresAt,
     };
 
     setReels((prev) => [newReel, ...prev]);
+    publishFirestoreReel(newReel).catch(() => {});
   };
 
   const toggleLikeReel = (reelId: string) => {
@@ -642,12 +1021,18 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           const newLikedBy = alreadyLiked
             ? currentLikedBy.filter((id) => id !== uid)
             : [...currentLikedBy, uid];
+          const nextCount = Math.max(0, alreadyLiked ? r.likesCount - 1 : r.likesCount + 1);
+
+          updateFirestoreReelInteraction(reelId, {
+            likedBy: newLikedBy,
+            likesCount: nextCount,
+          }).catch(() => {});
 
           return {
             ...r,
             isLiked: !alreadyLiked,
             likedBy: newLikedBy,
-            likesCount: Math.max(0, alreadyLiked ? r.likesCount - 1 : r.likesCount + 1),
+            likesCount: nextCount,
           };
         }
         return r;
@@ -672,10 +1057,16 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     setReels((prev) =>
       prev.map((r) => {
         if (r.id === reelId) {
+          const updatedComments = [...(r.comments || []), newComment];
+          const nextCount = r.commentsCount + 1;
+          updateFirestoreReelInteraction(reelId, {
+            commentsJson: JSON.stringify(updatedComments).slice(0, 95000),
+            commentsCount: nextCount,
+          }).catch(() => {});
           return {
             ...r,
-            comments: [...(r.comments || []), newComment],
-            commentsCount: r.commentsCount + 1,
+            comments: updatedComments,
+            commentsCount: nextCount,
           };
         }
         return r;
@@ -683,23 +1074,51 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     );
   };
 
-  // Friendship management
-  const sendFriendRequest = (userId: string) => {
+  // Friendship management (real-time Firestore + optimistic local UI)
+  const sendFriendRequest = (userId: string, targetProfile?: Partial<UserProfile>) => {
+    if (!currentUser || !userId || userId === currentUser.id) return;
     if (friendIds.includes(userId) || pendingOutgoingRequestIds.includes(userId)) return;
-    setPendingOutgoingRequestIds((prev) => [...prev, userId]);
+    setPendingOutgoingRequestIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+
+    const knownPeer =
+      targetProfile ||
+      [...registeredProfiles, INITIAL_USER, ...INITIAL_FRIENDS, ...friendRequestPeers].find(
+        (u) => u.id === userId
+      );
+
+    sendFirestoreFriendRequest(currentUser, {
+      id: userId,
+      fullName: knownPeer?.fullName,
+      avatarUrl: knownPeer?.avatarUrl,
+    }).catch((err) => {
+      console.warn('Friend request cloud sync notice:', err);
+    });
   };
 
   const acceptFriendRequest = (userId: string) => {
+    if (!currentUser) return;
     setPendingIncomingRequestIds((prev) => prev.filter((id) => id !== userId));
     setFriendIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    setDemoRemovedIds((prev) => prev.filter((id) => id !== userId));
+    respondToFirestoreFriendRequest(userId, currentUser, 'accepted').catch(() => {});
   };
 
   const rejectFriendRequest = (userId: string) => {
+    if (!currentUser) return;
     setPendingIncomingRequestIds((prev) => prev.filter((id) => id !== userId));
+    if (isPrimaryDemoUser) {
+      setDemoRemovedIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    }
+    respondToFirestoreFriendRequest(userId, currentUser, 'declined').catch(() => {});
   };
 
   const removeFriend = (userId: string) => {
+    if (!currentUser) return;
     setFriendIds((prev) => prev.filter((id) => id !== userId));
+    if (isPrimaryDemoUser) {
+      setDemoRemovedIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    }
+    removeFirestoreFriendship(currentUser.id, userId).catch(() => {});
   };
 
   const isFriend = (userId: string) => friendIds.includes(userId);
@@ -713,6 +1132,14 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         stories,
         reels,
         announcements,
+        notifications,
+        unreadNotificationCount,
+        friendRequestPeers,
+        activeChatPartner,
+        openDirectChat,
+        clearActiveChatPartner,
+        markNotificationRead,
+        markAllNotificationsRead,
         refreshAnnouncements,
         savedPostIds,
         friendIds,

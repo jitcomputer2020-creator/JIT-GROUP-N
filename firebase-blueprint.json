@@ -443,6 +443,143 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "fromId", "toId", "signalType", "createdAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Real-time peer-to-peer friend request document.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fromUserId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fromUserName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "fromUserAvatar": { "type": "string", "maxLength": 400000 },
+        "toUserId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "toUserName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "toUserAvatar": { "type": "string", "maxLength": 400000 },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fromUserId", "fromUserName", "toUserId", "toUserName", "status", "createdAt", "updatedAt"]
+    },
+    "UserNotification": {
+      "title": "UserNotification",
+      "description": "Real-time notification entry delivered to a recipient user.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "fromUserId": { "type": "string", "maxLength": 64 },
+        "fromUserName": { "type": "string", "maxLength": 120 },
+        "fromUserAvatar": { "type": "string", "maxLength": 400000 },
+        "type": {
+          "type": "string",
+          "enum": ["friend_request", "friend_accept", "like", "comment", "message", "call", "game_invite", "tournament", "reward", "achievement"]
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 400 },
+        "isRead": { "type": "boolean" },
+        "createdAtIso": { "type": "string", "maxLength": 40 },
+        "createdAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "type", "title", "message", "isRead", "createdAtIso", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "DirectConversation": {
+      "title": "DirectConversation",
+      "description": "Direct message or group conversation metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["direct", "group"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "avatarUrl": { "type": "string", "maxLength": 400000 },
+        "participantIds": { "type": "array", "description": "Participant profile IDs." },
+        "participantsJson": { "type": "string", "maxLength": 30000 },
+        "lastMessageText": { "type": "string", "maxLength": 500 },
+        "lastMessageSenderId": { "type": "string", "maxLength": 64 },
+        "lastMessageAt": { "type": "string", "maxLength": 40 },
+        "updatedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "type", "name", "participantIds", "participantsJson", "lastMessageText", "lastMessageSenderId", "lastMessageAt", "updatedAtMs", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Message inside a direct or group conversation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "minLength": 8, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "senderAvatar": { "type": "string", "maxLength": 400000 },
+        "content": { "type": "string", "maxLength": 4000 },
+        "mediaUrl": { "type": "string", "maxLength": 400000 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "file"] },
+        "status": { "type": "string", "enum": ["sent", "delivered", "read"] },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "createdAtMs": { "type": "integer" },
+        "createdAtTs": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId", "senderId", "senderName", "content", "status", "createdAt", "createdAtMs", "createdAtTs"]
+    },
+    "ReelItem": {
+      "title": "ReelItem",
+      "description": "Short video reel with generated thumbnail and 40-day auto-expiry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "creatorId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "creatorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "creatorAvatar": { "type": "string", "maxLength": 400000 },
+        "videoUrl": { "type": "string", "maxLength": 750000 },
+        "thumbnailUrl": { "type": "string", "maxLength": 180000 },
+        "caption": { "type": "string", "maxLength": 1000 },
+        "musicTitle": { "type": "string", "maxLength": 120 },
+        "likesCount": { "type": "integer" },
+        "commentsCount": { "type": "integer" },
+        "sharesCount": { "type": "integer" },
+        "viewsCount": { "type": "integer" },
+        "likedBy": { "type": "array" },
+        "commentsJson": { "type": "string", "maxLength": 100000 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "createdAtMs": { "type": "integer" },
+        "expiresAt": { "type": "integer" },
+        "createdAtTs": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "creatorId", "creatorName", "videoUrl", "caption", "likesCount", "commentsCount", "sharesCount", "viewsCount", "likedBy", "createdAt", "createdAtMs", "expiresAt", "createdAtTs", "updatedAt"]
+    },
+    "FeedPost": {
+      "title": "FeedPost",
+      "description": "Social feed post with optional video thumbnail and 40-day expiry for videos.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "authorName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "authorAvatar": { "type": "string", "maxLength": 400000 },
+        "authorHandle": { "type": "string", "maxLength": 80 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "mediaUrls": { "type": "array" },
+        "mediaType": { "type": "string", "enum": ["image", "video", "none"] },
+        "thumbnailUrl": { "type": "string", "maxLength": 180000 },
+        "category": { "type": "string", "enum": ["all", "friends", "following", "popular"] },
+        "likesCount": { "type": "integer" },
+        "commentsCount": { "type": "integer" },
+        "sharesCount": { "type": "integer" },
+        "likedBy": { "type": "array" },
+        "commentsJson": { "type": "string", "maxLength": 100000 },
+        "createdAt": { "type": "string", "maxLength": 40 },
+        "createdAtMs": { "type": "integer" },
+        "expiresAt": { "type": "integer" },
+        "createdAtTs": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "authorId", "authorName", "content", "mediaType", "category", "likesCount", "commentsCount", "sharesCount", "likedBy", "createdAt", "createdAtMs", "createdAtTs", "updatedAt"]
     }
   },
   "firestore": {
@@ -481,6 +618,30 @@
     "/gameRooms/{roomCode}/voice_signals/{signalId}": {
       "schema": { "$ref": "#/entities/VoiceSignal" },
       "description": "WebRTC peer-to-peer audio signaling channel for an active game room."
+    },
+    "/friendRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Real-time friend request status tracking across users."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/UserNotification" },
+      "description": "Real-time notifications delivered to target users."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/DirectConversation" },
+      "description": "Direct and group messaging threads."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a direct or group conversation."
+    },
+    "/reels/{reelId}": {
+      "schema": { "$ref": "#/entities/ReelItem" },
+      "description": "Uploaded video reels with 40-day automatic expiry."
+    },
+    "/posts/{postId}": {
+      "schema": { "$ref": "#/entities/FeedPost" },
+      "description": "Public feed posts including video posts with 40-day automatic expiry."
     }
   }
 }

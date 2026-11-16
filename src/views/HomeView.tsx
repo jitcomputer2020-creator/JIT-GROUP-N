@@ -8,7 +8,14 @@ import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { Post, Story, NavTab, Comment } from '../types';
 import { APP_CONFIG } from '../constants/branding';
-import { saveMediaFile, validateMediaFile } from '../services/mediaStorage';
+import {
+  saveMediaFile,
+  validateMediaFile,
+  generateVideoThumbnail,
+  VIDEO_EXPIRY_MS,
+} from '../services/mediaStorage';
+import { uploadVideoAssetToCloud, isVideoContentExpired } from '../lib/firebase';
+import { ResilientVideo } from '../components/common/ResilientVideo';
 import { LikedByModal } from '../components/modals/LikedByModal';
 import { EditPostModal } from '../components/modals/EditPostModal';
 import { AddStoryModal } from '../components/modals/AddStoryModal';
@@ -29,6 +36,7 @@ import {
   CornerDownRight,
   Loader2,
   Megaphone,
+  Clock,
 } from 'lucide-react';
 
 interface HomeViewProps {
@@ -82,13 +90,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
     if (!file) return;
 
     setPostError(null);
-    const validation = validateMediaFile(file, { maxSizeMb: 30 });
+    const isVid = file.type.startsWith('video/');
+    const validation = validateMediaFile(file, { maxSizeMb: isVid ? 50 : 15 });
     if (!validation.valid) {
       setPostError(validation.error || 'Invalid file');
       return;
     }
 
-    const isVid = file.type.startsWith('video/');
+    if (mediaPreviewUrl && mediaPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(mediaPreviewUrl);
+    }
     setMediaFile(file);
     setMediaType(isVid ? 'video' : 'image');
     setMediaPreviewUrl(URL.createObjectURL(file));
@@ -116,17 +127,37 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
     try {
       let savedMediaUrls: string[] | undefined;
       let finalMediaType: 'image' | 'video' | 'none' = 'none';
+      let thumbnailUrl: string | undefined;
+      const createdAtMs = Date.now();
+      let expiresAt: number | undefined;
 
       if (mediaFile) {
-        const { dataUrl } = await saveMediaFile(mediaFile);
-        savedMediaUrls = [dataUrl];
-        finalMediaType = mediaType;
+        if (mediaType === 'video') {
+          expiresAt = createdAtMs + VIDEO_EXPIRY_MS;
+          const thumb = await generateVideoThumbnail(mediaFile);
+          const uploaded = await uploadVideoAssetToCloud(
+            currentUser.id,
+            mediaFile,
+            thumb,
+            expiresAt
+          );
+          savedMediaUrls = [uploaded.videoUrl];
+          thumbnailUrl = uploaded.thumbnailUrl || thumb || undefined;
+          finalMediaType = 'video';
+        } else {
+          const { dataUrl } = await saveMediaFile(mediaFile);
+          savedMediaUrls = [dataUrl];
+          finalMediaType = 'image';
+        }
       }
 
       createPost({
         content: newContent.trim(),
         mediaUrls: savedMediaUrls,
         mediaType: finalMediaType,
+        thumbnailUrl,
+        createdAtMs,
+        expiresAt,
         category: activeCategory,
       });
 
@@ -161,6 +192,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
   };
 
   const filteredPosts = posts.filter((p) => {
+    if (isVideoContentExpired(p)) return false;
     if (activeCategory === 'all') return true;
     return p.category === activeCategory;
   });
@@ -493,9 +525,22 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
               {/* Post Attached Media (if any) */}
               {post.mediaUrls && post.mediaUrls.length > 0 && (
-                <div className="mb-4 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-black max-h-80 flex items-center justify-center">
+                <div className="relative mb-4 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-black max-h-80 flex items-center justify-center">
                   {post.mediaType === 'video' ? (
-                    <video src={post.mediaUrls[0]} controls className="max-h-80 w-auto object-contain" />
+                    <>
+                      <ResilientVideo
+                        src={post.mediaUrls[0]}
+                        poster={post.thumbnailUrl}
+                        controls
+                        className="max-h-80 w-auto object-contain"
+                      />
+                      {typeof post.expiresAt === 'number' && post.expiresAt > Date.now() && (
+                        <span className="absolute top-2 left-2 px-2 py-0.5 rounded-lg bg-black/65 backdrop-blur-sm text-[10px] font-semibold text-amber-300 flex items-center gap-1 pointer-events-none">
+                          <Clock className="w-3 h-3" />
+                          {Math.max(1, Math.ceil((post.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))}d left
+                        </span>
+                      )}
+                    </>
                   ) : (
                     <img src={post.mediaUrls[0]} alt="Post media" className="max-h-80 w-auto object-contain" />
                   )}

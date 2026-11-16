@@ -68,7 +68,10 @@ export interface Post {
   content: string;
   mediaUrls?: string[];
   mediaType?: 'image' | 'video' | 'none';
+  thumbnailUrl?: string;
   createdAt: string;
+  createdAtMs?: number;
+  expiresAt?: number;
   likesCount: number;
   commentsCount: number;
   sharesCount: number;
@@ -112,6 +115,7 @@ export interface Reel {
   creatorName: string;
   creatorAvatar?: string;
   videoUrl: string;
+  thumbnailUrl?: string;
   caption: string;
   musicTitle?: string;
   likesCount: number;
@@ -123,6 +127,20 @@ export interface Reel {
   likedBy?: string[];
   comments?: Comment[];
   createdAt: string;
+  createdAtMs?: number;
+  expiresAt?: number;
+}
+
+export interface FriendRequest {
+  id: string;
+  fromUserId: string;
+  fromUserName: string;
+  fromUserAvatar?: string;
+  toUserId: string;
+  toUserName: string;
+  toUserAvatar?: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAtIso?: string;
 }
 
 export interface Friendship {
@@ -139,6 +157,7 @@ export interface Conversation {
   name?: string;
   avatarUrl?: string;
   participantIds: string[];
+  participantsMap?: Record<string, { name: string; avatar?: string }>;
   lastMessage?: {
     text: string;
     senderId: string;
@@ -147,6 +166,7 @@ export interface Conversation {
   };
   unreadCount: number;
   updatedAt: string;
+  updatedAtMs?: number;
 }
 
 export interface Message {
@@ -271,6 +291,9 @@ export interface Achievement {
 export interface InAppNotification {
   id: string;
   userId: string;
+  fromUserId?: string;
+  fromUserName?: string;
+  fromUserAvatar?: string;
   type:
     | 'friend_request'
     | 'friend_accept'
@@ -285,6 +308,8 @@ export interface InAppNotification {
   title: string;
   message: string;
   createdAt: string;
+  createdAtIso?: string;
+  createdAtMs?: number;
   isRead: boolean;
   actionUrl?: string;
 }

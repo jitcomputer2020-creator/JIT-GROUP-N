@@ -4,9 +4,15 @@
  */
 
 import React, { useState, useRef } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { useSocial } from '../../context/SocialContext';
-import { saveMediaFile, validateMediaFile } from '../../services/mediaStorage';
-import { X, Video, Music, Send, Loader2, Film } from 'lucide-react';
+import {
+  generateVideoThumbnail,
+  validateMediaFile,
+  VIDEO_EXPIRY_MS,
+} from '../../services/mediaStorage';
+import { uploadVideoAssetToCloud } from '../../lib/firebase';
+import { X, Video, Music, Send, Loader2, Film, Clock } from 'lucide-react';
 
 interface AddReelModalProps {
   isOpen: boolean;
@@ -14,12 +20,14 @@ interface AddReelModalProps {
 }
 
 export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) => {
+  const { currentUser } = useAuth();
   const { addReel } = useSocial();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [caption, setCaption] = useState('');
   const [musicTitle, setMusicTitle] = useState('JIT Campus Beats');
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -37,6 +45,9 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
       return;
     }
 
+    if (previewUrl && previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(previewUrl);
+    }
     setSelectedFile(file);
     const tempUrl = URL.createObjectURL(file);
     setPreviewUrl(tempUrl);
@@ -49,10 +60,16 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
     setSelectedFile(null);
     setPreviewUrl(null);
     setErrorMsg(null);
+    setUploadProgress(0);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!currentUser) {
+      setErrorMsg('Please sign in to publish a Reel.');
+      return;
+    }
     if (!selectedFile) {
       setErrorMsg('Please select a video file for your reel.');
       return;
@@ -64,24 +81,42 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
 
     try {
       setIsUploading(true);
+      setUploadProgress(5);
       setErrorMsg(null);
 
-      // Save permanently to IndexedDB
-      const { dataUrl } = await saveMediaFile(selectedFile);
+      const createdAtMs = Date.now();
+      const expiresAt = createdAtMs + VIDEO_EXPIRY_MS;
+
+      // 1. Generate compact JPEG thumbnail safely
+      const thumbDataUrl = await generateVideoThumbnail(selectedFile);
+      setUploadProgress(15);
+
+      // 2. Upload to Firebase Storage (or resilient Express/Firestore/IndexedDB fallback)
+      const { videoUrl, thumbnailUrl } = await uploadVideoAssetToCloud(
+        currentUser.id,
+        selectedFile,
+        thumbDataUrl,
+        expiresAt,
+        (pct) => setUploadProgress(Math.max(15, pct))
+      );
 
       addReel({
-        videoUrl: dataUrl,
+        videoUrl,
+        thumbnailUrl: thumbnailUrl || thumbDataUrl || undefined,
         caption: caption.trim(),
         musicTitle: musicTitle.trim() || 'JIT Campus Sound',
+        createdAtMs,
+        expiresAt,
       });
 
       handleClearMedia();
       setCaption('');
       onClose();
-    } catch {
-      setErrorMsg('Failed to save reel video. Please try again.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Failed to upload reel video. Please try again.');
     } finally {
       setIsUploading(false);
+      setUploadProgress(0);
     }
   };
 
@@ -184,6 +219,27 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
             </div>
           </div>
 
+          {/* 40-day auto-expiry notice */}
+          <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-900/50 text-[11px] text-amber-800 dark:text-amber-300">
+            <Clock className="w-3.5 h-3.5 shrink-0" />
+            <span>Reels auto-expire and delete permanently after 40 days.</span>
+          </div>
+
+          {isUploading && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-purple-600 dark:text-purple-400">
+                <span>Uploading reel &amp; generating thumbnail...</span>
+                <span className="font-mono">{uploadProgress}%</span>
+              </div>
+              <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-purple-600 transition-all duration-300"
+                  style={{ width: `${uploadProgress}%` }}
+                />
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-2 pt-2">
             <button
               type="button"
@@ -203,7 +259,7 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
               {isUploading ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Publishing Reel...</span>
+                  <span>Publishing {uploadProgress}%...</span>
                 </>
               ) : (
                 <>

@@ -29,12 +29,14 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
   const {
     friendIds,
     pendingIncomingRequestIds,
+    friendRequestPeers,
     acceptFriendRequest,
     rejectFriendRequest,
     removeFriend,
     sendFriendRequest,
     hasPendingOutgoing,
     setViewingUserId,
+    openDirectChat,
   } = useSocial();
 
   const [tab, setTab] = useState<'all' | 'requests' | 'discover'>('all');
@@ -90,10 +92,11 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
     };
   }, [searchQuery]);
 
-  // Collect all known campus + Firebase registered profiles
+  // Collect all known campus + Firebase registered profiles + friend request peers
   const allKnownProfiles: UserProfile[] = useMemo(() => {
     return [
       ...cloudUsers,
+      ...friendRequestPeers,
       ...(registeredProfiles || []),
       INITIAL_USER,
       ...INITIAL_FRIENDS,
@@ -103,7 +106,7 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
         p.status !== 'deleted' &&
         index === self.findIndex((t) => t.id === p.id)
     );
-  }, [cloudUsers, registeredProfiles]);
+  }, [cloudUsers, friendRequestPeers, registeredProfiles]);
 
   // Current friends list
   const friendsList = allKnownProfiles.filter(
@@ -321,7 +324,14 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
 
                 <div className="flex items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
                   <button
-                    onClick={() => onNavigate('messages')}
+                    onClick={() => {
+                      openDirectChat({
+                        id: friend.id,
+                        fullName: friend.fullName,
+                        avatarUrl: friend.avatarUrl,
+                      });
+                      onNavigate('messages');
+                    }}
                     className="flex-1 py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors flex items-center justify-center gap-1.5"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
@@ -407,7 +417,7 @@ export const FriendsView: React.FC<FriendsViewProps> = ({ onNavigate }) => {
                         </button>
                       ) : (
                         <button
-                          onClick={() => sendFriendRequest(peer.id)}
+                          onClick={() => sendFriendRequest(peer.id, peer)}
                           className="flex-1 py-1.5 px-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors flex items-center justify-center gap-1.5"
                         >
                           <UserPlus className="w-3.5 h-3.5" />

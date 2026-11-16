@@ -977,9 +977,146 @@ app.post('/api/conversations', (req, res) => {
   return res.json({ success: true, conversation: conv });
 });
 
+// Persistent Media Uploads (Reels / Feed Videos with 40-Day Expiry)
+const MEDIA_DIR = path.join(DATA_DIR, 'media');
+const VIDEO_EXPIRY_MS = 40 * 24 * 60 * 60 * 1000;
+
+if (!fs.existsSync(MEDIA_DIR)) {
+  try {
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+  } catch (e) {
+    console.warn('Could not create media dir:', e);
+  }
+}
+
+function purgeExpiredServerMedia() {
+  try {
+    if (!fs.existsSync(MEDIA_DIR)) return;
+    const files = fs.readdirSync(MEDIA_DIR);
+    const now = Date.now();
+    for (const f of files) {
+      if (!f.endsWith('.meta.json')) continue;
+      const metaPath = path.join(MEDIA_DIR, f);
+      try {
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        if (typeof meta.expiresAt === 'number' && meta.expiresAt <= now) {
+          const mediaPath = path.join(MEDIA_DIR, String(meta.filename || ''));
+          if (meta.filename && fs.existsSync(mediaPath)) fs.unlinkSync(mediaPath);
+          fs.unlinkSync(metaPath);
+        }
+      } catch {
+        // Ignore malformed meta file
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+setInterval(purgeExpiredServerMedia, 30 * 60 * 1000);
+purgeExpiredServerMedia();
+
+app.post(
+  '/api/media/upload',
+  express.raw({ type: ['video/*', 'image/*', 'application/octet-stream'], limit: '55mb' }),
+  (req, res) => {
+    try {
+      const buf = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!buf.length) {
+        return res.status(400).json({ error: 'Empty media payload' });
+      }
+      const mime = String(req.headers['x-media-mime'] || req.headers['content-type'] || 'video/mp4').split(';')[0];
+      const extMap: Record<string, string> = {
+        'video/mp4': 'mp4',
+        'video/webm': 'webm',
+        'video/quicktime': 'mov',
+        'video/ogg': 'ogv',
+        'image/jpeg': 'jpg',
+        'image/png': 'png',
+        'image/webp': 'webp',
+      };
+      const ext = extMap[mime] || (mime.startsWith('video/') ? 'mp4' : 'bin');
+      const mediaId = `med_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const filename = `${mediaId}.${ext}`;
+      const expiresAt = Number(req.headers['x-expires-at']) || Date.now() + VIDEO_EXPIRY_MS;
+
+      fs.writeFileSync(path.join(MEDIA_DIR, filename), buf);
+      fs.writeFileSync(
+        path.join(MEDIA_DIR, `${filename}.meta.json`),
+        JSON.stringify({ id: mediaId, filename, mime, size: buf.length, createdAtMs: Date.now(), expiresAt })
+      );
+
+      return res.json({
+        success: true,
+        id: mediaId,
+        url: `/api/media/${filename}`,
+        expiresAt,
+      });
+    } catch (err) {
+      console.error('Server media upload error:', err);
+      return res.status(500).json({ error: 'Failed to store uploaded media' });
+    }
+  }
+);
+
+app.get('/api/media/:filename', (req, res) => {
+  const safeName = path.basename(req.params.filename || '');
+  if (!safeName || !/^[a-zA-Z0-9_.\-]+$/.test(safeName)) {
+    return res.status(400).send('Invalid filename');
+  }
+  const filePath = path.join(MEDIA_DIR, safeName);
+  const metaPath = path.join(MEDIA_DIR, `${safeName}.meta.json`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Media not found or expired');
+  }
+  let mime = 'application/octet-stream';
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (typeof meta.expiresAt === 'number' && meta.expiresAt <= Date.now()) {
+        fs.unlinkSync(filePath);
+        fs.unlinkSync(metaPath);
+        return res.status(404).send('Media expired');
+      }
+      if (meta.mime) mime = meta.mime;
+    } catch {
+      // ignore
+    }
+  }
+
+  const stat = fs.statSync(filePath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  res.setHeader('Accept-Ranges', 'bytes');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+
+  if (range) {
+    const parts = range.replace(/bytes=/, '').split('-');
+    const start = parseInt(parts[0], 10) || 0;
+    const end = parts[1] ? Math.min(fileSize - 1, parseInt(parts[1], 10)) : fileSize - 1;
+    const chunkSize = end - start + 1;
+    res.writeHead(206, {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Content-Length': chunkSize,
+      'Content-Type': mime,
+    });
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+  } else {
+    res.writeHead(200, {
+      'Content-Length': fileSize,
+      'Content-Type': mime,
+    });
+    fs.createReadStream(filePath).pipe(res);
+  }
+});
+
 // Public Posts & Announcements Endpoints
 app.get('/api/posts', (req, res) => {
-  return res.json({ posts: readPostsData() });
+  const now = Date.now();
+  const activePosts = readPostsData().filter(
+    (p: any) => !(p.mediaType === 'video' && typeof p.expiresAt === 'number' && p.expiresAt <= now)
+  );
+  return res.json({ posts: activePosts });
 });
 
 app.post('/api/posts/sync', (req, res) => {
@@ -987,13 +1124,14 @@ app.post('/api/posts/sync', (req, res) => {
   if (!clientPosts) {
     return res.status(400).json({ error: 'posts array required' });
   }
+  const now = Date.now();
   const serverPosts = readPostsData();
   const adminBroadcastPosts = serverPosts.filter((p: any) => p.authorId === 'usr_jit_admin_system');
   const clientIds = new Set(clientPosts.map((p: any) => p.id));
   const merged = [
     ...adminBroadcastPosts.filter((ap: any) => !clientIds.has(ap.id)),
     ...clientPosts,
-  ];
+  ].filter((p: any) => !(p.mediaType === 'video' && typeof p.expiresAt === 'number' && p.expiresAt <= now));
   writePostsData(merged);
   return res.json({ success: true, posts: merged });
 });

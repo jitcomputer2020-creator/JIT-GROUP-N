@@ -247,7 +247,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({ isOpen, onClose, onNav
                           ) : (
                             <button
                               type="button"
-                              onClick={() => sendFriendRequest(user.id)}
+                              onClick={() => sendFriendRequest(user.id, user)}
                               className="px-2.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold flex items-center gap-1 shadow-sm"
                             >
                               <UserPlus className="w-3.5 h-3.5" />

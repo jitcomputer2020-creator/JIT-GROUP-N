@@ -40,7 +40,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSearch,
   onOpenNotifications,
   onOpenAdmin,
-  unreadCount = 2,
+  unreadCount,
 }) => {
   const { currentUser, registeredProfiles, isAuthenticated } = useAuth();
   const { effectiveTheme, toggleTheme } = useTheme();
@@ -49,7 +49,9 @@ export const Navbar: React.FC<NavbarProps> = ({
     isFriend,
     hasPendingOutgoing,
     sendFriendRequest,
+    unreadNotificationCount,
   } = useSocial();
+  const badgeCount = unreadCount !== undefined ? unreadCount : unreadNotificationCount;
 
   const logoTapTimesRef = useRef<number[]>([]);
   const searchBoxRef = useRef<HTMLDivElement>(null);
@@ -316,7 +318,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                           ) : (
                             <button
                               type="button"
-                              onClick={() => sendFriendRequest(user.id)}
+                              onClick={() => sendFriendRequest(user.id, user)}
                               className="px-2 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold flex items-center gap-1"
                             >
                               <UserPlus className="w-3 h-3" />
@@ -399,8 +401,10 @@ export const Navbar: React.FC<NavbarProps> = ({
             aria-label="Notifications"
           >
             <Bell className="w-4 h-4" />
-            {unreadCount > 0 && (
-              <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-blue-600 ring-2 ring-white dark:ring-slate-900" />
+            {badgeCount > 0 && (
+              <span className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-blue-600 text-white text-[9px] font-bold flex items-center justify-center ring-2 ring-white dark:ring-slate-900">
+                {badgeCount > 9 ? '9+' : badgeCount}
+              </span>
             )}
           </button>
 
