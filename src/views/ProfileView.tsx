@@ -11,6 +11,7 @@ import { INITIAL_ACHIEVEMENTS, INITIAL_USER, INITIAL_FRIENDS } from '../services
 import { APP_CONFIG } from '../constants/branding';
 import { getCloudProfileById, deriveUsername, isVideoContentExpired } from '../lib/firebase';
 import { ResilientVideo } from '../components/common/ResilientVideo';
+import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import {
   Edit3,
   Calendar,
@@ -528,20 +529,32 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
               >
                 <p className="text-xs text-slate-800 dark:text-slate-200 leading-relaxed">{post.content}</p>
 
-                {post.mediaUrls && post.mediaUrls.length > 0 && (
-                  <div className="mt-3 rounded-2xl overflow-hidden bg-black max-h-60 flex items-center justify-center">
-                    {post.mediaType === 'video' ? (
-                      <ResilientVideo
-                        src={post.mediaUrls[0]}
-                        poster={post.thumbnailUrl}
-                        controls
-                        className="max-h-60 w-auto object-contain"
-                      />
-                    ) : (
-                      <img src={post.mediaUrls[0]} alt="Post media" className="max-h-60 w-auto object-contain" />
-                    )}
-                  </div>
-                )}
+                {(() => {
+                  const primaryMediaUrl = post.mediaUrls?.find(
+                    (u) => typeof u === 'string' && u.trim().length > 0
+                  );
+                  if (!primaryMediaUrl || post.mediaType === 'none') return null;
+                  return (
+                    <div className="mt-3 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
+                      {post.mediaType === 'video' ? (
+                        <ResilientVideo
+                          src={primaryMediaUrl}
+                          poster={post.thumbnailUrl}
+                          controls
+                          className="w-full h-auto max-h-72 object-contain"
+                        />
+                      ) : (
+                        <ResponsiveImage
+                          src={primaryMediaUrl}
+                          alt={post.authorName ? `${post.authorName} post image` : 'Post image'}
+                          fit="contain"
+                          className="w-full h-auto max-h-72 object-contain mx-auto block"
+                          fallbackText="Post image unavailable"
+                        />
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <div className="flex items-center gap-2 mt-3 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-400">
                   <span>{post.createdAt}</span>
@@ -567,12 +580,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
               <div
                 key={reel.id}
                 onClick={() => onNavigate('reels')}
-                className="relative aspect-[9/16] rounded-2xl overflow-hidden bg-black cursor-pointer group"
+                className="relative aspect-[9/16] rounded-2xl overflow-hidden bg-slate-900 cursor-pointer group"
               >
                 {reel.thumbnailUrl ? (
-                  <img
+                  <ResponsiveImage
                     src={reel.thumbnailUrl}
-                    alt={reel.caption}
+                    alt={reel.caption || 'Reel thumbnail'}
+                    fit="cover"
+                    containerClassName="w-full h-full"
                     className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
                   />
                 ) : (

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type GameMode = 'friend' | 'random' | 'ai';
+export type GameMode = 'friend' | 'random' | 'open_group' | 'ai';
 export type AIDifficulty = 'easy' | 'medium' | 'hard';
 
 export interface RoomPlayer {
@@ -15,6 +15,7 @@ export interface RoomPlayer {
   color?: string;
   score?: number;
   isMuted?: boolean;
+  joinedAtMs?: number;
 }
 
 export interface InGameChatMessage {
@@ -26,6 +27,41 @@ export interface InGameChatMessage {
   text?: string;
   imageUrl?: string;
   timestamp: string;
+}
+
+export interface RoomReaction {
+  id: string;
+  emoji: string;
+  senderId: string;
+  senderName: string;
+  createdAtMs: number;
+}
+
+export interface TruthAndDareHistoryItem {
+  id: string;
+  round: number;
+  playerId: string;
+  playerName: string;
+  choiceType: 'truth' | 'dare';
+  promptSource: 'system' | 'custom';
+  promptText: string;
+  customAuthor?: string;
+  status: 'completed' | 'skipped';
+  timestamp: string;
+}
+
+export interface TruthAndDareState {
+  round: number;
+  phase: 'spinning' | 'choosing' | 'writing_custom' | 'performing' | 'round_complete';
+  activePlayerId: string;
+  activePlayerName: string;
+  activePlayerAvatar?: string;
+  choiceType: 'truth' | 'dare' | null;
+  promptSource: 'system' | 'custom' | null;
+  promptText: string;
+  customAuthorName?: string;
+  history: TruthAndDareHistoryItem[];
+  updatedAtMs: number;
 }
 
 export interface InGameCallState {
@@ -48,7 +84,13 @@ export interface MultiplayerRoom {
   status: 'waiting' | 'in_game' | 'finished';
   maxPlayers: number;
   isPublicMatch?: boolean;
+  isOpenGroup?: boolean;
+  activeSeatLimit?: number;
   players: RoomPlayer[];
+  waitingPlayers?: RoomPlayer[];
+  reactions?: RoomReaction[];
+  mutedVoiceIds?: string[];
+  mutedChatIds?: string[];
   gameState: any;
   currentTurn: string;
   messages: InGameChatMessage[];

@@ -10,6 +10,9 @@ import { Conversation, Message, CallType, CallStatus, NavTab, UserProfile } from
 import { INITIAL_FRIENDS, INITIAL_USER } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
 import { saveMediaFile, validateMediaFile } from '../services/mediaStorage';
+import { ResponsiveImage } from '../components/common/ResponsiveImage';
+import { ResilientVideo } from '../components/common/ResilientVideo';
+import { sendJitAiChat, JitAiChatTurn } from '../services/aiClient';
 import {
   fetchPublicDirectory,
   searchCloudUsers,
@@ -41,6 +44,9 @@ import {
   MessageSquarePlus,
   Loader2,
   LogIn,
+  Sparkles,
+  Bot,
+  Trash2,
 } from 'lucide-react';
 
 interface MessagesViewProps {
@@ -180,6 +186,12 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     isPrimaryDemo ? DEMO_SEED_MESSAGES : []
   );
 
+  // JIT AI Chat Companion State
+  const JIT_AI_CONV_ID = 'conv_jit_ai';
+  const [aiMode, setAiMode] = useState<'general' | 'studies' | 'tech'>('general');
+  const [aiMessages, setAiMessages] = useState<Message[]>([]);
+  const [aiThinking, setAiThinking] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -223,16 +235,58 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     }
   }, [currentUser?.id]);
 
+  // Load per-user JIT AI Companion conversation history
+  useEffect(() => {
+    if (!currentUser?.id) {
+      setAiMessages([]);
+      return;
+    }
+    try {
+      const saved = localStorage.getItem(`jit_ai_chat_v1_${currentUser.id}`);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setAiMessages(parsed);
+          return;
+        }
+      }
+    } catch {
+      // ignore storage error
+    }
+    setAiMessages([
+      {
+        id: 'ai_welcome_1',
+        conversationId: JIT_AI_CONV_ID,
+        senderId: 'jit_ai_assistant',
+        senderName: 'JIT AI Assistant',
+        content: `Hi ${currentUser.fullName.split(' ')[0]}! I am JIT AI, your study, computer science, coding, and campus companion. Ask me anything anytime!`,
+        createdAt: 'Now',
+        createdAtMs: Date.now(),
+        status: 'read',
+      },
+    ]);
+  }, [currentUser?.id, currentUser?.fullName]);
+
+  useEffect(() => {
+    if (!currentUser?.id || aiMessages.length === 0) return;
+    try {
+      localStorage.setItem(`jit_ai_chat_v1_${currentUser.id}`, JSON.stringify(aiMessages.slice(-60)));
+    } catch {
+      // ignore quota
+    }
+  }, [aiMessages, currentUser?.id]);
+
   // Subscribe to real-time Firestore conversations for currentUser
   useEffect(() => {
     if (!currentUser?.id) return;
     const unsub = subscribeToFirestoreConversations(currentUser.id, (convs) => {
       setCloudConversations(convs);
       setActiveConvId((prev) => {
+        if (prev === JIT_AI_CONV_ID) return prev;
         if (prev && (convs.some((c) => c.id === prev) || (isPrimaryDemo && prev.startsWith('conv_')))) {
           return prev;
         }
-        return convs[0]?.id || (isPrimaryDemo ? 'conv_001' : '');
+        return convs[0]?.id || (isPrimaryDemo ? 'conv_001' : JIT_AI_CONV_ID);
       });
     });
     return () => unsub();
@@ -266,7 +320,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   // Subscribe to real-time messages for active conversation
   useEffect(() => {
-    if (!activeConvId) {
+    if (!activeConvId || activeConvId === JIT_AI_CONV_ID) {
       setCloudMessages([]);
       return;
     }
@@ -351,6 +405,26 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     };
   }, [isNewDmOpen, dmUserQuery]);
 
+  const jitAiConversation: Conversation = useMemo(() => {
+    const lastAiMsg = aiMessages[aiMessages.length - 1];
+    return {
+      id: JIT_AI_CONV_ID,
+      type: 'direct',
+      name: 'JIT AI Assistant',
+      avatarUrl: APP_CONFIG.logoUrl,
+      participantIds: ['jit_ai_assistant'],
+      lastMessage: {
+        text: lastAiMsg?.content?.slice(0, 70) || 'Ask studies, code, or campus questions anytime',
+        senderId: lastAiMsg?.senderId || 'jit_ai_assistant',
+        createdAt: lastAiMsg?.createdAt || 'Online',
+        isRead: true,
+      },
+      unreadCount: 0,
+      updatedAt: 'AI 24/7',
+      updatedAtMs: Number.MAX_SAFE_INTEGER,
+    };
+  }, [aiMessages]);
+
   // Merge cloud + local conversations with dynamic partner resolution
   const conversations = useMemo(() => {
     const byId = new Map<string, Conversation>();
@@ -367,10 +441,14 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     );
   }, [cloudConversations, localConversations]);
 
-  const activeConv = conversations.find((c) => c.id === activeConvId) || conversations[0];
+  const isAiThreadSelected = activeConvId === JIT_AI_CONV_ID;
+  const activeConv = isAiThreadSelected
+    ? jitAiConversation
+    : conversations.find((c) => c.id === activeConvId) || jitAiConversation;
 
   const activeMessages = useMemo(() => {
     if (!activeConv) return [];
+    if (activeConv.id === JIT_AI_CONV_ID) return aiMessages;
     const byId = new Map<string, Message>();
     for (const lm of localMessages) {
       if (lm.conversationId === activeConv.id) {
@@ -383,7 +461,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       }
     }
     return Array.from(byId.values());
-  }, [activeConv, cloudMessages, localMessages]);
+  }, [activeConv, cloudMessages, localMessages, aiMessages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -472,9 +550,86 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const handleClearAiChat = () => {
+    if (!currentUser) return;
+    const resetMsg: Message = {
+      id: `ai_welcome_${Date.now()}`,
+      conversationId: JIT_AI_CONV_ID,
+      senderId: 'jit_ai_assistant',
+      senderName: 'JIT AI Assistant',
+      content: `Fresh chat started! Ask me about Computer Science, exams, coding errors, or general questions.`,
+      createdAt: 'Now',
+      createdAtMs: Date.now(),
+      status: 'read',
+    };
+    setAiMessages([resetMsg]);
+    setSendError(null);
+  };
+
+  const sendPromptToJitAi = async (promptText: string) => {
+    if (!promptText.trim() || !currentUser || aiThinking) return;
+    const clean = promptText.trim();
+    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const userMsg: Message = {
+      id: `ai_u_${Date.now()}`,
+      conversationId: JIT_AI_CONV_ID,
+      senderId: currentUser.id,
+      senderName: currentUser.fullName,
+      content: clean,
+      createdAt: nowTime,
+      createdAtMs: Date.now(),
+      status: 'read',
+    };
+
+    const historyTurns: JitAiChatTurn[] = aiMessages
+      .filter((m) => !m.id.startsWith('ai_welcome_'))
+      .slice(-10)
+      .map((m) => ({
+        role: m.senderId === currentUser.id ? 'user' : 'model',
+        text: m.content,
+      }));
+
+    setAiMessages((prev) => [...prev, userMsg]);
+    setAiThinking(true);
+    setSendError(null);
+
+    try {
+      const res = await sendJitAiChat({
+        message: clean,
+        history: historyTurns,
+        userName: currentUser.fullName,
+        mode: aiMode,
+      });
+
+      const replyMsg: Message = {
+        id: `ai_m_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        conversationId: JIT_AI_CONV_ID,
+        senderId: 'jit_ai_assistant',
+        senderName: 'JIT AI Assistant',
+        content: res.reply,
+        createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        createdAtMs: Date.now(),
+        status: 'read',
+      };
+      setAiMessages((prev) => [...prev, replyMsg]);
+    } catch (err: any) {
+      setSendError(err?.message || 'Unable to reach JIT AI right now.');
+    } finally {
+      setAiThinking(false);
+    }
+  };
+
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if ((!messageText.trim() && !attachedFile) || !currentUser || !activeConv) return;
+
+    if (activeConv.id === JIT_AI_CONV_ID) {
+      const prompt = messageText.trim();
+      if (!prompt) return;
+      setMessageText('');
+      await sendPromptToJitAi(prompt);
+      return;
+    }
 
     setSendError(null);
     setSendingMessage(true);
@@ -674,6 +829,47 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
         {/* Conversation List */}
         <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 no-scrollbar">
+          {/* Pinned JIT AI Chat Companion */}
+          {(!searchQuery.trim() ||
+            'jit ai assistant study helper tech'.includes(searchQuery.toLowerCase())) && (
+            <button
+              key={JIT_AI_CONV_ID}
+              onClick={() => {
+                setActiveConvId(JIT_AI_CONV_ID);
+                setMobileThreadOpen(true);
+              }}
+              className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
+                activeConv?.id === JIT_AI_CONV_ID
+                  ? 'bg-indigo-50/90 dark:bg-indigo-950/40'
+                  : 'bg-indigo-50/30 dark:bg-indigo-950/10 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/30'
+              }`}
+            >
+              <div className="relative shrink-0 w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-600 via-blue-600 to-cyan-500 text-white flex items-center justify-center shadow-sm">
+                <Bot className="w-5 h-5" />
+                <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-white dark:border-slate-900" />
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between mb-0.5">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <h4 className="text-xs font-extrabold text-indigo-950 dark:text-white truncate">
+                      JIT AI Assistant
+                    </h4>
+                    <span className="px-1.5 py-0.5 rounded-md bg-indigo-600 text-white text-[9px] font-bold uppercase tracking-wider shrink-0">
+                      AI
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-mono shrink-0">
+                    24/7
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
+                  {jitAiConversation.lastMessage?.text}
+                </p>
+              </div>
+            </button>
+          )}
+
           {filteredConversations.length === 0 ? (
             <div className="p-8 text-center space-y-3">
               <MessageSquarePlus className="w-8 h-8 text-slate-400 mx-auto" />
@@ -767,7 +963,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         ) : (
           <>
             {/* Thread Header */}
-            <div className="p-3.5 px-4 sm:px-5 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+            <div className="p-3.5 px-4 sm:px-5 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <button
                   onClick={() => setMobileThreadOpen(false)}
@@ -776,51 +972,118 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                 >
                   <ArrowLeft className="w-4 h-4" />
                 </button>
-                <img
-                  src={activeConv.avatarUrl || APP_CONFIG.logoUrl}
-                  alt={activeConv.name}
-                  className="w-10 h-10 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
-                />
+                {activeConv.id === JIT_AI_CONV_ID ? (
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-600 via-blue-600 to-cyan-500 text-white flex items-center justify-center shrink-0 shadow-sm">
+                    <Sparkles className="w-5 h-5" />
+                  </div>
+                ) : (
+                  <img
+                    src={activeConv.avatarUrl || APP_CONFIG.logoUrl}
+                    alt={activeConv.name}
+                    className="w-10 h-10 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                  />
+                )}
                 <div className="min-w-0">
                   <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
                     {activeConv.name}
                   </h4>
                   <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate">
-                    Real-Time Sync Active
+                    {activeConv.id === JIT_AI_CONV_ID
+                      ? 'JIT AI Companion · Studies, Code & General Chat'
+                      : 'Real-Time Sync Active · Free Personal & Group DM'}
                   </p>
                 </div>
               </div>
 
-              {/* WebRTC Calling Actions */}
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={() => startCall('voice')}
-                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
-                  title="Start WebRTC Voice Call"
-                >
-                  <Phone className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={() => startCall('video')}
-                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
-                  title="Start WebRTC HD Video Call"
-                >
-                  <Video className="w-4 h-4" />
-                </button>
-                <button className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
-                  <MoreVertical className="w-4 h-4" />
-                </button>
-              </div>
+              {activeConv.id === JIT_AI_CONV_ID ? (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="hidden sm:flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-xl">
+                    {(['general', 'studies', 'tech'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setAiMode(m)}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-bold capitalize transition-colors ${
+                          aiMode === m
+                            ? 'bg-white dark:bg-slate-700 text-indigo-600 dark:text-indigo-300 shadow-sm'
+                            : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleClearAiChat}
+                    className="p-2 text-slate-400 hover:text-red-500 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    title="Clear AI Chat History"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                /* WebRTC Calling Actions */
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => startCall('voice')}
+                    className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
+                    title="Start WebRTC Voice Call"
+                  >
+                    <Phone className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => startCall('video')}
+                    className="p-2 text-slate-600 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors"
+                    title="Start WebRTC HD Video Call"
+                  >
+                    <Video className="w-4 h-4" />
+                  </button>
+                  <button className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
+                    <MoreVertical className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Message Bubble Feed */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 no-scrollbar">
               <div className="flex justify-center my-2">
                 <span className="text-[10px] text-slate-500 bg-slate-100 dark:bg-slate-800/80 px-3 py-1 rounded-full flex items-center gap-1.5 border border-slate-200 dark:border-slate-700">
-                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-                  <span>Firebase Cloud Sync · Direct &amp; Group Messages</span>
+                  {activeConv.id === JIT_AI_CONV_ID ? (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+                      <span>JIT AI · Ask Studies, Coding, Exams &amp; Campus Questions</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>Firebase Cloud Sync · Private Direct &amp; Group Messages</span>
+                    </>
+                  )}
                 </span>
               </div>
+
+              {activeConv.id === JIT_AI_CONV_ID && (
+                <div className="flex flex-wrap gap-1.5 justify-center pb-2">
+                  {[
+                    'Explain DBMS 1NF, 2NF, 3NF',
+                    'BFS vs DFS in DSA',
+                    'Debug React useEffect loop',
+                    'Make a 5-day exam study plan',
+                  ].map((promptChip) => (
+                    <button
+                      key={promptChip}
+                      type="button"
+                      disabled={aiThinking}
+                      onClick={() => sendPromptToJitAi(promptChip)}
+                      className="px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-indigo-200/80 dark:border-slate-700 hover:border-indigo-500 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 transition-colors"
+                    >
+                      {promptChip}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {activeMessages.length === 0 ? (
                 <p className="text-center text-xs text-slate-400 py-8">
@@ -848,12 +1111,23 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                         )}
 
                         {msg.mediaUrl && (
-                          <div className="mb-2 rounded-xl overflow-hidden bg-black/20">
-                            <img
-                              src={msg.mediaUrl}
-                              alt="Attachment"
-                              className="max-h-48 w-auto rounded-xl object-contain"
-                            />
+                          <div className="mb-2 rounded-xl overflow-hidden w-full">
+                            {msg.mediaType === 'video' ? (
+                              <ResilientVideo
+                                src={msg.mediaUrl}
+                                controls
+                                compactControls
+                                className="w-full h-auto max-h-56 object-contain"
+                              />
+                            ) : (
+                              <ResponsiveImage
+                                src={msg.mediaUrl}
+                                alt="Chat attachment"
+                                fit="contain"
+                                className="w-full h-auto max-h-56 object-contain mx-auto block"
+                                fallbackText="Attachment unavailable"
+                              />
+                            )}
                           </div>
                         )}
 
@@ -876,6 +1150,14 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                     </div>
                   );
                 })
+              )}
+              {aiThinking && activeConv.id === JIT_AI_CONV_ID && (
+                <div className="flex items-start">
+                  <div className="rounded-2xl rounded-tl-sm px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-indigo-200 dark:border-slate-700 text-xs text-indigo-600 dark:text-indigo-300 flex items-center gap-2 shadow-sm">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>JIT AI is thinking...</span>
+                  </div>
+                </div>
               )}
               <div ref={messagesEndRef} />
             </div>
@@ -923,35 +1205,51 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               onSubmit={handleSendMessage}
               className="p-3 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2"
             >
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                title="Attach Image"
-              >
-                <Paperclip className="w-4 h-4" />
-              </button>
-              <input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleFileAttach}
-                accept="image/*"
-                className="hidden"
-              />
+              {activeConv.id !== JIT_AI_CONV_ID && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    title="Attach Image"
+                  >
+                    <Paperclip className="w-4 h-4" />
+                  </button>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={handleFileAttach}
+                    accept="image/*"
+                    className="hidden"
+                  />
+                </>
+              )}
 
               <input
                 type="text"
-                placeholder="Type your message..."
+                placeholder={
+                  activeConv.id === JIT_AI_CONV_ID
+                    ? 'Ask JIT AI about studies, CS, code, or anything...'
+                    : 'Type your message...'
+                }
                 value={messageText}
                 onChange={(e) => setMessageText(e.target.value)}
                 className="flex-1 px-3.5 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
               />
               <button
                 type="submit"
-                disabled={(!messageText.trim() && !attachedFile) || sendingMessage}
-                className="p-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl shadow-sm transition-colors"
+                disabled={
+                  (!messageText.trim() && !attachedFile) ||
+                  sendingMessage ||
+                  (activeConv.id === JIT_AI_CONV_ID && aiThinking)
+                }
+                className={`p-2 disabled:opacity-40 text-white rounded-xl shadow-sm transition-colors ${
+                  activeConv.id === JIT_AI_CONV_ID
+                    ? 'bg-indigo-600 hover:bg-indigo-700'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
               >
-                {sendingMessage ? (
+                {sendingMessage || (activeConv.id === JIT_AI_CONV_ID && aiThinking) ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <Send className="w-4 h-4" />

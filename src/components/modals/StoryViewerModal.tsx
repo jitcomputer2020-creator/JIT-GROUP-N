@@ -9,6 +9,8 @@ import { APP_CONFIG } from '../../constants/branding';
 import { useAuth } from '../../context/AuthContext';
 import { useSocial } from '../../context/SocialContext';
 import { X, Eye, Trash2 } from 'lucide-react';
+import { ResilientVideo } from '../common/ResilientVideo';
+import { ResponsiveImage } from '../common/ResponsiveImage';
 
 interface StoryViewerModalProps {
   story: Story | null;
@@ -20,6 +22,7 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({ story, onClo
   const { deleteStory } = useSocial();
   const [progress, setProgress] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const isOwner = currentUser?.id === story?.authorId;
@@ -27,6 +30,7 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({ story, onClo
   useEffect(() => {
     if (!story) return;
     setProgress(0);
+    setConfirmDelete(false);
     const interval = setInterval(() => {
       if (isPaused) return;
       setProgress((prev) => {
@@ -45,10 +49,12 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({ story, onClo
   if (!story) return null;
 
   const handleDelete = () => {
-    if (window.confirm('Are you sure you want to delete this story?')) {
-      deleteStory(story.id);
-      onClose();
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
     }
+    deleteStory(story.id);
+    onClose();
   };
 
   return (
@@ -108,18 +114,21 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({ story, onClo
 
         {/* Content: Image or Video */}
         {story.mediaType === 'video' ? (
-          <video
-            ref={videoRef}
+          <ResilientVideo
+            videoRef={videoRef}
             src={story.mediaUrl}
+            controls={false}
             autoPlay
             playsInline
             muted={false}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-contain sm:object-cover"
           />
         ) : (
-          <img
+          <ResponsiveImage
             src={story.mediaUrl}
             alt={story.caption || 'Story'}
+            fit="cover"
+            containerClassName="w-full h-full"
             className="w-full h-full object-cover"
           />
         )}

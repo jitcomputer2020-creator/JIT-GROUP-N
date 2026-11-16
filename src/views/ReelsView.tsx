@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { NavTab } from '../types';
@@ -11,6 +11,7 @@ import { APP_CONFIG } from '../constants/branding';
 import { AddReelModal } from '../components/modals/AddReelModal';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { isVideoContentExpired } from '../lib/firebase';
+import { moderatePublicContent } from '../services/aiClient';
 import {
   Heart,
   MessageCircle,
@@ -18,6 +19,7 @@ import {
   Volume2,
   VolumeX,
   Play,
+  Pause,
   ChevronUp,
   ChevronDown,
   Plus,
@@ -26,6 +28,8 @@ import {
   X,
   Video,
   Clock,
+  ShieldAlert,
+  Loader2,
 } from 'lucide-react';
 
 interface ReelsViewProps {
@@ -48,8 +52,12 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   const [isMuted, setIsMuted] = useState(true);
   const [showComments, setShowComments] = useState(false);
   const [commentInput, setCommentInput] = useState('');
+  const [isCheckingComment, setIsCheckingComment] = useState(false);
+  const [commentModerationError, setCommentModerationError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [isAddReelOpen, setIsAddReelOpen] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const touchStartYRef = useRef<number | null>(null);
@@ -59,6 +67,8 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   const currentReel = activeReels[safeIndex] || activeReels[0];
 
   const handleNextReel = () => {
+    setCurrentTime(0);
+    setDuration(0);
     if (currentIndex < activeReels.length - 1) {
       setCurrentIndex(currentIndex + 1);
     } else {
@@ -68,6 +78,8 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
 
   const handlePrevReel = () => {
     if (currentIndex > 0) {
+      setCurrentTime(0);
+      setDuration(0);
       setCurrentIndex(currentIndex - 1);
     }
   };
@@ -88,14 +100,25 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   };
 
   const togglePlay = () => {
-    if (videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.pause();
-        setIsPlaying(false);
-      } else {
-        videoRef.current.play();
-        setIsPlaying(true);
-      }
+    const el = videoRef.current;
+    if (!el) return;
+    if (!el.paused) {
+      el.pause();
+      setIsPlaying(false);
+    } else {
+      el.play().catch(() => {});
+      setIsPlaying(true);
+    }
+  };
+
+  const handleSeekReel = (e: React.ChangeEvent<HTMLInputElement>) => {
+    e.stopPropagation();
+    const el = videoRef.current;
+    if (!el) return;
+    const next = Number(e.target.value);
+    if (Number.isFinite(next)) {
+      el.currentTime = next;
+      setCurrentTime(next);
     }
   };
 
@@ -113,10 +136,24 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleAddComment = () => {
-    if (!commentInput.trim() || !currentReel) return;
-    addReelComment(currentReel.id, commentInput.trim());
-    setCommentInput('');
+  const handleAddComment = async () => {
+    const clean = commentInput.trim();
+    if (!clean || !currentReel || isCheckingComment) return;
+    setCommentModerationError(null);
+    setIsCheckingComment(true);
+    try {
+      const verdict = await moderatePublicContent(clean, 'comment');
+      if (!verdict.allowed || verdict.severity === 'block') {
+        setCommentModerationError(
+          verdict.reason || 'Comment blocked by JIT Content Guard due to abusive language or spam.'
+        );
+        return;
+      }
+      addReelComment(currentReel.id, clean);
+      setCommentInput('');
+    } finally {
+      setIsCheckingComment(false);
+    }
   };
 
   const handleCreatorClick = (creatorId: string) => {
@@ -184,7 +221,10 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
         </div>
 
         {/* Video Element */}
-        <div className="relative w-full h-full cursor-pointer" onClick={togglePlay}>
+        <div
+          className="relative w-full h-full cursor-pointer flex items-center justify-center bg-slate-950"
+          onClick={togglePlay}
+        >
           <ResilientVideo
             key={currentReel.id}
             videoRef={videoRef}
@@ -195,8 +235,27 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
             loop
             muted={isMuted}
             playsInline
-            onLoadedData={() => setIsPlaying(true)}
-            className="w-full h-full object-cover"
+            onLoadedData={() => {
+              const el = videoRef.current;
+              if (el) {
+                setDuration(el.duration || 0);
+                setIsPlaying(!el.paused);
+              } else {
+                setIsPlaying(true);
+              }
+            }}
+            className="w-full h-full object-contain sm:object-cover"
+          />
+
+          {/* Track playback progress seamlessly */}
+          <ReelProgressSync
+            videoRef={videoRef}
+            reelId={currentReel.id}
+            onTimeUpdate={(t, d, playing) => {
+              setCurrentTime(t);
+              if (d > 0) setDuration(d);
+              setIsPlaying(playing);
+            }}
           />
 
           {!isPlaying && (
@@ -208,7 +267,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           )}
 
           {/* Bottom Gradient Scrim */}
-          <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-black/90 via-black/40 to-transparent pointer-events-none" />
+          <div className="absolute inset-x-0 bottom-0 h-52 bg-gradient-to-t from-black/90 via-black/45 to-transparent pointer-events-none" />
         </div>
 
         {/* Right Floating Action Rails */}
@@ -290,22 +349,59 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           </div>
         </div>
 
-        {/* Bottom Caption & Music Details */}
-        <div className="absolute left-4 right-16 bottom-4 z-20 text-white pointer-events-auto">
-          <div className="flex items-center gap-2 mb-1">
-            <span
-              onClick={() => handleCreatorClick(currentReel.creatorId)}
-              className="text-xs font-bold cursor-pointer hover:underline"
-            >
-              {currentReel.creatorName}
-            </span>
+        {/* Bottom Caption, Music & Custom Playback Controls */}
+        <div className="absolute left-3.5 right-16 bottom-3 z-20 text-white pointer-events-auto space-y-2">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span
+                onClick={() => handleCreatorClick(currentReel.creatorId)}
+                className="text-xs font-bold cursor-pointer hover:underline"
+              >
+                {currentReel.creatorName}
+              </span>
+            </div>
+            <p className="text-xs leading-snug line-clamp-2 text-white/90 mb-1.5">
+              {currentReel.caption}
+            </p>
+            <div className="flex items-center gap-1.5 text-[10px] text-white/75">
+              <Music className="w-3 h-3 text-emerald-400 shrink-0" />
+              <span className="truncate">{currentReel.musicTitle}</span>
+            </div>
           </div>
-          <p className="text-xs leading-snug line-clamp-2 text-white/90 mb-2">
-            {currentReel.caption}
-          </p>
-          <div className="flex items-center gap-1.5 text-[10px] text-white/70">
-            <Music className="w-3 h-3 text-emerald-400" />
-            <span className="truncate">{currentReel.musicTitle}</span>
+
+          {/* Custom Scrubber & Play/Pause Control Strip */}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="flex items-center gap-2 bg-black/45 backdrop-blur-md px-2.5 py-1.5 rounded-xl border border-white/10"
+          >
+            <button
+              type="button"
+              onClick={togglePlay}
+              aria-label={isPlaying ? 'Pause reel' : 'Play reel'}
+              className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-white/15 shrink-0"
+            >
+              {isPlaying ? <Pause className="w-3.5 h-3.5 fill-white" /> : <Play className="w-3.5 h-3.5 fill-white ml-0.5" />}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={duration > 0 ? duration : 100}
+              step={0.1}
+              value={Math.min(currentTime, duration > 0 ? duration : 100)}
+              onChange={handleSeekReel}
+              aria-label="Seek reel playback"
+              className="flex-1 h-1 rounded-full appearance-none cursor-pointer accent-purple-400"
+              style={{
+                background: `linear-gradient(to right, #a855f7 ${
+                  duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
+                }%, rgba(255,255,255,0.25) ${
+                  duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
+                }%)`,
+              }}
+            />
+            <span className="text-[10px] font-mono tabular-nums text-white/80 shrink-0">
+              {Math.floor(currentTime / 60)}:{String(Math.floor(currentTime % 60)).padStart(2, '0')}
+            </span>
           </div>
         </div>
 
@@ -361,21 +457,35 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
               )}
             </div>
 
+            {commentModerationError && (
+              <div
+                role="alert"
+                aria-live="polite"
+                className="mt-2 p-2 rounded-xl bg-red-950/80 border border-red-500/60 text-red-200 text-[11px] flex items-center gap-1.5"
+              >
+                <ShieldAlert className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                <span>{commentModerationError}</span>
+              </div>
+            )}
+
             <div className="mt-2 pt-2 border-t border-slate-800 flex gap-2">
               <input
                 type="text"
                 placeholder="Add a comment..."
                 value={commentInput}
-                onChange={(e) => setCommentInput(e.target.value)}
+                onChange={(e) => {
+                  setCommentInput(e.target.value);
+                  if (commentModerationError) setCommentModerationError(null);
+                }}
                 onKeyDown={(e) => e.key === 'Enter' && handleAddComment()}
                 className="flex-1 px-3 py-1.5 text-xs bg-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-blue-500 text-white placeholder:text-slate-500"
               />
               <button
                 onClick={handleAddComment}
-                disabled={!commentInput.trim()}
-                className="px-3 py-1.5 bg-blue-600 disabled:opacity-40 rounded-xl text-xs font-semibold hover:bg-blue-700"
+                disabled={!commentInput.trim() || isCheckingComment}
+                className="px-3 py-1.5 bg-blue-600 disabled:opacity-40 rounded-xl text-xs font-semibold hover:bg-blue-700 inline-flex items-center gap-1"
               >
-                Send
+                {isCheckingComment ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Send'}
               </button>
             </div>
           </div>
@@ -389,4 +499,37 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
       />
     </div>
   );
+};
+
+interface ReelProgressSyncProps {
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  reelId: string;
+  onTimeUpdate: (time: number, duration: number, isPlaying: boolean) => void;
+}
+
+const ReelProgressSync: React.FC<ReelProgressSyncProps> = ({
+  videoRef,
+  reelId,
+  onTimeUpdate,
+}) => {
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const sync = () => {
+      onTimeUpdate(el.currentTime || 0, el.duration || 0, !el.paused && !el.ended);
+    };
+    el.addEventListener('timeupdate', sync);
+    el.addEventListener('loadedmetadata', sync);
+    el.addEventListener('play', sync);
+    el.addEventListener('pause', sync);
+    sync();
+    return () => {
+      el.removeEventListener('timeupdate', sync);
+      el.removeEventListener('loadedmetadata', sync);
+      el.removeEventListener('play', sync);
+      el.removeEventListener('pause', sync);
+    };
+  }, [videoRef, reelId]);
+
+  return null;
 };

@@ -4,9 +4,10 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { InGameChatMessage } from '../../types/multiplayer';
+import { InGameChatMessage, RoomPlayer } from '../../types/multiplayer';
 import { saveMediaFile, validateMediaFile } from '../../services/mediaStorage';
 import { APP_CONFIG } from '../../constants/branding';
+import { moderatePublicContent } from '../../services/aiClient';
 import {
   Send,
   Image as ImageIcon,
@@ -17,7 +18,11 @@ import {
   Trash2,
   AlertCircle,
   Loader2,
-  Check,
+  Mic,
+  MicOff,
+  MessageSquare,
+  MessageSquareOff,
+  Shield,
 } from 'lucide-react';
 
 interface InGameChatDrawerProps {
@@ -28,6 +33,13 @@ interface InGameChatDrawerProps {
   onSendMessage: (text?: string, imageUrl?: string) => void;
   mutedPlayerIds: string[];
   onToggleMutePlayer: (playerId: string) => void;
+  isHost?: boolean;
+  isHostChatRestricted?: boolean;
+  hostMutedChatIds?: string[];
+  hostMutedVoiceIds?: string[];
+  onHostToggleChatMute?: (playerId: string) => void;
+  onHostToggleVoiceMute?: (playerId: string) => void;
+  participants?: RoomPlayer[];
 }
 
 const QUICK_EMOJIS = ['🔥', '👏', '😂', '🏆', '🎯', '🚀', '❤️', '👑', '👍', '😱', '🎲', '♟️'];
@@ -40,11 +52,19 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
   onSendMessage,
   mutedPlayerIds,
   onToggleMutePlayer,
+  isHost = false,
+  isHostChatRestricted = false,
+  hostMutedChatIds = [],
+  hostMutedVoiceIds = [],
+  onHostToggleChatMute,
+  onHostToggleVoiceMute,
+  participants = [],
 }) => {
   const [inputText, setInputText] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [isModeratingText, setIsModeratingText] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
@@ -92,9 +112,25 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() && !selectedFile) return;
+    const cleanText = inputText.trim();
+    if ((!cleanText && !selectedFile) || isModeratingText) return;
 
     setErrorMessage(null);
+
+    if (cleanText) {
+      setIsModeratingText(true);
+      try {
+        const verdict = await moderatePublicContent(cleanText, 'room_chat');
+        if (!verdict.allowed || verdict.severity === 'block') {
+          setErrorMessage(
+            verdict.reason || 'Blocked by JIT Content Guard: please avoid abusive language or spam in room chat.'
+          );
+          return;
+        }
+      } finally {
+        setIsModeratingText(false);
+      }
+    }
 
     let uploadedDataUrl: string | undefined;
     if (selectedFile) {
@@ -102,7 +138,7 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
         setIsUploadingImage(true);
         const { dataUrl } = await saveMediaFile(selectedFile);
         uploadedDataUrl = dataUrl;
-      } catch (err: unknown) {
+      } catch {
         setErrorMessage('Failed to save image.');
         setIsUploadingImage(false);
         return;
@@ -111,7 +147,7 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
       }
     }
 
-    onSendMessage(inputText.trim() || undefined, uploadedDataUrl);
+    onSendMessage(cleanText || undefined, uploadedDataUrl);
     setInputText('');
     handleClearImage();
     setShowEmojiPicker(false);
@@ -147,6 +183,62 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Host Moderation Quick Strip */}
+      {isHost && participants.filter((p) => p.id !== currentUserId).length > 0 && (
+        <div className="px-3 py-2.5 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-100 dark:border-slate-800 space-y-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+            <Shield className="w-3 h-3" />
+            <span>Host Voice & Chat Controls</span>
+          </div>
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
+            {participants
+              .filter((p) => p.id !== currentUserId)
+              .map((p) => {
+                const chatMuted = hostMutedChatIds.includes(p.id);
+                const voiceMuted = hostMutedVoiceIds.includes(p.id);
+                return (
+                  <div
+                    key={p.id}
+                    className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shrink-0"
+                  >
+                    <span className="text-[11px] font-bold text-slate-700 dark:text-slate-200 max-w-[75px] truncate">
+                      {p.name.split(' ')[0]}
+                    </span>
+                    {onHostToggleVoiceMute && (
+                      <button
+                        type="button"
+                        onClick={() => onHostToggleVoiceMute(p.id)}
+                        title={voiceMuted ? 'Unmute Mic' : 'Mute Mic'}
+                        className={`p-1 rounded-lg transition-colors ${
+                          voiceMuted
+                            ? 'bg-red-100 dark:bg-red-950 text-red-600 dark:text-red-400'
+                            : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+                        }`}
+                      >
+                        {voiceMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                      </button>
+                    )}
+                    {onHostToggleChatMute && (
+                      <button
+                        type="button"
+                        onClick={() => onHostToggleChatMute(p.id)}
+                        title={chatMuted ? 'Allow Chat' : 'Mute Chat'}
+                        className={`p-1 rounded-lg transition-colors ${
+                          chatMuted
+                            ? 'bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300'
+                            : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
+                        }`}
+                      >
+                        {chatMuted ? <MessageSquareOff className="w-3 h-3" /> : <MessageSquare className="w-3 h-3" />}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        </div>
+      )}
 
       {/* Error Callout */}
       {errorMessage && (
@@ -277,59 +369,71 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
         </div>
       )}
 
-      {/* Input Form */}
-      <form onSubmit={handleSend} className="p-3 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center gap-2 shrink-0">
-        <input
-          type="file"
-          ref={fileInputRef}
-          onChange={handleFileChange}
-          accept="image/*"
-          className="hidden"
-        />
+      {/* Input Form OR Host Chat Restriction Banner */}
+      {isHostChatRestricted ? (
+        <div className="p-3.5 border-t border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/40 flex items-center gap-2 text-xs text-amber-800 dark:text-amber-200 shrink-0">
+          <MessageSquareOff className="w-4 h-4 shrink-0" />
+          <span className="font-semibold">
+            Chat messages are restricted for you by the Room Host.
+          </span>
+        </div>
+      ) : (
+        <form onSubmit={handleSend} className="p-3 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center gap-2 shrink-0">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            accept="image/*"
+            className="hidden"
+          />
 
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-          title="Select Image from Gallery"
-        >
-          <ImageIcon className="w-4 h-4" />
-        </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            title="Select Image from Gallery"
+          >
+            <ImageIcon className="w-4 h-4" />
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-          className={`p-2 rounded-xl transition-colors ${
-            showEmojiPicker
-              ? 'text-amber-500 bg-amber-50 dark:bg-amber-950/40'
-              : 'text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'
-          }`}
-          title="Emoji Tray"
-        >
-          <Smile className="w-4 h-4" />
-        </button>
+          <button
+            type="button"
+            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+            className={`p-2 rounded-xl transition-colors ${
+              showEmojiPicker
+                ? 'text-amber-500 bg-amber-50 dark:bg-amber-950/40'
+                : 'text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+            title="Emoji Tray"
+          >
+            <Smile className="w-4 h-4" />
+          </button>
 
-        <input
-          type="text"
-          placeholder="Message room..."
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          className="flex-1 px-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white"
-        />
+          <input
+            type="text"
+            placeholder="Message room..."
+            value={inputText}
+            onChange={(e) => {
+              setInputText(e.target.value);
+              if (errorMessage) setErrorMessage(null);
+            }}
+            className="flex-1 px-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white"
+          />
 
-        <button
-          type="submit"
-          disabled={(!inputText.trim() && !selectedFile) || isUploadingImage}
-          className="p-2 bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-40 text-white rounded-xl shadow-md transition-all shrink-0"
-          title="Send"
-        >
-          {isUploadingImage ? (
-            <Loader2 className="w-4 h-4 animate-spin" />
-          ) : (
-            <Send className="w-4 h-4" />
-          )}
-        </button>
-      </form>
+          <button
+            type="submit"
+            disabled={(!inputText.trim() && !selectedFile) || isUploadingImage || isModeratingText}
+            className="p-2 bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-40 text-white rounded-xl shadow-md transition-all shrink-0"
+            title="Send"
+          >
+            {isUploadingImage || isModeratingText ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Send className="w-4 h-4" />
+            )}
+          </button>
+        </form>
+      )}
     </div>
   );
 };

@@ -179,6 +179,29 @@ class MultiplayerSocketService {
     this.send('CALL_SIGNAL', { roomCode, signalData, targetPlayerId, senderId, callType });
   }
 
+  public sendReaction(
+    roomCode: string,
+    reaction: { id: string; emoji: string; senderId: string; senderName: string; createdAtMs: number }
+  ): void {
+    this.send('SEND_REACTION', { roomCode, reaction });
+  }
+
+  public hostUpdateModeration(
+    roomCode: string,
+    mutedVoiceIds: string[],
+    mutedChatIds: string[]
+  ): void {
+    this.send('HOST_SET_MODERATION', { roomCode, mutedVoiceIds, mutedChatIds });
+  }
+
+  public hostRotatePlayers(
+    roomCode: string,
+    nextActiveIds: string[],
+    resetState?: any
+  ): void {
+    this.send('HOST_ROTATE_PLAYERS', { roomCode, nextActiveIds, resetState });
+  }
+
   public kickPlayer(roomCode: string, targetPlayerId: string): void {
     this.send('KICK_PLAYER', { roomCode, targetPlayerId });
   }
@@ -189,3 +212,4 @@ class MultiplayerSocketService {
 }
 
 export const multiplayerSocket = new MultiplayerSocketService();
+

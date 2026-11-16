@@ -27,6 +27,8 @@ export interface UseRoomVoiceChatOptions {
   roomCode?: string;
   localPlayer: { id: string; name: string; avatar: string };
   enabled?: boolean;
+  isHostMutedMic?: boolean;
+  hostMutedVoiceIds?: string[];
 }
 
 export interface RoomVoiceChatState {
@@ -34,6 +36,7 @@ export interface RoomVoiceChatState {
   isSpeakerEnabled: boolean;
   isConnectingMic: boolean;
   isSpeaking: boolean;
+  isHostMutedMic: boolean;
   voiceError: string | null;
   voicePeers: FirestoreVoicePeer[];
   connectedAudioCount: number;
@@ -46,6 +49,8 @@ export function useRoomVoiceChat({
   roomCode,
   localPlayer,
   enabled = true,
+  isHostMutedMic = false,
+  hostMutedVoiceIds = [],
 }: UseRoomVoiceChatOptions): RoomVoiceChatState {
   const [isMicEnabled, setIsMicEnabled] = useState(false);
   const [isSpeakerEnabled, setIsSpeakerEnabled] = useState(true);
@@ -57,6 +62,7 @@ export function useRoomVoiceChat({
 
   const isMicRef = useRef(isMicEnabled);
   const isSpeakerRef = useRef(isSpeakerEnabled);
+  const hostMutedVoiceSetRef = useRef<Set<string>>(new Set(hostMutedVoiceIds));
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const pendingIceRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
@@ -71,14 +77,17 @@ export function useRoomVoiceChat({
 
   useEffect(() => {
     isSpeakerRef.current = isSpeakerEnabled;
-    remoteAudioElsRef.current.forEach((audioEl) => {
-      audioEl.muted = !isSpeakerEnabled;
-      audioEl.volume = isSpeakerEnabled ? 1 : 0;
-      if (isSpeakerEnabled && audioEl.paused && audioEl.srcObject) {
+    const mutedSet = new Set(hostMutedVoiceIds);
+    hostMutedVoiceSetRef.current = mutedSet;
+    remoteAudioElsRef.current.forEach((audioEl, peerId) => {
+      const effectiveMuted = !isSpeakerEnabled || mutedSet.has(peerId);
+      audioEl.muted = effectiveMuted;
+      audioEl.volume = effectiveMuted ? 0 : 1;
+      if (!effectiveMuted && audioEl.paused && audioEl.srcObject) {
         audioEl.play().catch(() => {});
       }
     });
-  }, [isSpeakerEnabled]);
+  }, [isSpeakerEnabled, hostMutedVoiceIds]);
 
   const stopSpeakingMeter = useCallback(() => {
     if (meterTimerRef.current !== null) {
@@ -216,8 +225,9 @@ export function useRoomVoiceChat({
           remoteAudioElsRef.current.set(targetPeerId, audioEl);
         }
         audioEl.srcObject = remoteStream;
-        audioEl.muted = !isSpeakerRef.current;
-        audioEl.volume = isSpeakerRef.current ? 1 : 0;
+        const effectiveMuted = !isSpeakerRef.current || hostMutedVoiceSetRef.current.has(targetPeerId);
+        audioEl.muted = effectiveMuted;
+        audioEl.volume = effectiveMuted ? 0 : 1;
         audioEl.play().catch(() => {});
         setConnectedAudioCount(remoteAudioElsRef.current.size);
       };
@@ -380,6 +390,22 @@ export function useRoomVoiceChat({
     sendOfferToPeer,
   ]);
 
+  // Enforce immediate mic shutdown when Host mutes this participant
+  useEffect(() => {
+    if (!isHostMutedMic) return;
+    stopLocalMicStream();
+    setIsMicEnabled(false);
+    setIsConnectingMic(false);
+    if (activeRoomRef.current) {
+      upsertFirestoreVoicePeer(activeRoomRef.current, {
+        peerId: localPlayer.id,
+        name: localPlayer.name,
+        avatar: localPlayer.avatar,
+        micEnabled: false,
+      }).catch(() => {});
+    }
+  }, [isHostMutedMic, localPlayer.avatar, localPlayer.id, localPlayer.name, stopLocalMicStream]);
+
   // Cleanup local media on unmount
   useEffect(() => {
     return () => {
@@ -390,6 +416,12 @@ export function useRoomVoiceChat({
 
   const toggleMic = useCallback(async () => {
     setVoiceError(null);
+
+    if (isHostMutedMic) {
+      setIsMicEnabled(false);
+      setVoiceError('Your microphone was muted by the Room Host.');
+      return;
+    }
 
     if (isMicRef.current) {
       // Turn Mic OFF
@@ -463,6 +495,7 @@ export function useRoomVoiceChat({
       setIsConnectingMic(false);
     }
   }, [
+    isHostMutedMic,
     localPlayer.avatar,
     localPlayer.id,
     localPlayer.name,
@@ -484,6 +517,7 @@ export function useRoomVoiceChat({
     isSpeakerEnabled,
     isConnectingMic,
     isSpeaking,
+    isHostMutedMic,
     voiceError,
     voicePeers,
     connectedAudioCount,

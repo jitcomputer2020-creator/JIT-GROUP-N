@@ -15,6 +15,7 @@ import {
 } from '../../services/mediaStorage';
 import { uploadVideoAssetToCloud } from '../../lib/firebase';
 import { ResilientVideo } from '../common/ResilientVideo';
+import { ResponsiveImage } from '../common/ResponsiveImage';
 import { X, Image as ImageIcon, Trash2, Check } from 'lucide-react';
 
 interface EditPostModalProps {
@@ -115,17 +116,27 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
           )}
 
           {/* Media Preview */}
-          {mediaUrls.length > 0 && (
-            <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-black max-h-60 flex items-center justify-center">
+          {mediaUrls.filter((u) => u && u.trim()).length > 0 && mediaType !== 'none' && (
+            <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 w-full">
               {mediaType === 'video' ? (
-                <ResilientVideo src={mediaUrls[0]} poster={post.thumbnailUrl} controls className="max-h-60 w-auto object-contain" />
+                <ResilientVideo
+                  src={mediaUrls[0]}
+                  poster={post.thumbnailUrl}
+                  controls
+                  className="w-full h-auto max-h-64 object-contain"
+                />
               ) : (
-                <img src={mediaUrls[0]} alt="Post media" className="max-h-60 w-auto object-contain" />
+                <ResponsiveImage
+                  src={mediaUrls[0]}
+                  alt="Edited post image"
+                  fit="contain"
+                  className="w-full h-auto max-h-64 object-contain mx-auto block"
+                />
               )}
               <button
                 type="button"
                 onClick={handleRemoveMedia}
-                className="absolute top-2 right-2 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
                 title="Remove Media"
               >
                 <Trash2 className="w-4 h-4" />

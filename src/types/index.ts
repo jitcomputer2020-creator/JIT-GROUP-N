@@ -206,7 +206,7 @@ export interface CallSession {
   durationSeconds?: number;
 }
 
-export type GameId = 'ludo' | 'tictactoe' | 'quiz' | 'chess' | 'snake_ladder' | 'carrom' | 'spin_wheel';
+export type GameId = 'ludo' | 'tictactoe' | 'quiz' | 'chess' | 'snake_ladder' | 'carrom' | 'spin_wheel' | 'truth_dare';
 
 export interface GameMetadata {
   id: GameId;
@@ -259,16 +259,26 @@ export interface GameRoom {
   createdAt: string;
 }
 
+export interface TournamentTimeSlot {
+  id: string;
+  label: string;
+  seatsTaken: number;
+  maxSeats: number;
+}
+
 export interface Tournament {
   id: string;
   gameId: GameId;
   title: string;
+  description?: string;
+  format?: string;
   entryFeePoints: number;
   prizePoolPoints: number;
   totalSlots: number;
   registeredCount: number;
   status: 'upcoming' | 'live' | 'completed';
   startDate: string;
+  timeSlots?: TournamentTimeSlot[];
   winner?: {
     id: string;
     name: string;

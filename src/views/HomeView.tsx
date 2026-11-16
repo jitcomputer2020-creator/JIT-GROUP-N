@@ -16,9 +16,12 @@ import {
 } from '../services/mediaStorage';
 import { uploadVideoAssetToCloud, isVideoContentExpired } from '../lib/firebase';
 import { ResilientVideo } from '../components/common/ResilientVideo';
+import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import { LikedByModal } from '../components/modals/LikedByModal';
 import { EditPostModal } from '../components/modals/EditPostModal';
 import { AddStoryModal } from '../components/modals/AddStoryModal';
+import { AiCaptionGenerator } from '../components/common/AiCaptionGenerator';
+import { moderatePublicContent } from '../services/aiClient';
 import {
   Heart,
   MessageCircle,
@@ -37,6 +40,8 @@ import {
   Loader2,
   Megaphone,
   Clock,
+  Sparkles,
+  ShieldAlert,
 } from 'lucide-react';
 
 interface HomeViewProps {
@@ -80,11 +85,14 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
   const [mediaType, setMediaType] = useState<'image' | 'video' | 'none'>('none');
   const [isPosting, setIsPosting] = useState(false);
   const [postError, setPostError] = useState<string | null>(null);
+  const [showAiCaptionHelper, setShowAiCaptionHelper] = useState(false);
 
   // Comments state
   const [activeCommentsPostId, setActiveCommentsPostId] = useState<string | null>(null);
   const [commentText, setCommentText] = useState('');
   const [replyingToCommentId, setReplyingToCommentId] = useState<string | null>(null);
+  const [isModeratingComment, setIsModeratingComment] = useState(false);
+  const [commentModerationError, setCommentModerationError] = useState<string | null>(null);
 
   // Modals state
   const [likedByPostId, setLikedByPostId] = useState<string | null>(null);
@@ -216,12 +224,26 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
     }
   };
 
-  // Comments submission
-  const handleAddComment = (postId: string) => {
-    if (!commentText.trim()) return;
-    addComment(postId, commentText.trim(), replyingToCommentId || undefined);
-    setCommentText('');
-    setReplyingToCommentId(null);
+  // Comments submission (Automated Content Moderation Filter)
+  const handleAddComment = async (postId: string) => {
+    const clean = commentText.trim();
+    if (!clean || isModeratingComment) return;
+    setCommentModerationError(null);
+    setIsModeratingComment(true);
+    try {
+      const verdict = await moderatePublicContent(clean, 'comment');
+      if (!verdict.allowed || verdict.severity === 'block') {
+        setCommentModerationError(
+          verdict.reason || 'Comment blocked by JIT Content Guard due to abusive language or spam.'
+        );
+        return;
+      }
+      addComment(postId, clean, replyingToCommentId || undefined);
+      setCommentText('');
+      setReplyingToCommentId(null);
+    } finally {
+      setIsModeratingComment(false);
+    }
   };
 
   // Share post
@@ -318,20 +340,22 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                 </div>
 
                 {ann.mediaUrl && (
-                  <div className="rounded-xl overflow-hidden bg-black/90 border border-slate-200/70 dark:border-slate-700/70 max-h-64 flex items-center justify-center relative">
+                  <div className="rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-700/80 w-full relative">
                     {ann.mediaType === 'video' ? (
                       <ResilientVideo
                         src={ann.mediaUrl}
                         poster={ann.thumbnailUrl}
                         controls
-                        className="max-h-64 w-full object-contain"
+                        className="w-full h-auto max-h-72 object-contain"
                       />
                     ) : (
-                      <img
+                      <ResponsiveImage
                         src={ann.mediaUrl}
                         alt={ann.title}
+                        fit="contain"
+                        className="w-full h-auto max-h-72 object-contain mx-auto block"
+                        fallbackText="Notice image unavailable"
                         onClick={() => setActiveAnnouncementModal(ann)}
-                        className="max-h-64 w-full object-contain cursor-pointer"
                       />
                     )}
                   </div>
@@ -422,16 +446,26 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
               {/* Media Preview Box */}
               {mediaPreviewUrl && (
-                <div className="relative mt-2 rounded-2xl overflow-hidden bg-black max-h-56 flex items-center justify-center border border-slate-200 dark:border-slate-700">
+                <div className="relative mt-2 rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
                   {mediaType === 'video' ? (
-                    <video src={mediaPreviewUrl} controls className="max-h-56 w-auto object-contain" />
+                    <ResilientVideo
+                      src={mediaPreviewUrl}
+                      controls
+                      className="w-full h-auto max-h-64 object-contain"
+                    />
                   ) : (
-                    <img src={mediaPreviewUrl} alt="Preview" className="max-h-56 w-auto object-contain" />
+                    <ResponsiveImage
+                      src={mediaPreviewUrl}
+                      alt="Selected upload preview"
+                      fit="contain"
+                      className="w-full h-auto max-h-64 object-contain mx-auto block"
+                    />
                   )}
                   <button
                     type="button"
                     onClick={handleClearMedia}
-                    className="absolute top-2 right-2 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                    className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                    aria-label="Remove media preview"
                   >
                     <X className="w-4 h-4" />
                   </button>
@@ -447,8 +481,24 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                 className="hidden"
               />
 
-              <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
-                <div className="flex items-center gap-2 text-xs text-slate-500">
+              {showAiCaptionHelper && (
+                <div className="mt-2.5">
+                  <AiCaptionGenerator
+                    contentType="post"
+                    currentText={newContent}
+                    onSelectCaption={(suggested) => setNewContent(suggested)}
+                    onAppendHashtags={(tags) =>
+                      setNewContent((prev) => {
+                        const base = prev.trim();
+                        return base ? `${base} ${tags}` : tags;
+                      })
+                    }
+                  />
+                </div>
+              )}
+
+              <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800 gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 text-xs text-slate-500">
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -456,6 +506,18 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                   >
                     <ImageIcon className="w-4 h-4 text-emerald-500" />
                     <span>{mediaFile ? 'Change Media' : 'Media'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAiCaptionHelper((v) => !v)}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition-colors font-semibold ${
+                      showAiCaptionHelper
+                        ? 'bg-indigo-600 text-white'
+                        : 'hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
+                    }`}
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>AI Caption</span>
                   </button>
                   <button
                     type="button"
@@ -607,28 +669,40 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
               </p>
 
               {/* Post Attached Media (if any) */}
-              {post.mediaUrls && post.mediaUrls.length > 0 && (
-                <div className="relative mb-4 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-black max-h-80 flex items-center justify-center">
-                  {post.mediaType === 'video' ? (
-                    <>
-                      <ResilientVideo
-                        src={post.mediaUrls[0]}
-                        poster={post.thumbnailUrl}
-                        controls
-                        className="max-h-80 w-auto object-contain"
+              {(() => {
+                const primaryMediaUrl = post.mediaUrls?.find(
+                  (u) => typeof u === 'string' && u.trim().length > 0
+                );
+                if (!primaryMediaUrl || post.mediaType === 'none') return null;
+                return (
+                  <div className="relative mb-4 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
+                    {post.mediaType === 'video' ? (
+                      <>
+                        <ResilientVideo
+                          src={primaryMediaUrl}
+                          poster={post.thumbnailUrl}
+                          controls
+                          className="w-full h-auto max-h-[440px] object-contain"
+                        />
+                        {typeof post.expiresAt === 'number' && post.expiresAt > Date.now() && (
+                          <span className="absolute top-2.5 left-2.5 z-10 px-2 py-0.5 rounded-lg bg-slate-900/75 backdrop-blur-sm text-[10px] font-semibold text-amber-300 flex items-center gap-1 pointer-events-none">
+                            <Clock className="w-3 h-3" />
+                            {Math.max(1, Math.ceil((post.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))}d left
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <ResponsiveImage
+                        src={primaryMediaUrl}
+                        alt={post.authorName ? `${post.authorName} feed image` : 'Feed image'}
+                        fit="contain"
+                        className="w-full h-auto max-h-[460px] object-contain mx-auto block"
+                        fallbackText="Post image unavailable"
                       />
-                      {typeof post.expiresAt === 'number' && post.expiresAt > Date.now() && (
-                        <span className="absolute top-2 left-2 px-2 py-0.5 rounded-lg bg-black/65 backdrop-blur-sm text-[10px] font-semibold text-amber-300 flex items-center gap-1 pointer-events-none">
-                          <Clock className="w-3 h-3" />
-                          {Math.max(1, Math.ceil((post.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))}d left
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <img src={post.mediaUrls[0]} alt="Post media" className="max-h-80 w-auto object-contain" />
-                  )}
-                </div>
-              )}
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Interactive Action Bar */}
               <div className="flex items-center justify-between pt-3 border-t border-slate-100 dark:border-slate-800 text-slate-500 dark:text-slate-400">
@@ -708,21 +782,40 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                         </button>
                       </div>
                     )}
+                    {commentModerationError && (
+                      <div
+                        role="alert"
+                        aria-live="polite"
+                        className="mb-2 p-2.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 text-red-700 dark:text-red-300 text-xs flex items-center gap-2"
+                      >
+                        <ShieldAlert className="w-4 h-4 text-red-500 shrink-0" />
+                        <span>{commentModerationError}</span>
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       <input
                         type="text"
                         placeholder={replyingToCommentId ? 'Write your reply...' : 'Write a comment...'}
                         value={commentText}
-                        onChange={(e) => setCommentText(e.target.value)}
+                        onChange={(e) => {
+                          setCommentText(e.target.value);
+                          if (commentModerationError) setCommentModerationError(null);
+                        }}
                         onKeyDown={(e) => e.key === 'Enter' && handleAddComment(post.id)}
                         className="flex-1 px-3 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white"
                       />
                       <button
                         onClick={() => handleAddComment(post.id)}
-                        disabled={!commentText.trim()}
-                        className="px-3.5 py-2 bg-blue-600 disabled:opacity-40 text-white rounded-xl text-xs font-semibold hover:bg-blue-700 transition-colors"
+                        disabled={!commentText.trim() || isModeratingComment}
+                        className="px-3.5 py-2 bg-blue-600 disabled:opacity-40 text-white rounded-xl text-xs font-semibold hover:bg-blue-700 transition-colors inline-flex items-center gap-1.5"
                       >
-                        {replyingToCommentId ? 'Reply' : 'Comment'}
+                        {isModeratingComment ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : replyingToCommentId ? (
+                          'Reply'
+                        ) : (
+                          'Comment'
+                        )}
                       </button>
                     </div>
                   </div>
@@ -892,19 +985,21 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
             <div className="p-4 sm:p-5 overflow-y-auto space-y-4">
               {activeAnnouncementModal.mediaUrl && (
-                <div className="rounded-2xl overflow-hidden bg-black border border-slate-200 dark:border-slate-800 max-h-80 flex items-center justify-center">
+                <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 w-full">
                   {activeAnnouncementModal.mediaType === 'video' ? (
                     <ResilientVideo
                       src={activeAnnouncementModal.mediaUrl}
                       poster={activeAnnouncementModal.thumbnailUrl}
                       controls
-                      className="max-h-80 w-full object-contain"
+                      className="w-full h-auto max-h-80 object-contain"
                     />
                   ) : (
-                    <img
+                    <ResponsiveImage
                       src={activeAnnouncementModal.mediaUrl}
                       alt={activeAnnouncementModal.title}
-                      className="max-h-80 w-full object-contain"
+                      fit="contain"
+                      className="w-full h-auto max-h-80 object-contain mx-auto block"
+                      fallbackText="Announcement media unavailable"
                     />
                   )}
                 </div>

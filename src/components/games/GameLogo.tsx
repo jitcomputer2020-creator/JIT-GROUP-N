@@ -187,5 +187,34 @@ export const GameLogo: React.FC<GameLogoProps> = ({ gameId, size = 'md', classNa
           </svg>
         </div>
       );
+
+    case 'truth_dare':
+      return (
+        <div className={`${dims} ${className} rounded-2xl overflow-hidden shadow-sm border border-fuchsia-400/50 shrink-0`}>
+          <svg viewBox="0 0 64 64" className="w-full h-full" aria-hidden="true">
+            <defs>
+              <linearGradient id="tdBg" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#9333EA" />
+                <stop offset="100%" stopColor="#EC4899" />
+              </linearGradient>
+            </defs>
+            <rect width="64" height="64" rx="14" fill="url(#tdBg)" />
+            <circle cx="32" cy="32" r="22" fill="#FFFFFF" opacity="0.14" />
+            {/* Truth Flame & Dare Lightning Split */}
+            <path
+              d="M21 18L29 18L24 30L31 30L19 47L23 34L16 34Z"
+              fill="#FDE047"
+            />
+            <circle cx="43" cy="24" r="7.5" fill="#38BDF8" stroke="#FFFFFF" strokeWidth="2.5" />
+            <path
+              d="M36 45C36 39 49 39 49 45"
+              fill="none"
+              stroke="#FFFFFF"
+              strokeWidth="3.2"
+              strokeLinecap="round"
+            />
+          </svg>
+        </div>
+      );
   }
 };

@@ -265,9 +265,14 @@ export async function saveCompressedProfileMediaFile(
  * Persistently saves a file into IndexedDB and returns the permanent Data URL
  */
 export async function saveMediaFile(file: File): Promise<{ id: string; dataUrl: string }> {
-  const dataUrl = file.type.startsWith('image/') && !file.type.includes('gif')
-    ? await compressImageFile(file, { maxWidth: 1280, maxHeight: 1280, maxDataUrlLength: 450_000 })
-    : await fileToDataUrl(file);
+  const isImage = file.type.startsWith('image/');
+  let dataUrl =
+    isImage && !file.type.includes('gif')
+      ? await compressImageFile(file, { maxWidth: 1280, maxHeight: 1280, maxDataUrlLength: 340_000 })
+      : await fileToDataUrl(file);
+  if (isImage && dataUrl.length > 680_000) {
+    dataUrl = await compressImageFile(file, { maxWidth: 1024, maxHeight: 1024, maxDataUrlLength: 340_000 });
+  }
   const id = `media_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
   try {

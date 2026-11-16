@@ -79,3 +79,28 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+@keyframes jitFloatReaction {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 24px, 0) scale(0.7);
+  }
+  15% {
+    opacity: 1;
+    transform: translate3d(0, -18px, 0) scale(1.12);
+  }
+  75% {
+    opacity: 0.95;
+    transform: translate3d(-12px, -165px, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(10px, -245px, 0) scale(0.88);
+  }
+}
+
+.animate-jit-float-reaction {
+  animation: jitFloatReaction 2.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  will-change: transform, opacity;
+}
+

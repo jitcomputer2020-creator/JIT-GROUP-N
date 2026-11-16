@@ -52,7 +52,12 @@ import {
   Post,
   GlobalAnnouncement,
 } from '../types';
-import { MultiplayerRoom, RoomPlayer, InGameChatMessage } from '../types/multiplayer';
+import {
+  MultiplayerRoom,
+  RoomPlayer,
+  InGameChatMessage,
+  RoomReaction,
+} from '../types/multiplayer';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -1267,12 +1272,36 @@ export async function searchCloudUsers(queryStr: string, maxResults = 30): Promi
 
 function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   let players: RoomPlayer[] = [];
+  let waitingPlayers: RoomPlayer[] = [];
+  let reactions: RoomReaction[] = [];
+  let mutedVoiceIds: string[] = [];
+  let mutedChatIds: string[] = [];
   let gameState: any = null;
   let messages: InGameChatMessage[] = [];
   try {
     players = typeof data.playersJson === 'string' ? JSON.parse(data.playersJson) : [];
   } catch {
     players = [];
+  }
+  try {
+    waitingPlayers = typeof data.waitingPlayersJson === 'string' ? JSON.parse(data.waitingPlayersJson) : [];
+  } catch {
+    waitingPlayers = [];
+  }
+  try {
+    reactions = typeof data.reactionsJson === 'string' ? JSON.parse(data.reactionsJson) : [];
+  } catch {
+    reactions = [];
+  }
+  try {
+    mutedVoiceIds = typeof data.mutedVoiceIdsJson === 'string' ? JSON.parse(data.mutedVoiceIdsJson) : [];
+  } catch {
+    mutedVoiceIds = [];
+  }
+  try {
+    mutedChatIds = typeof data.mutedChatIdsJson === 'string' ? JSON.parse(data.mutedChatIdsJson) : [];
+  } catch {
+    mutedChatIds = [];
   }
   try {
     const parsedState = typeof data.gameStateJson === 'string' ? JSON.parse(data.gameStateJson) : null;
@@ -1291,15 +1320,25 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
       ? data.createdAt.toMillis()
       : Date.now();
 
+  const isOpenGroup = Boolean(data.isOpenGroup);
+  const maxPlayers = Number(data.maxPlayers || 2);
+  const activeSeatLimit = Number(data.activeSeatLimit || maxPlayers || 2);
+
   return {
     roomCode: String(data.roomCode || ''),
     gameId: String(data.gameId || 'tictactoe'),
     hostId: String(data.hostId || ''),
     createdAt: createdMs,
     status: (data.status as MultiplayerRoom['status']) || 'waiting',
-    maxPlayers: Number(data.maxPlayers || 2),
+    maxPlayers,
     isPublicMatch: Boolean(data.isPublicMatch),
+    isOpenGroup,
+    activeSeatLimit,
     players,
+    waitingPlayers,
+    reactions,
+    mutedVoiceIds,
+    mutedChatIds,
     gameState,
     currentTurn: String(data.currentTurn || ''),
     messages,
@@ -1311,9 +1350,23 @@ export async function createFirestoreGameRoom(
   gameId: string,
   maxPlayers: number,
   hostPlayer: { id: string; name: string; avatar: string },
-  isPublicMatch = false
+  isPublicMatchOrOptions:
+    | boolean
+    | { isPublicMatch?: boolean; isOpenGroup?: boolean; activeSeatLimit?: number } = false
 ): Promise<MultiplayerRoom> {
-  const safeMax = Math.min(4, Math.max(2, maxPlayers));
+  const opts =
+    typeof isPublicMatchOrOptions === 'boolean'
+      ? { isPublicMatch: isPublicMatchOrOptions, isOpenGroup: false, activeSeatLimit: undefined }
+      : isPublicMatchOrOptions || {};
+  const isPublicMatch = Boolean(opts.isPublicMatch);
+  const isOpenGroup = Boolean(opts.isOpenGroup);
+  const safeMax = isOpenGroup
+    ? Math.min(999, Math.max(2, maxPlayers || 999))
+    : Math.min(4, Math.max(2, maxPlayers || 2));
+  const safeSeatLimit = isOpenGroup
+    ? Math.min(8, Math.max(2, opts.activeSeatLimit || (gameId === 'truth_dare' ? 6 : gameId === 'ludo' ? 4 : 2)))
+    : safeMax;
+
   let chosenCode = '';
   for (let attempt = 0; attempt < 20; attempt++) {
     const candidate = Math.floor(1000 + Math.random() * 9000).toString();
@@ -1340,18 +1393,27 @@ export async function createFirestoreGameRoom(
       isHost: true,
       isReady: true,
       color: 'Red',
+      joinedAtMs: Date.now(),
     },
   ];
+
+  const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'in_game' : 'waiting';
 
   const payload = {
     roomCode: chosenCode,
     gameId,
     hostId: hostPlayer.id,
-    status: 'waiting',
+    status: initialStatus,
     maxPlayers: safeMax,
     playerCount: 1,
     isPublicMatch,
+    isOpenGroup,
+    activeSeatLimit: safeSeatLimit,
     playersJson: JSON.stringify(players),
+    waitingPlayersJson: '[]',
+    reactionsJson: '[]',
+    mutedVoiceIdsJson: '[]',
+    mutedChatIdsJson: '[]',
     gameStateJson: '{}',
     messagesJson: '[]',
     moveAction: 'ROOM_CREATED',
@@ -1374,10 +1436,16 @@ export async function createFirestoreGameRoom(
     gameId,
     hostId: hostPlayer.id,
     createdAt: Date.now(),
-    status: 'waiting',
+    status: initialStatus,
     maxPlayers: safeMax,
     isPublicMatch,
+    isOpenGroup,
+    activeSeatLimit: safeSeatLimit,
     players,
+    waitingPlayers: [],
+    reactions: [],
+    mutedVoiceIds: [],
+    mutedChatIds: [],
     gameState: null,
     currentTurn: hostPlayer.id,
     messages: [],
@@ -1407,16 +1475,65 @@ export async function joinFirestoreGameRoom(
   }
 
   const parsed = parseRoomSnapshotData(data);
-  const alreadyJoined = parsed.players.some((p) => p.id === player.id);
+  const currentWaiting = parsed.waitingPlayers || [];
+  const alreadyJoined =
+    parsed.players.some((p) => p.id === player.id) ||
+    currentWaiting.some((p) => p.id === player.id);
   if (alreadyJoined) {
     return parsed;
+  }
+
+  const seatColors = ['Red', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink'];
+
+  if (parsed.isOpenGroup) {
+    const seatLimit = Math.max(
+      2,
+      parsed.activeSeatLimit ||
+        (parsed.gameId === 'truth_dare' ? 6 : parsed.gameId === 'ludo' ? 4 : 2)
+    );
+    const hasOpenActiveSeat = parsed.players.length < seatLimit;
+    const newEntry: RoomPlayer = {
+      id: player.id,
+      name: player.name.slice(0, 80),
+      avatar: sanitizeAvatarUrl(player.avatar),
+      isHost: false,
+      isReady: true,
+      color: seatColors[(parsed.players.length + currentWaiting.length) % seatColors.length],
+      joinedAtMs: Date.now(),
+    };
+
+    const nextPlayers = hasOpenActiveSeat ? [...parsed.players, newEntry] : parsed.players;
+    const nextWaiting = hasOpenActiveSeat ? currentWaiting : [...currentWaiting, newEntry];
+    const nextCount = Math.min(500, nextPlayers.length + nextWaiting.length);
+
+    try {
+      await updateDoc(roomRef, {
+        playersJson: JSON.stringify(nextPlayers),
+        waitingPlayersJson: JSON.stringify(nextWaiting),
+        playerCount: nextCount,
+        hostId: parsed.hostId,
+        status: 'in_game',
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err: any) {
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+      }
+      throw err;
+    }
+
+    return {
+      ...parsed,
+      status: 'in_game',
+      players: nextPlayers,
+      waitingPlayers: nextWaiting,
+    };
   }
 
   if (parsed.players.length >= parsed.maxPlayers) {
     throw new Error(`Room #${cleanCode} is full (max ${parsed.maxPlayers} players).`);
   }
 
-  const seatColors = ['Red', 'Yellow', 'Green', 'Blue'];
   const nextPlayers: RoomPlayer[] = [
     ...parsed.players,
     {
@@ -1426,6 +1543,7 @@ export async function joinFirestoreGameRoom(
       isHost: false,
       isReady: true,
       color: seatColors[parsed.players.length % seatColors.length],
+      joinedAtMs: Date.now(),
     },
   ];
 
@@ -1455,6 +1573,58 @@ export async function joinFirestoreGameRoom(
   };
 }
 
+export async function listPublicOpenGroupRooms(gameId?: string): Promise<MultiplayerRoom[]> {
+  try {
+    const constraints = [
+      where('isPublicMatch', '==', true),
+      where('isOpenGroup', '==', true),
+      limit(20),
+    ];
+    const snap = await getDocs(query(collection(db, 'gameRooms'), ...constraints));
+    const roomsList: MultiplayerRoom[] = [];
+    for (const d of snap.docs) {
+      const parsed = parseRoomSnapshotData(d.data());
+      if (gameId && parsed.gameId !== gameId) continue;
+      if (parsed.players.length === 0) continue;
+      roomsList.push(parsed);
+    }
+    return roomsList.sort((a, b) => b.createdAt - a.createdAt);
+  } catch {
+    return [];
+  }
+}
+
+export async function findOtherWaitingQuickMatchRoom(
+  gameId: string,
+  excludeRoomCode: string,
+  playerId: string
+): Promise<MultiplayerRoom | null> {
+  try {
+    const q = query(
+      collection(db, 'gameRooms'),
+      where('isPublicMatch', '==', true),
+      where('status', '==', 'waiting'),
+      where('gameId', '==', gameId),
+      limit(15)
+    );
+    const snap = await getDocs(q);
+    for (const d of snap.docs) {
+      const parsed = parseRoomSnapshotData(d.data());
+      if (
+        !parsed.isOpenGroup &&
+        parsed.roomCode !== excludeRoomCode &&
+        parsed.players.length < parsed.maxPlayers &&
+        !parsed.players.some((p) => p.id === playerId)
+      ) {
+        return parsed;
+      }
+    }
+  } catch {
+    // Ignore polling error
+  }
+  return null;
+}
+
 export async function quickMatchFirestoreRoom(
   gameId: string,
   maxPlayers: number,
@@ -1466,12 +1636,13 @@ export async function quickMatchFirestoreRoom(
       where('isPublicMatch', '==', true),
       where('status', '==', 'waiting'),
       where('gameId', '==', gameId),
-      limit(10)
+      limit(15)
     );
     const snap = await getDocs(q);
     for (const d of snap.docs) {
       const parsed = parseRoomSnapshotData(d.data());
       if (
+        !parsed.isOpenGroup &&
         parsed.players.length < parsed.maxPlayers &&
         !parsed.players.some((p) => p.id === player.id)
       ) {
@@ -1483,7 +1654,10 @@ export async function quickMatchFirestoreRoom(
     // Create new public waiting room if query requires index or none found
   }
 
-  const created = await createFirestoreGameRoom(gameId, maxPlayers, player, true);
+  const created = await createFirestoreGameRoom(gameId, maxPlayers, player, {
+    isPublicMatch: true,
+    isOpenGroup: false,
+  });
   return { room: created, matchedExisting: false };
 }
 
@@ -1563,14 +1737,17 @@ export async function rematchFirestoreGameRoom(
 export async function sendFirestoreRoomChat(
   roomCode: string,
   msg: Omit<InGameChatMessage, 'id' | 'roomCode' | 'timestamp'>
-): Promise<void> {
+): Promise<{ sent: boolean; restricted?: boolean }> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  if (cleanCode.length !== 4) return { sent: false };
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     const snap = await getDoc(roomRef);
-    if (!snap.exists()) return;
+    if (!snap.exists()) return { sent: false };
     const parsed = parseRoomSnapshotData(snap.data());
+    if ((parsed.mutedChatIds || []).includes(msg.senderId)) {
+      return { sent: false, restricted: true };
+    }
     const formatted: InGameChatMessage = {
       id: `gmsg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       roomCode: cleanCode,
@@ -1586,11 +1763,132 @@ export async function sendFirestoreRoomChat(
       messagesJson: JSON.stringify(nextMessages),
       updatedAt: serverTimestamp(),
     });
+    return { sent: true };
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
     }
     console.warn('Firestore room chat notice:', err);
+    return { sent: false };
+  }
+}
+
+export async function sendFirestoreRoomReaction(
+  roomCode: string,
+  reaction: Omit<RoomReaction, 'id' | 'createdAtMs'>
+): Promise<RoomReaction | null> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return null;
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  try {
+    const snap = await getDoc(roomRef);
+    if (!snap.exists()) return null;
+    const parsed = parseRoomSnapshotData(snap.data());
+    const item: RoomReaction = {
+      id: `rx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      emoji: String(reaction.emoji || '🔥').slice(0, 16),
+      senderId: reaction.senderId,
+      senderName: reaction.senderName.slice(0, 60),
+      createdAtMs: Date.now(),
+    };
+    const nextReactions = [...(parsed.reactions || []), item].slice(-25);
+    await updateDoc(roomRef, {
+      reactionsJson: JSON.stringify(nextReactions),
+      updatedAt: serverTimestamp(),
+    });
+    return item;
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    return null;
+  }
+}
+
+export async function hostUpdateRoomModeration(
+  roomCode: string,
+  hostId: string,
+  updates: { mutedVoiceIds?: string[]; mutedChatIds?: string[] }
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  try {
+    const snap = await getDoc(roomRef);
+    if (!snap.exists()) return;
+    const parsed = parseRoomSnapshotData(snap.data());
+    if (parsed.hostId !== hostId) return;
+    await updateDoc(roomRef, {
+      mutedVoiceIdsJson: JSON.stringify(
+        updates.mutedVoiceIds !== undefined ? updates.mutedVoiceIds : parsed.mutedVoiceIds || []
+      ),
+      mutedChatIdsJson: JSON.stringify(
+        updates.mutedChatIds !== undefined ? updates.mutedChatIds : parsed.mutedChatIds || []
+      ),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+  }
+}
+
+export async function hostRotateRoomPlayers(
+  roomCode: string,
+  hostId: string,
+  nextActiveIds: string[],
+  resetState?: Record<string, any>
+): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  try {
+    const snap = await getDoc(roomRef);
+    if (!snap.exists()) return;
+    const parsed = parseRoomSnapshotData(snap.data());
+    if (parsed.hostId !== hostId) return;
+
+    const seatColors = ['Red', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink'];
+    const allParticipants = [...parsed.players, ...(parsed.waitingPlayers || [])];
+    const byId = new Map<string, RoomPlayer>();
+    allParticipants.forEach((p) => {
+      if (!byId.has(p.id)) byId.set(p.id, p);
+    });
+
+    const chosenSet = new Set(nextActiveIds.filter((id) => byId.has(id)));
+    if (chosenSet.size === 0 && parsed.players[0]) {
+      chosenSet.add(parsed.players[0].id);
+    }
+
+    const nextActive: RoomPlayer[] = Array.from(chosenSet).map((id, idx) => {
+      const p = byId.get(id)!;
+      return {
+        ...p,
+        isHost: p.id === parsed.hostId,
+        color: seatColors[idx % seatColors.length],
+      };
+    });
+    const nextWaiting: RoomPlayer[] = allParticipants
+      .filter((p) => !chosenSet.has(p.id))
+      .map((p) => ({ ...p, isHost: p.id === parsed.hostId }));
+
+    const moveId = `rotate_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    await updateDoc(roomRef, {
+      playersJson: JSON.stringify(nextActive),
+      waitingPlayersJson: JSON.stringify(nextWaiting),
+      playerCount: Math.min(500, nextActive.length + nextWaiting.length),
+      hostId: parsed.hostId,
+      status: 'in_game',
+      gameStateJson: JSON.stringify({ ...(resetState || {}), moveId, moveSeq: 0 }),
+      moveAction: 'REMATCH',
+      currentTurn: String(nextActive[0]?.id || parsed.hostId).slice(0, 64),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
   }
 }
 
@@ -1605,19 +1903,41 @@ export async function kickOrLeaveFirestoreRoom(
     const snap = await getDoc(roomRef);
     if (!snap.exists()) return;
     const parsed = parseRoomSnapshotData(snap.data());
-    const remaining = parsed.players.filter((p) => p.id !== targetPlayerId);
-    if (remaining.length === 0) {
+    let remainingActive = parsed.players.filter((p) => p.id !== targetPlayerId);
+    const remainingWaiting = (parsed.waitingPlayers || []).filter((p) => p.id !== targetPlayerId);
+
+    const totalLeft = remainingActive.length + remainingWaiting.length;
+    if (totalLeft === 0) {
       await deleteDoc(roomRef);
       return;
     }
-    const nextHostId = parsed.hostId === targetPlayerId ? remaining[0].id : parsed.hostId;
-    const updatedPlayers = remaining.map((p) => ({
+
+    // Auto-promote the first Waiting Seat player if an active seat opened up
+    const seatLimit = parsed.isOpenGroup
+      ? Math.max(2, parsed.activeSeatLimit || 2)
+      : parsed.maxPlayers;
+    while (remainingActive.length < seatLimit && remainingWaiting.length > 0) {
+      const promoted = remainingWaiting.shift();
+      if (promoted) remainingActive.push(promoted);
+    }
+
+    const nextHostId =
+      parsed.hostId === targetPlayerId
+        ? remainingActive[0]?.id || remainingWaiting[0]?.id || ''
+        : parsed.hostId;
+    const updatedActive = remainingActive.map((p) => ({
       ...p,
       isHost: p.id === nextHostId,
     }));
+    const updatedWaiting = remainingWaiting.map((p) => ({
+      ...p,
+      isHost: p.id === nextHostId,
+    }));
+
     await updateDoc(roomRef, {
-      playersJson: JSON.stringify(updatedPlayers),
-      playerCount: updatedPlayers.length,
+      playersJson: JSON.stringify(updatedActive),
+      waitingPlayersJson: JSON.stringify(updatedWaiting),
+      playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
       status: parsed.status,
       updatedAt: serverTimestamp(),
@@ -3455,30 +3775,7 @@ export async function uploadAnnouncementMediaToCloud(
       return { mediaUrl: downloadUrl, mediaType: 'image' };
     }
   } catch {
-    // Fall back to Express or compact Data URL
-  }
-
-  if (typeof window !== 'undefined' && typeof fetch === 'function') {
-    try {
-      onProgress?.(65);
-      const res = await fetch('/api/media/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'image/jpeg',
-          'X-Media-Mime': file.type || 'image/jpeg',
-        },
-        body: file,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.url) {
-          onProgress?.(100);
-          return { mediaUrl: String(data.url), mediaType: 'image' };
-        }
-      }
-    } catch {
-      // Fall back to inline compressed Data URL
-    }
+    // Fall back to compact Data URL (persists directly in Firestore & offline without 404 risk)
   }
 
   onProgress?.(100);

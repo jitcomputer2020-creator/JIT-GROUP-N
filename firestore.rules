@@ -236,18 +236,25 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'roomCode', 'gameId', 'hostId', 'status', 'maxPlayers', 'playerCount',
-          'isPublicMatch', 'playersJson', 'gameStateJson', 'messagesJson',
-          'moveAction', 'currentTurn', 'createdAt', 'updatedAt'
+          'isPublicMatch', 'isOpenGroup', 'activeSeatLimit', 'playersJson',
+          'waitingPlayersJson', 'reactionsJson', 'mutedVoiceIdsJson', 'mutedChatIdsJson',
+          'gameStateJson', 'messagesJson', 'moveAction', 'currentTurn', 'createdAt', 'updatedAt'
         ]) &&
         isValidRoomCode(data.roomCode) &&
         data.roomCode == roomCode &&
-        data.gameId is string && data.gameId in ['ludo', 'tictactoe', 'quiz', 'chess', 'snake_ladder', 'carrom'] &&
+        data.gameId is string && data.gameId in ['ludo', 'tictactoe', 'quiz', 'chess', 'snake_ladder', 'carrom', 'truth_dare'] &&
         isValidId(data.hostId) &&
         data.status in ['waiting', 'in_game', 'finished'] &&
-        data.maxPlayers is int && data.maxPlayers >= 2 && data.maxPlayers <= 4 &&
-        data.playerCount is int && data.playerCount >= 1 && data.playerCount <= data.maxPlayers &&
+        data.maxPlayers is int && data.maxPlayers >= 2 && data.maxPlayers <= 999 &&
+        data.playerCount is int && data.playerCount >= 1 && data.playerCount <= 500 &&
         data.isPublicMatch is bool &&
-        data.playersJson is string && data.playersJson.size() >= 2 && data.playersJson.size() <= 30000 &&
+        (!('isOpenGroup' in data) || data.isOpenGroup is bool) &&
+        (!('activeSeatLimit' in data) || (data.activeSeatLimit is int && data.activeSeatLimit >= 2 && data.activeSeatLimit <= 12)) &&
+        data.playersJson is string && data.playersJson.size() >= 2 && data.playersJson.size() <= 100000 &&
+        (!('waitingPlayersJson' in data) || (data.waitingPlayersJson is string && data.waitingPlayersJson.size() <= 100000)) &&
+        (!('reactionsJson' in data) || (data.reactionsJson is string && data.reactionsJson.size() <= 15000)) &&
+        (!('mutedVoiceIdsJson' in data) || (data.mutedVoiceIdsJson is string && data.mutedVoiceIdsJson.size() <= 10000)) &&
+        (!('mutedChatIdsJson' in data) || (data.mutedChatIdsJson is string && data.mutedChatIdsJson.size() <= 10000)) &&
         data.gameStateJson is string && data.gameStateJson.size() >= 2 && data.gameStateJson.size() <= 100000 &&
         data.messagesJson is string && data.messagesJson.size() >= 2 && data.messagesJson.size() <= 100000 &&
         (!('moveAction' in data) || (data.moveAction is string && data.moveAction.size() <= 40)) &&
@@ -257,7 +264,7 @@ service cloud.firestore {
 
     function isValidGameRoomCreate(data, roomCode) {
       return isValidGameRoomSchema(data, roomCode) &&
-        data.status == 'waiting' &&
+        (data.status == 'waiting' || (data.get('isOpenGroup', false) == true && data.status == 'in_game')) &&
         data.playerCount == 1 &&
         data.createdAt == request.time;
     }
@@ -270,10 +277,13 @@ service cloud.firestore {
         data.maxPlayers == prev.maxPlayers &&
         data.isPublicMatch == prev.isPublicMatch &&
         (
-          incoming().diff(existing()).affectedKeys().hasOnly(['playersJson', 'playerCount', 'hostId', 'status', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['playersJson', 'waitingPlayersJson', 'playerCount', 'hostId', 'status', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['playersJson', 'waitingPlayersJson', 'playerCount', 'hostId', 'status', 'gameStateJson', 'moveAction', 'currentTurn', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'gameStateJson', 'currentTurn', 'moveAction', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['gameStateJson', 'moveAction', 'currentTurn', 'status', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['messagesJson', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['messagesJson', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['reactionsJson', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['mutedVoiceIdsJson', 'mutedChatIdsJson', 'updatedAt'])
         );
     }
 
@@ -654,7 +664,10 @@ service cloud.firestore {
     // 9. Real-Time 4-Digit Multiplayer Game Rooms (private rooms accessible by exact 4-digit code)
     match /gameRooms/{roomCode} {
       allow get: if isValidRoomCode(roomCode);
-      allow list: if existing().isPublicMatch == true && existing().status == 'waiting';
+      allow list: if existing().isPublicMatch == true && (
+        existing().status == 'waiting' ||
+        existing().isOpenGroup == true
+      );
       allow create: if isValidRoomCode(roomCode) && isValidGameRoomCreate(incoming(), roomCode);
       allow update: if isValidRoomCode(roomCode) && isValidGameRoomUpdate(incoming(), existing(), roomCode);
       allow delete: if isValidRoomCode(roomCode) && existing().playerCount <= 1;

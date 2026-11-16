@@ -11,17 +11,27 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { GameId, NavTab } from '../types';
-import { GameMode, AIDifficulty, MultiplayerRoom, InGameChatMessage } from '../types/multiplayer';
+import {
+  GameMode,
+  AIDifficulty,
+  MultiplayerRoom,
+  InGameChatMessage,
+  TruthAndDareState,
+} from '../types/multiplayer';
 import { APP_CONFIG } from '../constants/branding';
 import { multiplayerSocket } from '../services/multiplayerSocket';
 import {
   createFirestoreGameRoom,
   joinFirestoreGameRoom,
   quickMatchFirestoreRoom,
+  findOtherWaitingQuickMatchRoom,
   startFirestoreGameRoom,
   pushFirestoreGameMove,
   rematchFirestoreGameRoom,
   sendFirestoreRoomChat,
+  sendFirestoreRoomReaction,
+  hostUpdateRoomModeration,
+  hostRotateRoomPlayers,
   kickOrLeaveFirestoreRoom,
   subscribeToGameRoom,
 } from '../lib/firebase';
@@ -42,6 +52,7 @@ import {
   getLegalLudoTokenIndices,
   chooseLudoAIToken,
 } from '../services/gameAIEngine';
+import { fetchAiQuizRound } from '../services/aiClient';
 import { soundFx } from '../utils/soundFx';
 
 import { GameModeSelectModal } from '../components/games/GameModeSelectModal';
@@ -50,6 +61,14 @@ import { InGameChatDrawer } from '../components/games/InGameChatDrawer';
 import { InGameCallOverlay } from '../components/games/InGameCallOverlay';
 import { GameActionBar } from '../components/games/GameActionBar';
 import { InGameVoiceHud } from '../components/games/InGameVoiceHud';
+import {
+  FloatingReactionsOverlay,
+  FloatingReactionItem,
+  QuickReactionBar,
+} from '../components/games/FloatingReactionsOverlay';
+import { MatchmakingQueueModal } from '../components/games/MatchmakingQueueModal';
+import { HostRoomControlPanel } from '../components/games/HostRoomControlPanel';
+import { TruthAndDareGame } from '../components/games/TruthAndDareGame';
 import { GameLogo } from '../components/games/GameLogo';
 import { LudoBoard, LUDO_COLORS } from '../components/games/LudoBoard';
 import { CarromBoard } from '../components/games/CarromBoard';
@@ -72,6 +91,7 @@ import {
   Volume2,
   VolumeX,
   Crown,
+  Loader2,
 } from 'lucide-react';
 
 interface GamesViewProps {
@@ -118,6 +138,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [aiDifficulty, setAiDifficulty] = useState<AIDifficulty>('medium');
   const [isModeSelectOpen, setIsModeSelectOpen] = useState(false);
   const [isLobbyOpen, setIsLobbyOpen] = useState(false);
+  const [isMatchmakingOpen, setIsMatchmakingOpen] = useState(false);
+  const [isHostPanelOpen, setIsHostPanelOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [instructionsGame, setInstructionsGame] = useState<GameId | null>(null);
 
@@ -127,6 +149,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const roomUnsubRef = useRef<(() => void) | null>(null);
   const roomMoveCounterRef = useRef<number>(0);
   const appliedMoveIdsRef = useRef<Set<string>>(new Set());
+  const seenReactionIdsRef = useRef<Set<string>>(new Set());
   const lastStartIdRef = useRef<string | null>(null);
   const prevRoomStatusRef = useRef<string | null>(null);
   const isChatOpenRef = useRef<boolean>(false);
@@ -135,6 +158,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isRoomSubmitting, setIsRoomSubmitting] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
+
+  // Floating Emoji Reactions & Truth & Dare state
+  const [floatingReactions, setFloatingReactions] = useState<FloatingReactionItem[]>([]);
+  const [truthDareState, setTruthDareState] = useState<TruthAndDareState | null>(null);
 
   useEffect(() => {
     isChatOpenRef.current = isChatOpen;
@@ -175,17 +202,40 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     currentRoomRef.current = currentRoom;
   }, [currentRoom]);
 
+  const isRoomHost = Boolean(currentRoom && currentRoom.hostId === activePlayer.id);
+  const isWaitingSpectator = Boolean(
+    currentRoom && (currentRoom.waitingPlayers || []).some((p) => p.id === activePlayer.id)
+  );
+  const isSeatedActivePlayer = Boolean(
+    !currentRoom || currentRoom.players.some((p) => p.id === activePlayer.id)
+  );
+  const isHostMutedMyVoice = Boolean(
+    currentRoom && (currentRoom.mutedVoiceIds || []).includes(activePlayer.id)
+  );
+  const isHostMutedMyChat = Boolean(
+    currentRoom && (currentRoom.mutedChatIds || []).includes(activePlayer.id)
+  );
+  const allRoomParticipants = useMemo(
+    () =>
+      currentRoom
+        ? [...currentRoom.players, ...(currentRoom.waitingPlayers || [])]
+        : [],
+    [currentRoom]
+  );
+
   // In-Game Chat & Call state
   const [chatMessages, setChatMessages] = useState<InGameChatMessage[]>([]);
   const [unreadChatCount, setUnreadChatCount] = useState(0);
   const [mutedPlayerIds, setMutedPlayerIds] = useState<string[]>([]);
   const [activeCallType, setActiveCallType] = useState<'voice' | 'video' | null>(null);
 
-  // Real-time WebRTC Live Voice Chat HUD
+  // Real-time WebRTC Live Voice Chat HUD (available to both active players & waiting seat spectators!)
   const voiceChat = useRoomVoiceChat({
     roomCode: currentRoom?.roomCode,
     localPlayer: activePlayer,
     enabled: subView === 'play',
+    isHostMutedMic: isHostMutedMyVoice,
+    hostMutedVoiceIds: currentRoom?.mutedVoiceIds || [],
   });
 
   // Match award duplicate guard
@@ -207,6 +257,20 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     return () => clearAiTimers();
   }, [clearAiTimers]);
 
+  const spawnFloatingReaction = useCallback((id: string, emoji: string, senderName: string) => {
+    if (seenReactionIdsRef.current.has(id)) return;
+    seenReactionIdsRef.current.add(id);
+    if (seenReactionIdsRef.current.size > 120) {
+      const oldest = seenReactionIdsRef.current.values().next().value;
+      if (oldest) seenReactionIdsRef.current.delete(oldest);
+    }
+    const leftPct = 14 + Math.floor(Math.random() * 70);
+    setFloatingReactions((prev) => [...prev.slice(-16), { id, emoji, senderName, leftPct }]);
+    window.setTimeout(() => {
+      setFloatingReactions((prev) => prev.filter((item) => item.id !== id));
+    }, 2500);
+  }, []);
+
   const showRewardToast = useCallback((msg: string) => {
     setRewardBanner(msg);
     window.setTimeout(() => {
@@ -220,7 +284,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       params: {
         gameId: GameId;
         gameName: string;
-        mode: 'ai' | 'friend' | 'random' | 'solo';
+        mode: GameMode | 'solo';
         outcome: 'win' | 'loss' | 'draw' | 'spin';
         pointsEarned: number;
         scoreSummary: string;
@@ -230,7 +294,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         if (awardedMatchRef.current[matchKey]) return;
         awardedMatchRef.current[matchKey] = true;
       }
-      const res = await awardGameResult(params);
+      const firestoreSafeMode: 'ai' | 'friend' | 'random' | 'solo' =
+        params.mode === 'open_group' ? 'friend' : params.mode;
+      const res = await awardGameResult({
+        ...params,
+        mode: firestoreSafeMode,
+      });
       if (res.success && res.pointsAdded > 0) {
         showRewardToast(
           `+${res.pointsAdded} JIT Points earned in ${params.gameName}! Balance: ${res.newTotal} Pts`
@@ -271,10 +340,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   ]);
 
   // --------------------------------------------------------------------------
-  // GAME 3: QUIZ BATTLE STATE
+  // GAME 3: QUIZ BATTLE STATE (70% Computer Science / 30% General Trivia)
   // --------------------------------------------------------------------------
   const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>(() =>
-    pickShuffledQuizQuestions(6)
+    pickShuffledQuizQuestions(10)
   );
   const [quizIndex, setQuizIndex] = useState(0);
   const [quizScore, setQuizScore] = useState(0);
@@ -282,6 +351,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [quizFinished, setQuizFinished] = useState(false);
   const [quizTimer, setQuizTimer] = useState(15);
+  const [quizSource, setQuizSource] = useState<'ai' | 'curated-70-30'>('curated-70-30');
+  const [quizLoadingAi, setQuizLoadingAi] = useState(false);
+  const seenQuizPromptsRef = useRef<string[]>([]);
 
   // --------------------------------------------------------------------------
   // GAME 4: CHESS STATE
@@ -411,16 +483,48 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     [clearAiTimers]
   );
 
+  const loadAiQuizQuestions = useCallback(
+    async (difficulty: AIDifficulty = aiDifficulty) => {
+      setQuizLoadingAi(true);
+      try {
+        const res = await fetchAiQuizRound({
+          count: 10,
+          difficulty,
+          excludeQuestions: seenQuizPromptsRef.current.slice(-30),
+        });
+        if (res.questions.length > 0) {
+          seenQuizPromptsRef.current = [
+            ...seenQuizPromptsRef.current,
+            ...res.questions.map((q) => q.q),
+          ].slice(-40);
+          setQuizQuestions(res.questions);
+          setQuizSource(res.source);
+          setQuizIndex(0);
+          setQuizScore(0);
+          setQuizAiScore(0);
+          setSelectedOption(null);
+          setQuizFinished(false);
+          setQuizTimer(15);
+        }
+      } finally {
+        setQuizLoadingAi(false);
+      }
+    },
+    [aiDifficulty]
+  );
+
   const resetQuiz = useCallback(() => {
     awardedMatchRef.current.quiz = false;
-    setQuizQuestions(pickShuffledQuizQuestions(6));
+    setQuizQuestions(pickShuffledQuizQuestions(10, seenQuizPromptsRef.current));
+    setQuizSource('curated-70-30');
     setQuizIndex(0);
     setQuizScore(0);
     setQuizAiScore(0);
     setSelectedOption(null);
     setQuizFinished(false);
     setQuizTimer(15);
-  }, []);
+    void loadAiQuizQuestions(aiDifficulty);
+  }, [aiDifficulty, loadAiQuizQuestions]);
 
   const resetChess = useCallback(
     (sync = true) => {
@@ -476,6 +580,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     [clearAiTimers]
   );
 
+  const resetTruthDare = useCallback(() => {
+    awardedMatchRef.current.truth_dare = false;
+    setTruthDareState(null);
+  }, []);
+
   const applySyncedMoveState = useCallback(
     (moveAction: string, gameState: any) => {
       if (!gameState || typeof gameState !== 'object') return;
@@ -500,6 +609,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         resetLudo(false);
         resetQuiz();
         resetSnakeLadder(false);
+        resetTruthDare();
         return;
       }
 
@@ -529,9 +639,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         if (typeof gameState.dice === 'number') setSlDice(gameState.dice);
         if (gameState.message) setSlMessage(gameState.message);
         if (typeof gameState.finished === 'boolean') setSlFinished(gameState.finished);
+      } else if (moveAction === 'TD_MOVE') {
+        setTruthDareState(gameState as TruthAndDareState);
       }
     },
-    [resetChess, resetLudo, resetQuiz, resetSnakeLadder, resetTtt]
+    [resetChess, resetLudo, resetQuiz, resetSnakeLadder, resetTruthDare, resetTtt]
   );
 
   const attachFirestoreRoomSubscription = useCallback(
@@ -542,13 +654,17 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       }
       roomMoveCounterRef.current = 0;
       appliedMoveIdsRef.current.clear();
+      seenReactionIdsRef.current.clear();
       lastStartIdRef.current = null;
       prevRoomStatusRef.current = null;
 
       roomUnsubRef.current = subscribeToGameRoom(
         roomCode,
         (room, moveAction) => {
-          const stillMember = room.players.some((p) => p.id === activePlayer.id);
+          const stillMember =
+            room.players.some((p) => p.id === activePlayer.id) ||
+            (room.waitingPlayers || []).some((p) => p.id === activePlayer.id);
+
           if (!stillMember) {
             if (roomUnsubRef.current) {
               roomUnsubRef.current();
@@ -556,12 +672,17 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             }
             setCurrentRoom(null);
             setIsLobbyOpen(false);
+            setIsMatchmakingOpen(false);
             setJoinError('You were removed from the room.');
             return;
           }
 
           setCurrentRoom(room);
           setJoinError(null);
+
+          if (room.isOpenGroup) {
+            setGameMode('open_group');
+          }
 
           // Automatically switch selectedGame to match room gameId
           if (room.gameId) {
@@ -573,9 +694,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
           if (room.status === 'in_game') {
             setIsLobbyOpen(false);
+            setIsMatchmakingOpen(false);
           }
 
-          // Ensure both players start on a clean board on GAME_START or waiting->in_game transition
+          // Ensure all players start on a clean board on GAME_START or waiting->in_game transition
           const incomingStartId =
             typeof room.gameState?._startId === 'string' ? room.gameState._startId : null;
           const isFreshGameStart =
@@ -591,6 +713,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             resetLudo(false);
             resetQuiz();
             resetSnakeLadder(false);
+            resetTruthDare();
           }
 
           if (Array.isArray(room.messages) && room.messages.length > 0) {
@@ -602,6 +725,16 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             });
           }
 
+          if (Array.isArray(room.reactions)) {
+            room.reactions.forEach((rx) => {
+              if (Date.now() - rx.createdAtMs < 12000) {
+                spawnFloatingReaction(rx.id, rx.emoji, rx.senderName);
+              } else {
+                seenReactionIdsRef.current.add(rx.id);
+              }
+            });
+          }
+
           if (room.gameState && moveAction && moveAction !== 'ROOM_CREATED' && moveAction !== 'GAME_START') {
             applySyncedMoveState(moveAction, room.gameState);
           }
@@ -609,11 +742,22 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         () => {
           setCurrentRoom(null);
           setIsLobbyOpen(false);
+          setIsMatchmakingOpen(false);
           setGameMode('ai');
         }
       );
     },
-    [activePlayer.id, applySyncedMoveState, resetChess, resetLudo, resetQuiz, resetSnakeLadder, resetTtt]
+    [
+      activePlayer.id,
+      applySyncedMoveState,
+      resetChess,
+      resetLudo,
+      resetQuiz,
+      resetSnakeLadder,
+      resetTruthDare,
+      resetTtt,
+      spawnFloatingReaction,
+    ]
   );
 
   useEffect(() => {
@@ -699,6 +843,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       resetLudo(false);
       resetQuiz();
       resetSnakeLadder(false);
+      resetTruthDare();
     };
 
     const handleChatMessage = (data: { message: InGameChatMessage }) => {
@@ -709,6 +854,28 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       if (!isChatOpenRef.current) {
         setUnreadChatCount((c) => c + 1);
       }
+    };
+
+    const handleReactionReceived = (data: {
+      roomCode: string;
+      reaction: { id: string; emoji: string; senderName: string };
+    }) => {
+      if (!currentRoomRef.current || currentRoomRef.current.roomCode !== data.roomCode) return;
+      if (data.reaction) {
+        spawnFloatingReaction(data.reaction.id, data.reaction.emoji, data.reaction.senderName);
+      }
+    };
+
+    const handleModerationUpdated = (data: {
+      roomCode: string;
+      mutedVoiceIds: string[];
+      mutedChatIds: string[];
+    }) => {
+      setCurrentRoom((prev) =>
+        prev && prev.roomCode === data.roomCode
+          ? { ...prev, mutedVoiceIds: data.mutedVoiceIds, mutedChatIds: data.mutedChatIds }
+          : prev
+      );
     };
 
     const handleCallSignal = (data: any) => {
@@ -723,6 +890,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       if (data.targetPlayerId === activePlayer.id) {
         setCurrentRoom(null);
         setIsLobbyOpen(false);
+        setIsMatchmakingOpen(false);
         setJoinError('You were removed from the room by the host.');
       } else {
         setCurrentRoom(data.room);
@@ -730,7 +898,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     };
 
     const handleError = (data: { code: string; message: string }) => {
-      // Only show WS error if not already inside a Firestore-synced room
+      if (data.code === 'CHAT_MUTED') {
+        showRewardToast(data.message || 'Your chat access was restricted by the Room Host.');
+        return;
+      }
       if (!currentRoomRef.current) {
         setJoinError(data.message || 'Room error occurred.');
       }
@@ -743,6 +914,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     multiplayerSocket.on('GAME_STATE_UPDATED', handleGameStateUpdated);
     multiplayerSocket.on('GAME_RESET', handleGameReset);
     multiplayerSocket.on('CHAT_MESSAGE_RECEIVED', handleChatMessage);
+    multiplayerSocket.on('REACTION_RECEIVED', handleReactionReceived);
+    multiplayerSocket.on('MODERATION_UPDATED', handleModerationUpdated);
     multiplayerSocket.on('CALL_SIGNAL_RECEIVED', handleCallSignal);
     multiplayerSocket.on('PLAYER_KICKED', handlePlayerKicked);
     multiplayerSocket.on('ERROR', handleError);
@@ -755,6 +928,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       multiplayerSocket.off('GAME_STATE_UPDATED', handleGameStateUpdated);
       multiplayerSocket.off('GAME_RESET', handleGameReset);
       multiplayerSocket.off('CHAT_MESSAGE_RECEIVED', handleChatMessage);
+      multiplayerSocket.off('REACTION_RECEIVED', handleReactionReceived);
+      multiplayerSocket.off('MODERATION_UPDATED', handleModerationUpdated);
       multiplayerSocket.off('CALL_SIGNAL_RECEIVED', handleCallSignal);
       multiplayerSocket.off('PLAYER_KICKED', handlePlayerKicked);
       multiplayerSocket.off('ERROR', handleError);
@@ -767,6 +942,59 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     resetLudo,
     resetQuiz,
     resetSnakeLadder,
+    resetTruthDare,
+    showRewardToast,
+    spawnFloatingReaction,
+  ]);
+
+  // Auto-Matchmaking Queue Polling: seamlessly pairs simultaneous searchers
+  useEffect(() => {
+    if (
+      !isMatchmakingOpen ||
+      gameMode !== 'random' ||
+      !currentRoom ||
+      currentRoom.status !== 'waiting'
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const pollTimer = window.setInterval(async () => {
+      if (cancelled) return;
+      try {
+        const other = await findOtherWaitingQuickMatchRoom(
+          selectedGame,
+          currentRoom.roomCode,
+          activePlayer.id
+        );
+        if (!other || cancelled) return;
+        const oldCode = currentRoom.roomCode;
+        const joined = await joinFirestoreGameRoom(other.roomCode, selectedGame, activePlayer);
+        if (cancelled) return;
+        await kickOrLeaveFirestoreRoom(oldCode, activePlayer.id).catch(() => {});
+        setCurrentRoom(joined);
+        attachFirestoreRoomSubscription(joined.roomCode);
+        setIsMatchmakingOpen(false);
+        soundFx.playWin();
+        showRewardToast(`Match found! Connected to Room #${joined.roomCode}`);
+      } catch {
+        // Retry on next poll tick
+      }
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+    };
+  }, [
+    isMatchmakingOpen,
+    gameMode,
+    currentRoom?.roomCode,
+    currentRoom?.status,
+    selectedGame,
+    activePlayer,
+    attachFirestoreRoomSubscription,
+    showRewardToast,
   ]);
 
   // --------------------------------------------------------------------------
@@ -792,28 +1020,66 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }
   };
 
+  const handleCreateOpenGroupRoom = async (activeSeatLimit: number) => {
+    if (isRoomSubmitting) return;
+    setIsRoomSubmitting(true);
+    setGameMode('open_group');
+    setJoinError(null);
+    setChatMessages([]);
+    try {
+      const room = await createFirestoreGameRoom(selectedGame, 999, activePlayer, {
+        isPublicMatch: true,
+        isOpenGroup: true,
+        activeSeatLimit,
+      });
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
+      setIsModeSelectOpen(false);
+      setIsLobbyOpen(false);
+      resetTtt(false);
+      resetChess(false);
+      resetLudo(false);
+      resetQuiz();
+      resetSnakeLadder(false);
+      resetTruthDare();
+      showRewardToast(
+        `Open Group #${room.roomCode} live (${activeSeatLimit} active seats · unlimited waiting queue)!`
+      );
+    } catch (err: any) {
+      setJoinError(err?.message || 'Could not create Open Group room.');
+    } finally {
+      setIsRoomSubmitting(false);
+    }
+  };
+
   const handleJoinFriendRoom = async (code: string) => {
     if (isRoomSubmitting) return;
     setIsRoomSubmitting(true);
-    setGameMode('friend');
     setJoinError(null);
     setChatMessages([]);
     try {
       const room = await joinFirestoreGameRoom(code, undefined, activePlayer);
+      setGameMode(room.isOpenGroup ? 'open_group' : 'friend');
       setSelectedGame(room.gameId as GameId);
       setSubView('play');
       setCurrentRoom(room);
       attachFirestoreRoomSubscription(room.roomCode);
       setIsModeSelectOpen(false);
-      if (room.status === 'in_game') {
+      if (room.status === 'in_game' || room.isOpenGroup) {
         setIsLobbyOpen(false);
         resetTtt(false);
         resetChess(false);
         resetLudo(false);
         resetQuiz();
         resetSnakeLadder(false);
+        resetTruthDare();
       } else {
         setIsLobbyOpen(true);
+      }
+      if (room.waitingPlayers?.some((w) => w.id === activePlayer.id)) {
+        showRewardToast(
+          `Active seats full — you joined the Waiting Seat queue in Room #${room.roomCode}!`
+        );
       }
       if (room.gameState && Object.keys(room.gameState).filter((k) => !k.startsWith('_')).length > 0) {
         const lastAction =
@@ -823,11 +1089,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             ? 'CHESS_MOVE'
             : room.gameId === 'snake_ladder'
             ? 'SL_MOVE'
+            : room.gameId === 'truth_dare'
+            ? 'TD_MOVE'
             : 'TTT_MOVE';
         applySyncedMoveState(lastAction, room.gameState);
       }
     } catch (err: any) {
-      // Fallback to WebSocket room if code only exists in server WS memory
       if (socketConnected) {
         multiplayerSocket.joinRoom(code, selectedGame, activePlayer);
       }
@@ -853,7 +1120,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setCurrentRoom(room);
       attachFirestoreRoomSubscription(room.roomCode);
       setIsModeSelectOpen(false);
-      setIsLobbyOpen(!matchedExisting && room.status === 'waiting');
+      setIsLobbyOpen(false);
+      setIsMatchmakingOpen(!matchedExisting && room.status === 'waiting');
+      if (matchedExisting) {
+        soundFx.playWin();
+        showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+      }
     } catch (err: any) {
       setJoinError(err?.message || 'Quick matchmaking failed. Please try again.');
     } finally {
@@ -871,11 +1143,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setCurrentRoom(null);
     setIsModeSelectOpen(false);
     setIsLobbyOpen(false);
+    setIsMatchmakingOpen(false);
     resetTtt(false);
     resetChess(false);
     resetLudo(false);
     resetQuiz();
     resetSnakeLadder(false);
+    resetTruthDare();
   };
 
   const handleStartRoomGame = async () => {
@@ -885,6 +1159,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     resetLudo(false);
     resetQuiz();
     resetSnakeLadder(false);
+    resetTruthDare();
     setIsLobbyOpen(false);
     const firstTurnId = currentRoom.players[0]?.id || currentRoom.hostId;
     multiplayerSocket.startGame(currentRoom.roomCode);
@@ -908,6 +1183,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }
     setCurrentRoom(null);
     setIsLobbyOpen(false);
+    setIsMatchmakingOpen(false);
+    setIsHostPanelOpen(false);
     setActiveCallType(null);
     setGameMode('ai');
   };
@@ -926,9 +1203,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   // --------------------------------------------------------------------------
-  // In-Game Chat & Call Actions
+  // In-Game Chat, Reactions, Moderation & Call Actions
   // --------------------------------------------------------------------------
   const handleSendInGameMessage = async (text?: string, imageUrl?: string) => {
+    if (isHostMutedMyChat) {
+      soundFx.playError();
+      showRewardToast('Your chat access was restricted by the Room Host.');
+      return;
+    }
     const roomCode = currentRoom?.roomCode || 'LOCAL_ROOM';
     const msg = {
       senderId: activePlayer.id,
@@ -940,7 +1222,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
     if (currentRoom) {
       multiplayerSocket.sendChatMessage(roomCode, msg);
-      await sendFirestoreRoomChat(roomCode, msg);
+      const res = await sendFirestoreRoomChat(roomCode, msg);
+      if (res.restricted) {
+        soundFx.playError();
+        showRewardToast('Your chat access was restricted by the Room Host.');
+      }
     } else {
       setChatMessages((prev) => [
         ...prev,
@@ -952,6 +1238,73 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         },
       ]);
     }
+  };
+
+  const handleSendReaction = async (emoji: string) => {
+    const id = `rx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    spawnFloatingReaction(id, emoji, activePlayer.name);
+    soundFx.playTick();
+
+    if (currentRoom) {
+      multiplayerSocket.sendReaction(currentRoom.roomCode, {
+        id,
+        emoji,
+        senderId: activePlayer.id,
+        senderName: activePlayer.name,
+        createdAtMs: Date.now(),
+      });
+      await sendFirestoreRoomReaction(currentRoom.roomCode, {
+        emoji,
+        senderId: activePlayer.id,
+        senderName: activePlayer.name,
+      });
+    }
+  };
+
+  const handleHostToggleVoiceMute = async (targetPlayerId: string) => {
+    if (!currentRoom || !isRoomHost) return;
+    const prev = currentRoom.mutedVoiceIds || [];
+    const nextVoice = prev.includes(targetPlayerId)
+      ? prev.filter((id) => id !== targetPlayerId)
+      : [...prev, targetPlayerId];
+    const nextChat = currentRoom.mutedChatIds || [];
+
+    setCurrentRoom((r) => (r ? { ...r, mutedVoiceIds: nextVoice } : r));
+    multiplayerSocket.hostUpdateModeration(currentRoom.roomCode, nextVoice, nextChat);
+    await hostUpdateRoomModeration(currentRoom.roomCode, activePlayer.id, {
+      mutedVoiceIds: nextVoice,
+      mutedChatIds: nextChat,
+    });
+  };
+
+  const handleHostToggleChatMute = async (targetPlayerId: string) => {
+    if (!currentRoom || !isRoomHost) return;
+    const prev = currentRoom.mutedChatIds || [];
+    const nextChat = prev.includes(targetPlayerId)
+      ? prev.filter((id) => id !== targetPlayerId)
+      : [...prev, targetPlayerId];
+    const nextVoice = currentRoom.mutedVoiceIds || [];
+
+    setCurrentRoom((r) => (r ? { ...r, mutedChatIds: nextChat } : r));
+    multiplayerSocket.hostUpdateModeration(currentRoom.roomCode, nextVoice, nextChat);
+    await hostUpdateRoomModeration(currentRoom.roomCode, activePlayer.id, {
+      mutedVoiceIds: nextVoice,
+      mutedChatIds: nextChat,
+    });
+  };
+
+  const handleHostRotatePlayers = async (nextActiveIds: string[]) => {
+    if (!currentRoom || !isRoomHost) return;
+    resetTtt(false);
+    resetChess(false);
+    resetLudo(false);
+    resetQuiz();
+    resetSnakeLadder(false);
+    resetTruthDare();
+
+    multiplayerSocket.hostRotatePlayers(currentRoom.roomCode, nextActiveIds, {});
+    await hostRotateRoomPlayers(currentRoom.roomCode, activePlayer.id, nextActiveIds, {});
+    showRewardToast('Host rotated players & started the next round!');
   };
 
   const handleToggleMutePlayer = (playerId: string) => {
@@ -991,9 +1344,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleTttClick = (index: number) => {
     if (tttBoard[index] || tttResult || tttAiThinking) return;
 
+    if (currentRoom && isWaitingSpectator) {
+      soundFx.playError();
+      showRewardToast('You are in the Waiting Seat — chat, react, or join Voice while waiting!');
+      return;
+    }
+
     if (gameMode !== 'ai' && currentRoom) {
-      const isHost = currentRoom.hostId === activePlayer.id;
-      const mySymbol = isHost ? 'X' : 'O';
+      const isXPlayer = currentRoom.players[0]?.id === activePlayer.id;
+      const mySymbol = isXPlayer ? 'X' : 'O';
       const currentSymbol = isXNext ? 'X' : 'O';
       if (mySymbol !== currentSymbol) {
         soundFx.playError();
@@ -1217,6 +1576,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     rollVal: number,
     overrideSixes?: number
   ) => {
+    if (currentRoom && isWaitingSpectator) {
+      soundFx.playError();
+      return;
+    }
     if (gameMode !== 'ai' && currentRoom && ludoTurn !== myLudoSeat) {
       soundFx.playError();
       return;
@@ -1323,6 +1686,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const rollLudoDice = () => {
     if (ludoRolling || ludoPhase !== 'roll') return;
+    if (currentRoom && isWaitingSpectator) {
+      soundFx.playError();
+      return;
+    }
     if (gameMode === 'ai' && ludoTurn !== 0) return;
     if (gameMode !== 'ai' && currentRoom && ludoTurn !== myLudoSeat) {
       soundFx.playError();
@@ -1507,9 +1874,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       return;
     }
 
+    if (currentRoom && isWaitingSpectator) {
+      soundFx.playError();
+      return;
+    }
     if (gameMode !== 'ai' && currentRoom) {
-      const isHost = currentRoom.hostId === activePlayer.id;
-      const myColor = isHost ? 'white' : 'black';
+      const isWhitePlayer = currentRoom.players[0]?.id === activePlayer.id;
+      const myColor = isWhitePlayer ? 'white' : 'black';
       if (myColor !== chessTurn) {
         soundFx.playError();
         return;
@@ -1697,8 +2068,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // --------------------------------------------------------------------------
   const executeSnakeLadderRoll = useCallback(
     (side: 'p1' | 'p2', currentPositions: { p1: number; p2: number }) => {
+      if (currentRoom && isWaitingSpectator) {
+        soundFx.playError();
+        return;
+      }
       if (gameMode !== 'ai' && currentRoom) {
-        const mySide = currentRoom.hostId === activePlayer.id ? 'p1' : 'p2';
+        const mySide = currentRoom.players[0]?.id === activePlayer.id ? 'p1' : 'p2';
         if (side !== mySide) {
           soundFx.playError();
           return;
@@ -1858,6 +2233,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           'Spin the wheel to win between +10 and +200 JACKPOT JIT Points!',
           'All won points sync straight to your Firebase profile and Global Leaderboard.',
         ];
+      case 'truth_dare':
+        return [
+          'Host an Open Group room where unlimited friends can join! Overflow members enjoy Voice, Chat & Reactions in the Waiting Seat.',
+          'Spin for the next spotlight player, choose Truth or Dare, and pick System Choice or write your Own Choice challenge.',
+          'Completing a round earns +15 JIT Points and logs into live round history. Hosts can rotate Waiting Seat players any time!',
+        ];
     }
   };
 
@@ -1886,10 +2267,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               </span>
             </div>
             <h2 className="text-xl sm:text-2xl font-black tracking-tight mb-1.5">
-              7 Playable Games · Live JIT Points
+              8 Playable Games · Live JIT Points
             </h2>
             <p className="text-xs sm:text-sm text-blue-100 leading-relaxed mb-3">
-              Real game rules, physics Carrom, Chess checkmate validation, Daily Lucky Spin Wheel, and live Global Leaderboard synced with Firebase.
+              Auto-Matchmaking, Open Group Truth & Dare, Waiting Seat Rotation, Live Emoji Reactions, and WebRTC Voice Chat.
             </p>
 
             <div className="flex flex-wrap items-center gap-2">
@@ -2011,7 +2392,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               </button>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {APP_CONFIG.games.map((g) => {
                 const gid = g.id as GameId;
                 const isSelected = selectedGame === gid;
@@ -2059,6 +2440,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 roomCode={currentRoom?.roomCode}
                 unreadChatCount={unreadChatCount}
                 isCallActive={!!activeCallType || voiceChat.isMicEnabled}
+                waitingCount={currentRoom?.waitingPlayers?.length || 0}
+                activeCount={currentRoom?.players.length || 1}
+                isHost={isRoomHost}
                 onOpenChat={() => {
                   setIsChatOpen(true);
                   setUnreadChatCount(0);
@@ -2068,6 +2452,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 }}
                 onStartVideoCall={() => handleStartCall('video')}
                 onOpenMembers={() => setIsLobbyOpen(true)}
+                onOpenHostPanel={() => setIsHostPanelOpen(true)}
                 onInviteFriend={() => setIsLobbyOpen(true)}
                 onLeaveRoom={handleLeaveRoom}
                 aiDifficulty={aiDifficulty}
@@ -2081,6 +2466,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               isSpeakerEnabled={voiceChat.isSpeakerEnabled}
               isConnectingMic={voiceChat.isConnectingMic}
               isSpeaking={voiceChat.isSpeaking}
+              isHostMutedMic={isHostMutedMyVoice}
+              hostMutedVoiceIds={currentRoom?.mutedVoiceIds || []}
               voiceError={voiceChat.voiceError}
               voicePeers={voiceChat.voicePeers}
               localPlayerId={activePlayer.id}
@@ -2089,7 +2476,40 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               onClearError={voiceChat.clearVoiceError}
             />
 
-            {currentRoom && currentRoom.status === 'waiting' && currentRoom.players.length < 2 && (
+            {currentRoom && isWaitingSpectator && (
+              <div className="mb-4 p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                <span className="text-amber-900 dark:text-amber-200 font-semibold">
+                  Waiting Seat Active — You can watch live, talk in Voice, chat, and send emoji reactions until the Host rotates you in!
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsHostPanelOpen(true)}
+                  className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700 font-bold text-amber-800 dark:text-amber-200 whitespace-nowrap"
+                >
+                  View Queue
+                </button>
+              </div>
+            )}
+
+            {currentRoom &&
+              currentRoom.status === 'finished' &&
+              isRoomHost &&
+              (currentRoom.waitingPlayers?.length || 0) > 0 && (
+                <div className="mb-4 p-3.5 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <span className="text-indigo-900 dark:text-indigo-200 font-semibold">
+                    Match Finished! {currentRoom.waitingPlayers?.length} player(s) waiting in the queue for the next match.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsHostPanelOpen(true)}
+                    className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold shadow-xs whitespace-nowrap"
+                  >
+                    Pick Next Players
+                  </button>
+                </div>
+              )}
+
+            {currentRoom && !currentRoom.isOpenGroup && currentRoom.status === 'waiting' && currentRoom.players.length < 2 && (
               <div className="mb-4 p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
                 <div className="text-amber-900 dark:text-amber-200">
                   <span className="font-bold">Room #{currentRoom.roomCode}</span> ·{' '}
@@ -2369,10 +2789,39 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             )}
 
             {/* ----------------------------------------------------------- */}
-            {/* GAME 3: QUIZ BATTLE */}
+            {/* GAME 3: QUIZ BATTLE (70% CS / 30% General Trivia AI Bot) */}
             {/* ----------------------------------------------------------- */}
             {selectedGame === 'quiz' && (
               <div className="max-w-md mx-auto">
+                {/* Quiz Mix & AI Fresh Generator Bar */}
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/70 dark:border-slate-700/70 text-[11px]">
+                  <div className="flex items-center gap-2 font-semibold text-slate-600 dark:text-slate-300">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+                    <span>
+                      Mix: {quizQuestions.filter((q) => q.domain === 'cs').length} CS (70%) ·{' '}
+                      {quizQuestions.filter((q) => q.domain === 'general').length} General (30%)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void loadAiQuizQuestions(aiDifficulty)}
+                    disabled={quizLoadingAi}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-bold text-[10px] transition-colors"
+                  >
+                    {quizLoadingAi ? (
+                      <>
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        <span>Generating...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3 h-3" />
+                        <span>{quizSource === 'ai' ? 'New AI Quiz' : 'Generate AI Quiz'}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
                 {!quizFinished ? (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between text-xs font-bold">
@@ -2398,9 +2847,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                     </div>
 
                     <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-100 dark:border-slate-800">
-                      <span className="text-[10px] font-bold uppercase text-blue-600 dark:text-blue-400 mb-1 block">
-                        {quizQuestions[quizIndex].category}
-                      </span>
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className="text-[10px] font-bold uppercase text-blue-600 dark:text-blue-400">
+                          {quizQuestions[quizIndex].category}
+                        </span>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                          {quizQuestions[quizIndex].domain === 'cs' ? 'Computer Science' : 'General Trivia'}
+                        </span>
+                      </div>
                       <h4 className="text-sm font-bold text-slate-900 dark:text-white leading-snug">
                         {quizQuestions[quizIndex].q}
                       </h4>
@@ -2436,6 +2890,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         );
                       })}
                     </div>
+
+                    {selectedOption !== null && quizQuestions[quizIndex].explanation && (
+                      <div className="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/70 dark:border-indigo-900/50 text-[11px] text-indigo-900 dark:text-indigo-200">
+                        {quizQuestions[quizIndex].explanation}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="p-6 text-center space-y-4 bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200/70 dark:border-slate-700">
@@ -2466,7 +2926,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                       onClick={resetQuiz}
                       className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-md transition-colors"
                     >
-                      Play New Shuffled Round
+                      Generate Fresh AI Quiz Round
                     </button>
                   </div>
                 )}
@@ -2781,6 +3241,53 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 }}
               />
             )}
+            {/* ----------------------------------------------------------- */}
+            {/* GAME 8: OPEN GROUP TRUTH & DARE */}
+            {/* ----------------------------------------------------------- */}
+            {selectedGame === 'truth_dare' && (
+              <TruthAndDareGame
+                players={
+                  currentRoom
+                    ? currentRoom.players
+                    : [
+                        {
+                          id: activePlayer.id,
+                          name: activePlayer.name,
+                          avatar: activePlayer.avatar,
+                          isHost: true,
+                          isReady: true,
+                        },
+                      ]
+                }
+                waitingCount={currentRoom?.waitingPlayers?.length || 0}
+                currentUserId={activePlayer.id}
+                isHost={currentRoom ? isRoomHost : true}
+                isSeatedActivePlayer={isSeatedActivePlayer}
+                state={truthDareState}
+                onUpdateState={(next, status = 'in_game') => {
+                  setTruthDareState(next);
+                  if (currentRoom) {
+                    broadcastRoomMove('TD_MOVE', next, next.activePlayerId, status);
+                  }
+                }}
+                onRoundAward={(points, summary) => {
+                  triggerGameAward(`td_${Date.now()}`, {
+                    gameId: 'truth_dare',
+                    gameName: 'Truth & Dare',
+                    mode: currentRoom ? gameMode : 'solo',
+                    outcome: 'win',
+                    pointsEarned: points,
+                    scoreSummary: summary,
+                  });
+                }}
+                onOpenHostPanel={currentRoom ? () => setIsHostPanelOpen(true) : undefined}
+              />
+            )}
+
+            {/* Instant Floating Emoji Reaction Bar across all active games */}
+            {selectedGame !== 'spin_wheel' && (
+              <QuickReactionBar onSendReaction={handleSendReaction} />
+            )}
           </section>
 
           {/* Quick Footer Banner to Leaderboard */}
@@ -2807,6 +3314,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         </>
       )}
 
+      {/* Floating Animated Reaction Overlay */}
+      <FloatingReactionsOverlay reactions={floatingReactions} />
+
       {/* 4. Game Mode Select Modal */}
       <GameModeSelectModal
         isOpen={isModeSelectOpen}
@@ -2815,9 +3325,31 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         onCreateFriendRoom={handleCreateFriendRoom}
         onJoinFriendRoom={handleJoinFriendRoom}
         onPlayRandom={handlePlayRandom}
+        onCreateOpenGroupRoom={handleCreateOpenGroupRoom}
         onPlayAI={handlePlayAI}
         joinError={joinError}
         isSubmitting={isRoomSubmitting}
+      />
+
+      {/* 4b. Auto-Matchmaking Queue Timer Modal */}
+      <MatchmakingQueueModal
+        isOpen={isMatchmakingOpen}
+        gameId={selectedGame}
+        roomCode={currentRoom?.roomCode}
+        onCancel={handleLeaveRoom}
+        onFallbackToAI={handleFallbackToAI}
+      />
+
+      {/* 4c. Host Seat Rotation & Voice/Chat Moderation Panel */}
+      <HostRoomControlPanel
+        isOpen={isHostPanelOpen}
+        onClose={() => setIsHostPanelOpen(false)}
+        room={currentRoom}
+        currentUserId={activePlayer.id}
+        onToggleVoiceMute={handleHostToggleVoiceMute}
+        onToggleChatMute={handleHostToggleChatMute}
+        onKickPlayer={handleKickPlayer}
+        onRotatePlayers={handleHostRotatePlayers}
       />
 
       {/* 5. 4-Digit Room Lobby Modal */}
@@ -2841,6 +3373,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         onSendMessage={handleSendInGameMessage}
         mutedPlayerIds={mutedPlayerIds}
         onToggleMutePlayer={handleToggleMutePlayer}
+        isHost={isRoomHost}
+        isHostChatRestricted={isHostMutedMyChat}
+        hostMutedChatIds={currentRoom?.mutedChatIds || []}
+        hostMutedVoiceIds={currentRoom?.mutedVoiceIds || []}
+        onHostToggleChatMute={handleHostToggleChatMute}
+        onHostToggleVoiceMute={handleHostToggleVoiceMute}
+        participants={allRoomParticipants}
       />
 
       {/* 7. In-Game Voice & Video Calling Dock */}

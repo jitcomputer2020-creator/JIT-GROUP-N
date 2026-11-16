@@ -7,6 +7,7 @@
  * live in-game chat with image sharing, and WebRTC voice/video calling signaling.
  */
 
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -14,6 +15,13 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import {
+  runJitAiChat,
+  generateSmartCaptions,
+  generateAiQuizRound,
+  moderatePublicText,
+  runFastHeuristicModeration,
+} from './src/server/geminiService.ts';
 import {
   testFirestoreConnection,
   lookupCloudProfileByPhone,
@@ -78,7 +86,12 @@ export interface RoomState {
   createdAt: number;
   status: 'waiting' | 'in_game' | 'finished';
   maxPlayers: number;
+  isOpenGroup?: boolean;
+  activeSeatLimit?: number;
   players: PlayerInfo[];
+  waitingPlayers: PlayerInfo[];
+  mutedVoiceIds: string[];
+  mutedChatIds: string[];
   gameState: any;
   currentTurn: string;
   messages: InGameMessage[];
@@ -153,6 +166,9 @@ wss.on('connection', (ws: WebSocket) => {
                 color: 'blue',
               },
             ],
+            waitingPlayers: [],
+            mutedVoiceIds: [],
+            mutedChatIds: [],
             gameState: null,
             currentTurn: player.id,
             messages: [],
@@ -296,6 +312,9 @@ wss.on('connection', (ws: WebSocket) => {
                   isReady: true,
                 },
               ],
+              waitingPlayers: [],
+              mutedVoiceIds: [],
+              mutedChatIds: [],
               gameState: null,
               currentTurn: player.id,
               messages: [],
@@ -370,11 +389,23 @@ wss.on('connection', (ws: WebSocket) => {
           break;
         }
 
-        // 7. Live In-Game Chat Message (Text / Image)
+        // 7. Live In-Game Chat Message (Text / Image) with Host Moderation Check
         case 'SEND_CHAT_MESSAGE': {
           const { roomCode, message: chatMsg } = payload;
           const room = rooms.get(roomCode);
           if (room) {
+            if (room.mutedChatIds?.includes(chatMsg.senderId)) {
+              ws.send(
+                JSON.stringify({
+                  type: 'ERROR',
+                  payload: {
+                    code: 'CHAT_MUTED',
+                    message: 'Your chat access was restricted by the Room Host.',
+                  },
+                })
+              );
+              return;
+            }
             const formatted: InGameMessage = {
               id: `gmsg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               roomCode,
@@ -389,6 +420,73 @@ wss.on('connection', (ws: WebSocket) => {
             broadcastToRoom(roomCode, {
               type: 'CHAT_MESSAGE_RECEIVED',
               payload: { message: formatted },
+            });
+          }
+          break;
+        }
+
+        // 7b. Live Floating Emoji Reactions
+        case 'SEND_REACTION': {
+          const { roomCode, reaction } = payload;
+          const room = rooms.get(roomCode);
+          if (room && reaction) {
+            broadcastToRoom(
+              roomCode,
+              {
+                type: 'REACTION_RECEIVED',
+                payload: { roomCode, reaction },
+              },
+              ws
+            );
+          }
+          break;
+        }
+
+        // 7c. Host Voice & Chat Moderation Controls
+        case 'HOST_SET_MODERATION': {
+          const { roomCode, mutedVoiceIds, mutedChatIds } = payload;
+          const room = rooms.get(roomCode);
+          const caller = socketToPlayer.get(ws);
+          if (room && (!caller || caller.playerId === room.hostId)) {
+            room.mutedVoiceIds = Array.isArray(mutedVoiceIds) ? mutedVoiceIds : room.mutedVoiceIds;
+            room.mutedChatIds = Array.isArray(mutedChatIds) ? mutedChatIds : room.mutedChatIds;
+            broadcastToRoom(roomCode, {
+              type: 'MODERATION_UPDATED',
+              payload: {
+                roomCode,
+                mutedVoiceIds: room.mutedVoiceIds,
+                mutedChatIds: room.mutedChatIds,
+              },
+            });
+          }
+          break;
+        }
+
+        // 7d. Host Rotates Active Seats & Waiting Queue Players
+        case 'HOST_ROTATE_PLAYERS': {
+          const { roomCode, nextActiveIds, resetState } = payload;
+          const room = rooms.get(roomCode);
+          const caller = socketToPlayer.get(ws);
+          if (room && Array.isArray(nextActiveIds) && (!caller || caller.playerId === room.hostId)) {
+            const allPool = [...room.players, ...(room.waitingPlayers || [])];
+            const byId = new Map<string, PlayerInfo>();
+            allPool.forEach((p) => {
+              if (!byId.has(p.id)) byId.set(p.id, p);
+            });
+            const chosen = new Set<string>(nextActiveIds.filter((id: string) => byId.has(id)));
+            room.players = Array.from(chosen).map((id) => {
+              const p = byId.get(id)!;
+              return { ...p, isHost: p.id === room.hostId };
+            });
+            room.waitingPlayers = allPool
+              .filter((p) => !chosen.has(p.id))
+              .map((p) => ({ ...p, isHost: p.id === room.hostId }));
+            room.status = 'in_game';
+            room.gameState = resetState || null;
+            room.currentTurn = room.players[0]?.id || room.hostId;
+            broadcastToRoom(roomCode, {
+              type: 'GAME_RESET',
+              payload: { room },
             });
           }
           break;
@@ -2078,13 +2176,17 @@ app.post('/api/admin/announcements', async (req, res) => {
 
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
+  const clientId =
+    typeof req.body?.id === 'string' && /^ann_[a-zA-Z0-9_\-]{6,50}$/.test(req.body.id)
+      ? req.body.id
+      : null;
   const expiresAt =
     mediaType === 'video'
       ? Number(req.body?.expiresAt) || nowMs + VIDEO_EXPIRY_MS
       : undefined;
 
   const announcement: any = {
-    id: `ann_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
+    id: clientId || `ann_${nowMs}_${Math.random().toString(36).slice(2, 6)}`,
     title: title.slice(0, 140),
     message: message.slice(0, 1000),
     priority,
@@ -2160,6 +2262,107 @@ app.delete('/api/admin/announcements/:id', async (req, res) => {
   }
 
   return res.json({ success: true, announcements: next });
+});
+
+// ----------------------------------------------------------------------------
+// Server-Side Gemini AI API Endpoints (/api/ai/*)
+// ----------------------------------------------------------------------------
+
+// 1. JIT AI Chat Companion
+app.post('/api/ai/chat', async (req, res) => {
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+  const userName = typeof req.body?.userName === 'string' ? req.body.userName : undefined;
+  const mode =
+    req.body?.mode === 'studies' || req.body?.mode === 'tech' ? req.body.mode : 'general';
+
+  if (!message) {
+    return res.status(400).json({ error: 'Message text is required.' });
+  }
+
+  try {
+    const result = await runJitAiChat({ message, history, userName, mode });
+    return res.json({
+      reply: result.reply,
+      model: result.model,
+      createdAtMs: Date.now(),
+    });
+  } catch (err: any) {
+    const msg = err?.message || 'AI chat generation failed.';
+    const status = msg.includes('not configured') ? 503 : 502;
+    console.warn('[/api/ai/chat] error:', msg);
+    return res.status(status).json({ error: msg, code: status === 503 ? 'GEMINI_UNAVAILABLE' : 'AI_ERROR' });
+  }
+});
+
+// 2. AI Smart Content & Caption Generator (Feed Posts & Short Reels)
+app.post('/api/ai/captions', async (req, res) => {
+  const topic = typeof req.body?.topic === 'string' ? req.body.topic : '';
+  const existingText = typeof req.body?.existingText === 'string' ? req.body.existingText : '';
+  const contentType = req.body?.contentType === 'reel' ? 'reel' : 'post';
+  const tone = typeof req.body?.tone === 'string' ? req.body.tone : 'engaging';
+
+  try {
+    const result = await generateSmartCaptions({ topic, existingText, contentType, tone });
+    return res.json(result);
+  } catch (err: any) {
+    const msg = err?.message || 'Smart caption generation failed.';
+    const status = msg.includes('not configured') ? 503 : 502;
+    console.warn('[/api/ai/captions] error:', msg);
+    return res.status(status).json({ error: msg, code: status === 503 ? 'GEMINI_UNAVAILABLE' : 'AI_ERROR' });
+  }
+});
+
+// 3. AI Quiz & Trivia Bot Generator (Strict 70% CS / 30% General Trivia)
+app.post('/api/ai/quiz', async (req, res) => {
+  const count = Number(req.body?.count) || 10;
+  const difficulty =
+    req.body?.difficulty === 'easy' || req.body?.difficulty === 'hard'
+      ? req.body.difficulty
+      : 'medium';
+  const excludeQuestions = Array.isArray(req.body?.excludeQuestions) ? req.body.excludeQuestions : [];
+  const topicHint = typeof req.body?.topicHint === 'string' ? req.body.topicHint : undefined;
+
+  try {
+    const result = await generateAiQuizRound({
+      count,
+      difficulty,
+      excludeQuestions,
+      topicHint,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    const msg = err?.message || 'AI quiz generation failed.';
+    const status = msg.includes('not configured') ? 503 : 502;
+    console.warn('[/api/ai/quiz] error:', msg);
+    return res.status(status).json({ error: msg, code: status === 503 ? 'GEMINI_UNAVAILABLE' : 'AI_ERROR' });
+  }
+});
+
+// 4. Advanced Content Moderation Filter (Comments & Public/Game Room Chats Only)
+app.post('/api/ai/moderate', async (req, res) => {
+  const text = typeof req.body?.text === 'string' ? req.body.text : '';
+  const context =
+    req.body?.context === 'room_chat' || req.body?.context === 'post' ? req.body.context : 'comment';
+
+  if (!text.trim()) {
+    return res.json({
+      allowed: true,
+      flagged: false,
+      severity: 'none',
+      category: 'clean',
+      reason: '',
+      source: 'heuristic',
+    });
+  }
+
+  try {
+    const verdict = await moderatePublicText({ text, context });
+    return res.json(verdict);
+  } catch (err: any) {
+    console.warn('[/api/ai/moderate] fallback to heuristic due to Gemini error:', err?.message);
+    return res.json(runFastHeuristicModeration(text));
+  }
 });
 
 // ----------------------------------------------------------------------------

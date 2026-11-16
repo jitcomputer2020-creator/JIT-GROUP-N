@@ -12,7 +12,9 @@ import {
   VIDEO_EXPIRY_MS,
 } from '../../services/mediaStorage';
 import { uploadVideoAssetToCloud } from '../../lib/firebase';
-import { X, Video, Music, Send, Loader2, Film, Clock } from 'lucide-react';
+import { ResilientVideo } from '../common/ResilientVideo';
+import { AiCaptionGenerator } from '../common/AiCaptionGenerator';
+import { X, Video, Music, Send, Loader2, Film, Clock, Sparkles } from 'lucide-react';
 
 interface AddReelModalProps {
   isOpen: boolean;
@@ -29,6 +31,7 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showAiCaptions, setShowAiCaptions] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -166,12 +169,17 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
               </p>
             </div>
           ) : (
-            <div className="relative rounded-2xl overflow-hidden bg-black max-h-64 flex items-center justify-center">
-              <video src={previewUrl} controls className="max-h-64 w-auto object-contain" />
+            <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
+              <ResilientVideo
+                src={previewUrl}
+                controls
+                compactControls
+                className="w-full h-auto max-h-64 object-contain"
+              />
               <button
                 type="button"
                 onClick={handleClearMedia}
-                className="absolute top-2 right-2 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
                 title="Cancel Video"
               >
                 <X className="w-4 h-4" />
@@ -188,10 +196,40 @@ export const AddReelModal: React.FC<AddReelModalProps> = ({ isOpen, onClose }) =
           />
 
           {/* Caption */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              Caption
-            </label>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Caption
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowAiCaptions((v) => !v)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors ${
+                  showAiCaptions
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100'
+                }`}
+              >
+                <Sparkles className="w-3 h-3" />
+                <span>{showAiCaptions ? 'Hide AI Captions' : 'AI Caption & Tags'}</span>
+              </button>
+            </div>
+
+            {showAiCaptions && (
+              <AiCaptionGenerator
+                compact
+                contentType="reel"
+                currentText={caption}
+                onSelectCaption={(suggested) => setCaption(suggested)}
+                onAppendHashtags={(tags) =>
+                  setCaption((prev) => {
+                    const base = prev.trim();
+                    return base ? `${base} ${tags}` : tags;
+                  })
+                }
+              />
+            )}
+
             <textarea
               rows={2}
               required

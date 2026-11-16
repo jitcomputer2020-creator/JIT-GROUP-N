@@ -400,90 +400,227 @@ export interface QuizQuestion {
   options: string[];
   answer: number;
   category: string;
+  domain: 'cs' | 'general';
+  explanation?: string;
 }
 
 export const QUIZ_QUESTION_BANK: QuizQuestion[] = [
+  // --- COMPUTER SCIENCE (14 Questions -> 70%) ---
   {
     q: 'Which data structure follows the First-In-First-Out (FIFO) principle?',
     options: ['Stack', 'Queue', 'Binary Tree', 'Hash Map'],
     answer: 1,
-    category: 'Computer Science',
+    category: 'Data Structures',
+    domain: 'cs',
+    explanation: 'A Queue dequeues elements in the exact order they were enqueued (FIFO).',
   },
   {
     q: 'In WebRTC, what protocol is primarily used for encrypted media transport?',
     options: ['TCP', 'SRTP / UDP', 'FTP', 'SMTP'],
     answer: 1,
     category: 'Networking',
+    domain: 'cs',
+    explanation: 'WebRTC uses Secure Real-time Transport Protocol (SRTP) over UDP for low-latency encrypted audio/video.',
   },
   {
     q: 'What is the average time complexity of searching in a balanced Binary Search Tree?',
     options: ['O(1)', 'O(n)', 'O(log n)', 'O(n log n)'],
     answer: 2,
     category: 'Algorithms',
+    domain: 'cs',
+    explanation: 'Balanced BSTs keep height logarithmic in the number of nodes, yielding O(log n) lookup.',
   },
   {
     q: 'Which database isolation level prevents dirty reads, non-repeatable reads, and phantom reads?',
     options: ['Read Committed', 'Repeatable Read', 'Serializable', 'Read Uncommitted'],
     answer: 2,
     category: 'Databases',
+    domain: 'cs',
+    explanation: 'Serializable is the strictest ANSI SQL isolation level, ensuring transactions behave as if run sequentially.',
   },
   {
     q: 'Which layer of the OSI model handles end-to-end reliable transport and flow control?',
     options: ['Data Link', 'Network', 'Transport', 'Presentation'],
     answer: 2,
     category: 'Networks',
-  },
-  {
-    q: 'Which planet in our solar system has the most confirmed moons?',
-    options: ['Jupiter', 'Saturn', 'Uranus', 'Neptune'],
-    answer: 1,
-    category: 'Science',
-  },
-  {
-    q: 'In Chess, which piece can leap over other pieces on the board?',
-    options: ['Bishop', 'Rook', 'Knight', 'Queen'],
-    answer: 2,
-    category: 'Board Games',
+    domain: 'cs',
+    explanation: 'Layer 4 (Transport) manages protocols like TCP and UDP for port addressing and reliability.',
   },
   {
     q: 'What HTTP status code represents "Too Many Requests" rate limiting?',
     options: ['403', '409', '429', '503'],
     answer: 2,
     category: 'Web Engineering',
+    domain: 'cs',
+    explanation: 'HTTP 429 signals that a client exceeded allowed request quotas in a time window.',
   },
   {
     q: 'Which sorting algorithm guarantees O(n log n) worst-case time complexity?',
     options: ['Bubble Sort', 'Merge Sort', 'Insertion Sort', 'Quick Sort'],
     answer: 1,
     category: 'Algorithms',
-  },
-  {
-    q: 'What is the chemical symbol for Tungsten?',
-    options: ['Tg', 'Tn', 'W', 'Tu'],
-    answer: 2,
-    category: 'Chemistry',
+    domain: 'cs',
+    explanation: 'Merge Sort always divides arrays in half and merges in linear time, guaranteeing O(n log n) worst case.',
   },
   {
     q: 'In React, which hook lets you synchronize a component with an external system or timer?',
     options: ['useMemo', 'useEffect', 'useId', 'useReducer'],
     answer: 1,
     category: 'Frontend',
+    domain: 'cs',
+    explanation: 'useEffect runs side effects after commit and cleans them up before re-running or unmounting.',
+  },
+  {
+    q: 'In Operating Systems, which condition is NOT one of Coffman’s 4 deadlock requirements?',
+    options: ['Mutual Exclusion', 'Hold and Wait', 'Preemption Allowed', 'Circular Wait'],
+    answer: 2,
+    category: 'Operating Systems',
+    domain: 'cs',
+    explanation: 'Deadlock requires No Preemption, Hold and Wait, Mutual Exclusion, and Circular Wait.',
+  },
+  {
+    q: 'Which SQL clause filters groups created by GROUP BY based on aggregate conditions?',
+    options: ['WHERE', 'HAVING', 'ORDER BY', 'DISTINCT'],
+    answer: 1,
+    category: 'DBMS',
+    domain: 'cs',
+    explanation: 'WHERE filters rows before grouping, whereas HAVING filters grouped rows after aggregation.',
+  },
+  {
+    q: 'What is the maximum number of nodes in a binary tree of height h (root at height 0)?',
+    options: ['2^h', '2^(h+1) - 1', '2h + 1', 'h^2'],
+    answer: 1,
+    category: 'Data Structures',
+    domain: 'cs',
+    explanation: 'A full binary tree with levels 0..h has sum_{i=0..h} 2^i = 2^(h+1) - 1 nodes.',
+  },
+  {
+    q: 'Which Linux command displays real-time active processes, CPU usage, and memory stats interactively?',
+    options: ['chmod', 'top', 'grep', 'pwd'],
+    answer: 1,
+    category: 'Linux & Systems',
+    domain: 'cs',
+    explanation: 'The top command streams live process CPU, memory, and load metrics.',
+  },
+  {
+    q: 'In public-key cryptography, which key is used to verify a sender’s digital signature?',
+    options: ['Receiver’s private key', 'Sender’s public key', 'Session AES key', 'HMAC salt'],
+    answer: 1,
+    category: 'Cybersecurity',
+    domain: 'cs',
+    explanation: 'A signature created with the sender’s private key is verified using the sender’s public key.',
+  },
+  {
+    q: 'Which CSS display mode arranges children along flexible 1D rows or columns?',
+    options: ['display: block', 'display: flex', 'display: inline', 'display: table-cell'],
+    answer: 1,
+    category: 'Web Engineering',
+    domain: 'cs',
+    explanation: 'Flexbox (display: flex) provides 1D alignment, spacing, and wrapping.',
+  },
+
+  // --- GENERAL TRIVIA (8 Questions -> 30%) ---
+  {
+    q: 'Which planet in our solar system has the most confirmed moons?',
+    options: ['Jupiter', 'Saturn', 'Uranus', 'Neptune'],
+    answer: 1,
+    category: 'Science',
+    domain: 'general',
+    explanation: 'Saturn leads with well over 140 confirmed natural satellites.',
+  },
+  {
+    q: 'In Chess, which piece can leap over other pieces on the board?',
+    options: ['Bishop', 'Rook', 'Knight', 'Queen'],
+    answer: 2,
+    category: 'Board Games',
+    domain: 'general',
+    explanation: 'The Knight moves in an L-shape and is the only chess piece permitted to jump over intervening pieces.',
+  },
+  {
+    q: 'What is the chemical symbol for Tungsten?',
+    options: ['Tg', 'Tn', 'W', 'Tu'],
+    answer: 2,
+    category: 'Chemistry',
+    domain: 'general',
+    explanation: 'The symbol W comes from Tungsten’s older German mineral name, Wolfram.',
   },
   {
     q: 'Which country won the first ICC Men’s T20 World Cup in 2007?',
     options: ['Australia', 'Pakistan', 'India', 'South Africa'],
     answer: 2,
     category: 'Sports',
+    domain: 'general',
+    explanation: 'India defeated Pakistan in the inaugural 2007 ICC World Twenty20 final in Johannesburg.',
+  },
+  {
+    q: 'Which strait separates Asia from North America between Russia and Alaska?',
+    options: ['Strait of Gibraltar', 'Bering Strait', 'Malacca Strait', 'Palk Strait'],
+    answer: 1,
+    category: 'Geography',
+    domain: 'general',
+    explanation: 'The Bering Strait connects the Pacific and Arctic oceans between Siberia and Alaska.',
+  },
+  {
+    q: 'Which musical instrument traditionally uses 88 black and white keys?',
+    options: ['Harpsichord', 'Standard Piano', 'Accordion', 'Tabla'],
+    answer: 1,
+    category: 'Arts & Culture',
+    domain: 'general',
+    explanation: 'A modern grand or upright piano spans 7 octaves plus a minor third totaling 88 keys.',
+  },
+  {
+    q: 'Which gas makes up roughly 78% of Earth’s dry atmosphere?',
+    options: ['Oxygen', 'Nitrogen', 'Argon', 'Carbon Dioxide'],
+    answer: 1,
+    category: 'Earth Science',
+    domain: 'general',
+    explanation: 'Earth’s atmosphere is approximately 78% nitrogen (N2) and 21% oxygen (O2).',
+  },
+  {
+    q: 'In which Olympic city were the 2024 Summer Olympic Games hosted?',
+    options: ['Tokyo', 'Paris', 'London', 'Los Angeles'],
+    answer: 1,
+    category: 'Sports',
+    domain: 'general',
+    explanation: 'Paris hosted the Games of the XXXIII Olympiad in July–August 2024.',
   },
 ];
 
-export function pickShuffledQuizQuestions(count = 6): QuizQuestion[] {
-  const pool = [...QUIZ_QUESTION_BANK];
-  for (let i = pool.length - 1; i > 0; i--) {
+function shuffleQuestions(list: QuizQuestion[]): QuizQuestion[] {
+  const arr = [...list];
+  for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
+    [arr[i], arr[j]] = [arr[j], arr[i]];
   }
-  return pool.slice(0, count);
+  return arr;
+}
+
+export function pickShuffledQuizQuestions(
+  count = 10,
+  excludeQuestions: string[] = []
+): QuizQuestion[] {
+  const safeCount = Math.max(5, Math.min(20, count));
+  const csTarget = Math.round(safeCount * 0.7);
+  const generalTarget = safeCount - csTarget;
+  const excludeSet = new Set(excludeQuestions.map((q) => q.trim().toLowerCase()));
+
+  const csFresh = shuffleQuestions(
+    QUIZ_QUESTION_BANK.filter((q) => q.domain === 'cs' && !excludeSet.has(q.q.toLowerCase()))
+  );
+  const csAll = csFresh.length >= csTarget
+    ? csFresh
+    : [...csFresh, ...shuffleQuestions(QUIZ_QUESTION_BANK.filter((q) => q.domain === 'cs'))];
+
+  const genFresh = shuffleQuestions(
+    QUIZ_QUESTION_BANK.filter((q) => q.domain === 'general' && !excludeSet.has(q.q.toLowerCase()))
+  );
+  const genAll = genFresh.length >= generalTarget
+    ? genFresh
+    : [...genFresh, ...shuffleQuestions(QUIZ_QUESTION_BANK.filter((q) => q.domain === 'general'))];
+
+  const pickedCs = csAll.slice(0, csTarget);
+  const pickedGen = genAll.slice(0, generalTarget);
+  return shuffleQuestions([...pickedCs, ...pickedGen]);
 }
 
 export function getQuizAIMove(

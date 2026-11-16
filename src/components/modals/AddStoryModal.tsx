@@ -6,7 +6,9 @@
 import React, { useState, useRef } from 'react';
 import { useSocial } from '../../context/SocialContext';
 import { saveMediaFile, validateMediaFile } from '../../services/mediaStorage';
-import { X, UploadCloud, Image as ImageIcon, Video, Send, Loader2 } from 'lucide-react';
+import { ResilientVideo } from '../common/ResilientVideo';
+import { ResponsiveImage } from '../common/ResponsiveImage';
+import { X, UploadCloud, Image as ImageIcon, Send, Loader2 } from 'lucide-react';
 
 interface AddStoryModalProps {
   isOpen: boolean;
@@ -131,16 +133,26 @@ export const AddStoryModal: React.FC<AddStoryModalProps> = ({ isOpen, onClose })
               </p>
             </div>
           ) : (
-            <div className="relative rounded-2xl overflow-hidden bg-black max-h-72 flex items-center justify-center">
+            <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
               {mediaType === 'video' ? (
-                <video src={previewUrl} controls className="max-h-72 w-auto object-contain" />
+                <ResilientVideo
+                  src={previewUrl}
+                  controls
+                  compactControls
+                  className="w-full h-auto max-h-72 object-contain"
+                />
               ) : (
-                <img src={previewUrl} alt="Story preview" className="max-h-72 w-auto object-contain" />
+                <ResponsiveImage
+                  src={previewUrl}
+                  alt="Story preview"
+                  fit="contain"
+                  className="w-full h-auto max-h-72 object-contain mx-auto block"
+                />
               )}
               <button
                 type="button"
                 onClick={handleClearMedia}
-                className="absolute top-2 right-2 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
                 title="Cancel Media"
               >
                 <X className="w-4 h-4" />

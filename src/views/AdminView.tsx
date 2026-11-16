@@ -18,6 +18,7 @@ import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { saveCompressedProfileMediaFile, validateMediaFile } from '../services/mediaStorage';
 import { ResilientVideo } from '../components/common/ResilientVideo';
+import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import {
   auth,
   fetchAllCloudProfilesAsAdmin,
@@ -30,6 +31,7 @@ import {
   adminModerateCloudProfileClient,
   adminFetchUserChatActivityClient,
   adminFetchUserActivityClient,
+  publishFirestorePost,
   deleteFirestorePost,
   deleteFirestoreReel,
   deleteFirestoreMatchRecord,
@@ -229,7 +231,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const [activityData, setActivityData] = useState<UserActivityPayload | null>(null);
   const [loadingActivity, setLoadingActivity] = useState(false);
   const [activityError, setActivityError] = useState('');
-  const [selectedThreadId, setSelectedThreadId] = useState<string>('all');
+  const [selectedThreadId, setSelectedThreadId] = useState<string>('');
   const [dmSearchQuery, setDmSearchQuery] = useState('');
   const [deletingActivityId, setDeletingActivityId] = useState<string | null>(null);
   const [activityFeedback, setActivityFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -521,7 +523,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       if (!adminToken) return;
       setInspectedUser(user);
       setInspectorTab(initialTab);
-      setSelectedThreadId('all');
+      setSelectedThreadId('');
       setDmSearchQuery('');
       setActivityFeedback(null);
       populateEditForm(user);
@@ -1131,6 +1133,33 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       // Always ensure announcement is persisted to Firestore directly too
       await publishFirestoreAnnouncement(finalAnnouncement);
 
+      if (!publishedViaExpress && annPostToFeed) {
+        await publishFirestorePost({
+          id: `post_ann_${finalAnnouncement.id}`,
+          authorId: 'usr_jit_admin_system',
+          authorName: 'JIT GROUP Official Notice',
+          authorAvatar: '/assets/aistudio/image_e64e54f2.png',
+          authorHandle: '@jit_announcement',
+          content: `${finalAnnouncement.title}\n\n${finalAnnouncement.message}`,
+          mediaUrls: finalAnnouncement.mediaUrl ? [finalAnnouncement.mediaUrl] : [],
+          mediaType: finalAnnouncement.mediaUrl ? finalAnnouncement.mediaType || 'image' : 'none',
+          ...(finalAnnouncement.thumbnailUrl ? { thumbnailUrl: finalAnnouncement.thumbnailUrl } : {}),
+          createdAt: 'Just now',
+          createdAtMs: finalAnnouncement.createdAtMs || Date.now(),
+          ...(typeof finalAnnouncement.expiresAt === 'number'
+            ? { expiresAt: finalAnnouncement.expiresAt }
+            : {}),
+          likesCount: 0,
+          commentsCount: 0,
+          sharesCount: 0,
+          isLiked: false,
+          isSaved: false,
+          likedBy: [],
+          comments: [],
+          category: 'all',
+        }).catch(() => {});
+      }
+
       if (!publishedViaExpress) {
         setAnnouncements((prev) => [finalAnnouncement, ...prev.filter((a) => a.id !== finalAnnouncement.id)]);
       }
@@ -1254,21 +1283,189 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
     URL.revokeObjectURL(url);
   };
 
-  // Filtered messages inside Inspector Chat tab
-  const inspectedMessages = useMemo(() => {
-    if (!activityData?.messages) return [];
-    const q = dmSearchQuery.trim().toLowerCase();
-    return activityData.messages.filter((m) => {
-      if (selectedThreadId !== 'all' && m.conversationId !== selectedThreadId) return false;
-      if (q) {
-        const matchesText = (m.content || '').toLowerCase().includes(q);
-        const matchesSender = (m.senderName || '').toLowerCase().includes(q);
-        const matchesRecv = (m.receiverId || '').toLowerCase().includes(q);
-        if (!matchesText && !matchesSender && !matchesRecv) return false;
+  // Categorized per-user DM & Group threads for Admin Inspector
+  const dmThreads = useMemo(() => {
+    if (!activityData || !inspectedUser) return [];
+
+    const profileLookup = new Map<string, { fullName?: string; username?: string; avatarUrl?: string }>();
+    for (const p of [...users, ...registeredProfiles, inspectedUser]) {
+      if (p?.id) profileLookup.set(p.id, p);
+    }
+
+    type AdminChatMsg = Message & { timestampIso?: string; createdAtMs?: number };
+    const msgsByConv = new Map<string, AdminChatMsg[]>();
+
+    for (const msg of activityData.messages || []) {
+      let cid = (msg.conversationId || '').trim();
+      if (!cid && msg.senderId && msg.receiverId) {
+        const pair = [msg.senderId, msg.receiverId].sort();
+        cid = `dm_${pair[0]}__${pair[1]}`;
       }
-      return true;
+      if (!cid) cid = `dm_${msg.senderId || 'unknown'}`;
+      const arr = msgsByConv.get(cid) || [];
+      arr.push(msg);
+      msgsByConv.set(cid, arr);
+    }
+
+    const convById = new Map<string, Conversation>();
+    for (const conv of activityData.conversations || []) {
+      if (conv?.id) convById.set(conv.id, conv);
+    }
+
+    const allThreadIds = Array.from(new Set([...convById.keys(), ...msgsByConv.keys()]));
+
+    const threads = allThreadIds.map((cid) => {
+      const conv = convById.get(cid);
+      const msgs = [...(msgsByConv.get(cid) || [])].sort((a, b) => {
+        const tA = a.createdAtMs || (a.timestampIso ? Date.parse(a.timestampIso) : 0);
+        const tB = b.createdAtMs || (b.timestampIso ? Date.parse(b.timestampIso) : 0);
+        return tA - tB;
+      });
+
+      const threadType: 'direct' | 'group' =
+        conv?.type === 'group' || cid.startsWith('grp_') ? 'group' : 'direct';
+
+      let peerId = '';
+      if (threadType === 'direct') {
+        peerId = conv?.participantIds?.find((pid) => pid && pid !== inspectedUser.id) || '';
+        if (!peerId) {
+          for (const m of msgs) {
+            if (m.senderId && m.senderId !== inspectedUser.id) {
+              peerId = m.senderId;
+              break;
+            }
+            if (m.receiverId && m.receiverId !== inspectedUser.id) {
+              peerId = m.receiverId;
+              break;
+            }
+          }
+        }
+        if (!peerId && cid.startsWith('dm_')) {
+          const parts = cid.slice(3).split('__');
+          peerId = parts.find((p) => p && p !== inspectedUser.id) || '';
+        }
+      }
+
+      const knownPeer = peerId ? profileLookup.get(peerId) : undefined;
+      const mapPeer = peerId ? conv?.participantsMap?.[peerId] : undefined;
+      const peerMsg = peerId ? msgs.find((m) => m.senderId === peerId) : msgs.find((m) => m.senderId !== inspectedUser.id);
+
+      let participantName = '';
+      if (threadType === 'group') {
+        participantName = (conv?.name || 'Group Chat').trim();
+      } else {
+        const convNameCandidate =
+          conv?.name &&
+          conv.name !== 'Conversation' &&
+          conv.name.toLowerCase() !== (inspectedUser.fullName || '').trim().toLowerCase()
+            ? conv.name
+            : '';
+        participantName = (
+          knownPeer?.fullName ||
+          mapPeer?.name ||
+          peerMsg?.senderName ||
+          convNameCandidate ||
+          (peerId ? `Member ${peerId.slice(-4)}` : 'Campus Member')
+        ).trim();
+      }
+
+      const avatarUrl =
+        knownPeer?.avatarUrl ||
+        mapPeer?.avatar ||
+        peerMsg?.senderAvatar ||
+        conv?.avatarUrl ||
+        APP_CONFIG.logoUrl;
+
+      const lastMsg = msgs[msgs.length - 1];
+      let lastMessagePreview = 'No messages yet';
+      if (lastMsg?.content?.trim()) {
+        lastMessagePreview = lastMsg.content.trim();
+      } else if (lastMsg?.mediaType === 'video') {
+        lastMessagePreview = 'Video attachment';
+      } else if (lastMsg?.mediaUrl) {
+        lastMessagePreview = 'Photo attachment';
+      } else if (conv?.lastMessage?.text?.trim()) {
+        lastMessagePreview = conv.lastMessage.text.trim();
+      }
+
+      const updatedAtMs = Math.max(
+        lastMsg?.createdAtMs || (lastMsg?.timestampIso ? Date.parse(lastMsg.timestampIso) : 0) || 0,
+        conv?.updatedAtMs || 0
+      );
+
+      let lastMessageTime = lastMsg?.createdAt || conv?.lastMessage?.createdAt || conv?.updatedAt || '';
+      if (updatedAtMs > 0) {
+        const dt = formatDateTime(new Date(updatedAtMs).toISOString());
+        lastMessageTime = dt.time ? `${dt.date} · ${dt.time}` : dt.date;
+      } else if (!lastMessageTime) {
+        lastMessageTime = 'Recent';
+      }
+
+      const participantSubtitle =
+        threadType === 'group'
+          ? `${conv?.participantIds?.length || msgs.length} participants`
+          : knownPeer?.username
+          ? `@${knownPeer.username}`
+          : peerId || 'Direct Message';
+
+      return {
+        id: cid,
+        type: threadType,
+        displayTitle: threadType === 'group' ? `Group: ${participantName}` : `DM: ${participantName}`,
+        participantName,
+        participantSubtitle,
+        avatarUrl,
+        lastMessagePreview,
+        lastMessageTime,
+        updatedAtMs,
+        messages: msgs,
+      };
     });
-  }, [activityData, selectedThreadId, dmSearchQuery]);
+
+    return threads.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+  }, [activityData, inspectedUser, users, registeredProfiles]);
+
+  const filteredDmThreads = useMemo(() => {
+    const q = dmSearchQuery.trim().toLowerCase();
+    if (!q) return dmThreads;
+    return dmThreads.filter((t) => {
+      if (t.displayTitle.toLowerCase().includes(q)) return true;
+      if (t.participantName.toLowerCase().includes(q)) return true;
+      if (t.lastMessagePreview.toLowerCase().includes(q)) return true;
+      return t.messages.some(
+        (m) =>
+          (m.content || '').toLowerCase().includes(q) ||
+          (m.senderName || '').toLowerCase().includes(q)
+      );
+    });
+  }, [dmThreads, dmSearchQuery]);
+
+  const activeDmThread = useMemo(() => {
+    if (filteredDmThreads.length === 0) return null;
+    if (selectedThreadId) {
+      const exact = filteredDmThreads.find((t) => t.id === selectedThreadId);
+      if (exact) return exact;
+    }
+    return filteredDmThreads[0];
+  }, [filteredDmThreads, selectedThreadId]);
+
+  const activeThreadMessages = useMemo(() => {
+    if (!activeDmThread) return [];
+    const q = dmSearchQuery.trim().toLowerCase();
+    if (!q) return activeDmThread.messages;
+    if (
+      activeDmThread.displayTitle.toLowerCase().includes(q) ||
+      activeDmThread.participantName.toLowerCase().includes(q)
+    ) {
+      return activeDmThread.messages;
+    }
+    const matching = activeDmThread.messages.filter(
+      (m) =>
+        (m.content || '').toLowerCase().includes(q) ||
+        (m.senderName || '').toLowerCase().includes(q)
+    );
+    return matching.length > 0 ? matching : activeDmThread.messages;
+  }, [activeDmThread, dmSearchQuery]);
 
   // --------------------------------------------------------------------------
   // Phone-Only Admin Gate (Displayed whenever locked; normal users cannot bypass)
@@ -1614,16 +1811,26 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                 </div>
 
                 {annMediaPreviewUrl && (
-                  <div className="relative rounded-xl overflow-hidden bg-black border border-slate-200 dark:border-slate-700 max-h-48 flex items-center justify-center">
+                  <div className="relative rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
                     {annMediaType === 'video' ? (
-                      <video src={annMediaPreviewUrl} controls className="max-h-48 w-full object-contain" />
+                      <ResilientVideo
+                        src={annMediaPreviewUrl}
+                        controls
+                        compactControls
+                        className="w-full h-auto max-h-56 object-contain"
+                      />
                     ) : (
-                      <img src={annMediaPreviewUrl} alt="Announcement attachment" className="max-h-48 w-full object-contain" />
+                      <ResponsiveImage
+                        src={annMediaPreviewUrl}
+                        alt="Announcement attachment"
+                        fit="contain"
+                        className="w-full h-auto max-h-56 object-contain mx-auto block"
+                      />
                     )}
                     <button
                       type="button"
                       onClick={handleClearAnnouncementMedia}
-                      className="absolute top-2 right-2 min-w-[36px] min-h-[36px] flex items-center justify-center bg-red-600/90 hover:bg-red-700 text-white rounded-lg"
+                      className="absolute top-2 right-2 z-20 min-w-[36px] min-h-[36px] flex items-center justify-center bg-red-600/90 hover:bg-red-700 text-white rounded-lg"
                       aria-label="Remove attached media"
                     >
                       <X className="w-4 h-4" />
@@ -1711,15 +1918,25 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                         className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex items-start justify-between gap-2.5"
                       >
                         {ann.mediaUrl && (
-                          <div className="w-12 h-12 rounded-lg overflow-hidden bg-black shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
+                          <div className="w-12 h-12 rounded-lg overflow-hidden bg-slate-200 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
                             {ann.mediaType === 'video' ? (
                               ann.thumbnailUrl ? (
-                                <img src={ann.thumbnailUrl} alt="Video notice" className="w-full h-full object-cover" />
+                                <ResponsiveImage
+                                  src={ann.thumbnailUrl}
+                                  alt="Video notice"
+                                  fit="cover"
+                                  containerClassName="w-full h-full"
+                                />
                               ) : (
-                                <Video className="w-4 h-4 text-white" />
+                                <Video className="w-4 h-4 text-slate-600 dark:text-slate-300" />
                               )
                             ) : (
-                              <img src={ann.mediaUrl} alt="Notice media" className="w-full h-full object-cover" />
+                              <ResponsiveImage
+                                src={ann.mediaUrl}
+                                alt="Notice media"
+                                fit="cover"
+                                containerClassName="w-full h-full"
+                              />
                             )}
                           </div>
                         )}
@@ -2488,146 +2705,196 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                 </div>
               )}
 
-              {/* TAB 2: Personal Chat Activity & DMs */}
+              {/* TAB 2: Personal Chat Activity & DMs (Categorized Per-User Thread Viewer) */}
               {inspectorTab === 'chats' && (
-                <div className="space-y-5">
+                <div className="space-y-4">
                   {loadingActivity ? (
                     <div className="py-10 text-center text-xs text-slate-500">
-                      Loading personal chat threads & direct messages...
+                      Loading personal chat threads &amp; direct messages...
                     </div>
                   ) : (
                     <>
-                      {/* DM Search Filter */}
-                      <div className="relative">
-                        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                          type="text"
-                          value={dmSearchQuery}
-                          onChange={(e) => setDmSearchQuery(e.target.value)}
-                          placeholder="Search DMs, message content, sender or recipient..."
-                          className="w-full min-h-[40px] pl-10 pr-4 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
-                        />
+                      {/* DM & Participant Search */}
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <div className="relative flex-1">
+                          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                          <input
+                            type="text"
+                            value={dmSearchQuery}
+                            onChange={(e) => setDmSearchQuery(e.target.value)}
+                            placeholder="Filter threads by participant name or message..."
+                            className="w-full min-h-[40px] pl-10 pr-4 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-600"
+                          />
+                        </div>
+                        <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400 shrink-0">
+                          {dmThreads.length} {dmThreads.length === 1 ? 'thread' : 'threads'} · {activityData?.messages?.length ?? 0} total msgs
+                        </span>
                       </div>
 
-                      {/* Conversation Thread Filter Strip */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
-                          <span>Personal DMs & Group Threads</span>
-                          <span className="font-mono tabular-nums text-slate-500">
-                            {activityData?.conversations?.length ?? 0} threads · {activityData?.messages?.length ?? 0} msgs
-                          </span>
+                      {filteredDmThreads.length === 0 ? (
+                        <div className="p-6 text-center rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">
+                          {dmThreads.length === 0
+                            ? 'No DM or group conversations recorded yet for this account.'
+                            : 'No chat threads matched your filter.'}
                         </div>
-
-                        {(activityData?.conversations?.length ?? 0) === 0 ? (
-                          <p className="text-xs text-slate-500 dark:text-slate-400 p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800">
-                            No DM or group threads recorded yet for this account.
-                          </p>
-                        ) : (
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedThreadId('all')}
-                              className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold rounded-xl border transition-colors ${
-                                selectedThreadId === 'all'
-                                  ? 'bg-slate-900 dark:bg-blue-600 text-white border-transparent'
-                                  : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                              }`}
-                            >
-                              All Threads ({activityData?.messages?.length ?? 0})
-                            </button>
-                            {activityData?.conversations.map((conv) => (
-                              <button
-                                key={conv.id}
-                                type="button"
-                                onClick={() => setSelectedThreadId(conv.id)}
-                                className={`min-h-[36px] px-3 py-1.5 text-xs font-semibold rounded-xl border transition-colors ${
-                                  selectedThreadId === conv.id
-                                    ? 'bg-slate-900 dark:bg-blue-600 text-white border-transparent'
-                                    : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                }`}
-                              >
-                                {conv.type === 'group' ? 'Group: ' : 'DM: '}
-                                {conv.name || conv.id}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Message History Log */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300">
-                          <h3>Message History (Sent & Received)</h3>
-                          <span className="font-mono tabular-nums text-slate-500">
-                            {inspectedMessages.length} shown
-                          </span>
-                        </div>
-                        {inspectedMessages.length === 0 ? (
-                          <div className="p-6 text-center rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-500">
-                            No personal messages found in selected filter.
-                          </div>
-                        ) : (
-                          <div className="divide-y divide-slate-200 dark:divide-slate-800 border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
-                            {inspectedMessages.map((msg) => {
-                              const conv = activityData?.conversations.find(
-                                (c) => c.id === msg.conversationId
-                              );
-                              const isAuthor = msg.senderId === inspectedUser.id;
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-12 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-slate-900">
+                          {/* Left Column: Clickable Per-User Thread List */}
+                          <div className="md:col-span-5 border-b md:border-b-0 md:border-r border-slate-200 dark:border-slate-800 max-h-[260px] md:max-h-[460px] overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/80">
+                            {filteredDmThreads.map((thread) => {
+                              const isSelected = activeDmThread?.id === thread.id;
                               return (
-                                <div
-                                  key={msg.id}
-                                  className="p-3.5 bg-white dark:bg-slate-900 space-y-1.5"
+                                <button
+                                  key={thread.id}
+                                  type="button"
+                                  onClick={() => setSelectedThreadId(thread.id)}
+                                  className={`w-full text-left p-3 flex items-center gap-3 transition-colors min-h-[64px] ${
+                                    isSelected
+                                      ? 'bg-blue-50/90 dark:bg-blue-950/40'
+                                      : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                                  }`}
                                 >
-                                  <div className="flex items-center justify-between gap-2 text-[11px]">
-                                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
-                                      <span
-                                        className={`font-semibold text-[10px] uppercase tracking-wider ${
-                                          isAuthor
-                                            ? 'text-blue-600 dark:text-blue-400'
-                                            : 'text-emerald-600 dark:text-emerald-400'
+                                  <img
+                                    src={thread.avatarUrl}
+                                    alt={thread.participantName}
+                                    className="w-10 h-10 rounded-full object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                                  />
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <p
+                                        className={`text-xs font-bold truncate ${
+                                          isSelected
+                                            ? 'text-blue-700 dark:text-blue-300'
+                                            : 'text-slate-900 dark:text-white'
                                         }`}
                                       >
-                                        {isAuthor ? 'Sent' : 'Received'}
+                                        {thread.displayTitle}
+                                      </p>
+                                      <span className="text-[10px] font-mono tabular-nums text-slate-400 shrink-0">
+                                        {thread.messages.length}
                                       </span>
-                                      <span className="font-bold text-slate-900 dark:text-white truncate">
-                                        {msg.senderName}
-                                      </span>
-                                      {conv && (
-                                        <span className="text-slate-400 truncate">
-                                          in {conv.type === 'group' ? conv.name : `DM with ${conv.name}`}
-                                        </span>
-                                      )}
                                     </div>
-                                    <span className="font-mono tabular-nums text-slate-400 shrink-0">
-                                      {msg.createdAt}
-                                    </span>
-                                  </div>
-                                  {msg.mediaUrl && (
-                                    msg.mediaType === 'video' ? (
-                                      <ResilientVideo
-                                        src={msg.mediaUrl}
-                                        controls
-                                        className="max-h-40 rounded-lg border border-slate-200 dark:border-slate-700 bg-black"
-                                      />
-                                    ) : (
-                                      <img
-                                        src={msg.mediaUrl}
-                                        alt="Chat attachment"
-                                        className="max-h-36 rounded-lg object-contain border border-slate-200 dark:border-slate-700"
-                                      />
-                                    )
-                                  )}
-                                  {msg.content && (
-                                    <p className="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap break-words">
-                                      {msg.content}
+                                    <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate mt-0.5">
+                                      {thread.lastMessagePreview}
                                     </p>
-                                  )}
-                                </div>
+                                    <p className="text-[10px] font-mono tabular-nums text-slate-400 mt-0.5 truncate">
+                                      {thread.lastMessageTime}
+                                    </p>
+                                  </div>
+                                </button>
                               );
                             })}
                           </div>
-                        )}
-                      </div>
+
+                          {/* Right Column: Selected User Pair Conversation Transcript ONLY */}
+                          <div className="md:col-span-7 flex flex-col max-h-[460px] bg-slate-50/60 dark:bg-slate-950/40">
+                            {activeDmThread ? (
+                              <>
+                                {/* Thread Header */}
+                                <div className="px-4 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <img
+                                      src={activeDmThread.avatarUrl}
+                                      alt={activeDmThread.participantName}
+                                      className="w-9 h-9 rounded-full object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                                    />
+                                    <div className="min-w-0">
+                                      <h3 className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                                        {activeDmThread.displayTitle}
+                                      </h3>
+                                      <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                        {activeDmThread.participantSubtitle} · {activeThreadMessages.length}{' '}
+                                        {activeThreadMessages.length === 1 ? 'message' : 'messages'}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* Interactive Chronological History */}
+                                <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
+                                  {activeThreadMessages.length === 0 ? (
+                                    <div className="py-10 text-center text-xs text-slate-500 dark:text-slate-400">
+                                      No messages recorded inside this conversation yet.
+                                    </div>
+                                  ) : (
+                                    activeThreadMessages.map((msg) => {
+                                      const isInspectedSender = msg.senderId === inspectedUser.id;
+                                      const msgTime = msg.createdAtMs
+                                        ? (() => {
+                                            const dt = formatDateTime(new Date(msg.createdAtMs).toISOString());
+                                            return dt.time ? `${dt.date} ${dt.time}` : dt.date;
+                                          })()
+                                        : msg.createdAt;
+                                      return (
+                                        <div
+                                          key={msg.id}
+                                          className={`flex flex-col ${
+                                            isInspectedSender ? 'items-end' : 'items-start'
+                                          }`}
+                                        >
+                                          <div
+                                            className={`max-w-[88%] rounded-2xl px-3.5 py-2.5 text-xs space-y-1.5 ${
+                                              isInspectedSender
+                                                ? 'bg-blue-600 text-white rounded-tr-sm'
+                                                : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 border border-slate-200 dark:border-slate-700 rounded-tl-sm'
+                                            }`}
+                                          >
+                                            <div className="flex items-center justify-between gap-3 text-[10px]">
+                                              <span
+                                                className={`font-bold ${
+                                                  isInspectedSender
+                                                    ? 'text-blue-100'
+                                                    : 'text-blue-600 dark:text-blue-400'
+                                                }`}
+                                              >
+                                                {isInspectedSender
+                                                  ? inspectedUser.fullName
+                                                  : msg.senderName || activeDmThread.participantName}
+                                              </span>
+                                            </div>
+                                            {msg.mediaUrl && (
+                                              <div className="rounded-xl overflow-hidden w-full">
+                                                {msg.mediaType === 'video' ? (
+                                                  <ResilientVideo
+                                                    src={msg.mediaUrl}
+                                                    controls
+                                                    compactControls
+                                                    className="w-full h-auto max-h-44 object-contain"
+                                                  />
+                                                ) : (
+                                                  <ResponsiveImage
+                                                    src={msg.mediaUrl}
+                                                    alt="Chat attachment"
+                                                    fit="contain"
+                                                    className="w-full h-auto max-h-44 object-contain mx-auto block"
+                                                    fallbackText="Attachment unavailable"
+                                                  />
+                                                )}
+                                              </div>
+                                            )}
+                                            {msg.content && (
+                                              <p className="whitespace-pre-wrap break-words leading-relaxed">
+                                                {msg.content}
+                                              </p>
+                                            )}
+                                          </div>
+                                          <span className="text-[10px] font-mono tabular-nums text-slate-400 mt-1 px-1">
+                                            {isInspectedSender ? 'Sent' : 'Received'} · {msgTime}
+                                          </span>
+                                        </div>
+                                      );
+                                    })
+                                  )}
+                                </div>
+                              </>
+                            ) : (
+                              <div className="py-12 text-center text-xs text-slate-500">
+                                Select a thread on the left to inspect its messages.
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Live In-Game Room Chat Messages */}
                       {(activityData?.inGameMessages?.length ?? 0) > 0 && (
@@ -2721,20 +2988,33 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                 <p className="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-line break-words">
                                   {p.content}
                                 </p>
-                                {p.mediaUrls && p.mediaUrls.length > 0 && (
-                                  <div className="rounded-lg overflow-hidden bg-black/90 max-h-40 flex items-center justify-center">
-                                    {p.mediaType === 'video' ? (
-                                      <ResilientVideo
-                                        src={p.mediaUrls[0]}
-                                        poster={p.thumbnailUrl}
-                                        controls
-                                        className="max-h-40 w-full object-contain"
-                                      />
-                                    ) : (
-                                      <img src={p.mediaUrls[0]} alt="Post attachment" className="max-h-40 w-full object-contain" />
-                                    )}
-                                  </div>
-                                )}
+                                {(() => {
+                                  const primaryMediaUrl = p.mediaUrls?.find(
+                                    (u) => typeof u === 'string' && u.trim().length > 0
+                                  );
+                                  if (!primaryMediaUrl || p.mediaType === 'none') return null;
+                                  return (
+                                    <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
+                                      {p.mediaType === 'video' ? (
+                                        <ResilientVideo
+                                          src={primaryMediaUrl}
+                                          poster={p.thumbnailUrl}
+                                          controls
+                                          compactControls
+                                          className="w-full h-auto max-h-48 object-contain"
+                                        />
+                                      ) : (
+                                        <ResponsiveImage
+                                          src={primaryMediaUrl}
+                                          alt="Post attachment"
+                                          fit="contain"
+                                          className="w-full h-auto max-h-48 object-contain mx-auto block"
+                                          fallbackText="Post image unavailable"
+                                        />
+                                      )}
+                                    </div>
+                                  );
+                                })()}
                                 <p className="text-[11px] text-slate-400 font-mono tabular-nums">
                                   {p.likesCount} likes · {p.comments?.length ?? p.commentsCount} comments
                                 </p>
@@ -2762,11 +3042,16 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                 className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 flex items-start justify-between gap-3"
                               >
                                 <div className="flex items-start gap-3 min-w-0">
-                                  <div className="w-16 h-16 rounded-lg overflow-hidden bg-black shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
+                                  <div className="w-16 h-16 rounded-lg overflow-hidden bg-slate-200 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700 flex items-center justify-center">
                                     {r.thumbnailUrl ? (
-                                      <img src={r.thumbnailUrl} alt={r.caption} className="w-full h-full object-cover" />
+                                      <ResponsiveImage
+                                        src={r.thumbnailUrl}
+                                        alt={r.caption || 'Reel thumbnail'}
+                                        fit="cover"
+                                        containerClassName="w-full h-full"
+                                      />
                                     ) : (
-                                      <Film className="w-5 h-5 text-white" />
+                                      <Film className="w-5 h-5 text-slate-600 dark:text-slate-300" />
                                     )}
                                   </div>
                                   <div className="min-w-0 space-y-1">

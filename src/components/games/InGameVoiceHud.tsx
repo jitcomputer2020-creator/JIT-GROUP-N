@@ -16,6 +16,8 @@ interface InGameVoiceHudProps {
   isSpeakerEnabled: boolean;
   isConnectingMic: boolean;
   isSpeaking: boolean;
+  isHostMutedMic?: boolean;
+  hostMutedVoiceIds?: string[];
   voiceError: string | null;
   voicePeers: FirestoreVoicePeer[];
   localPlayerId: string;
@@ -31,6 +33,8 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
   isSpeakerEnabled,
   isConnectingMic,
   isSpeaking,
+  isHostMutedMic = false,
+  hostMutedVoiceIds = [],
   voiceError,
   voicePeers,
   localPlayerId,
@@ -39,7 +43,9 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
   onClearError,
 }) => {
   const remotePeers = voicePeers.filter((p) => p.peerId !== localPlayerId);
-  const activeTalkingPeers = remotePeers.filter((p) => p.micEnabled);
+  const activeTalkingPeers = remotePeers.filter(
+    (p) => p.micEnabled && !hostMutedVoiceIds.includes(p.peerId)
+  );
 
   return (
     <div className="w-full mb-4 space-y-2">
@@ -70,7 +76,9 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
               )}
             </div>
             <p className="text-[11px] text-slate-300 truncate">
-              {roomCode
+              {isHostMutedMic
+                ? 'Host muted your mic — you can still listen'
+                : roomCode
                 ? remotePeers.length > 0
                   ? activeTalkingPeers.length > 0
                     ? `${activeTalkingPeers.map((p) => p.name.split(' ')[0]).join(', ')} mic live`
@@ -87,17 +95,28 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
           {/* Connected peer avatars on wider screens */}
           {remotePeers.length > 0 && (
             <div className="hidden sm:flex items-center -space-x-1.5 pl-1">
-              {remotePeers.slice(0, 3).map((peer) => (
-                <div key={peer.peerId} className="relative" title={`${peer.name} (${peer.micEnabled ? 'Mic On' : 'Muted'})`}>
-                  <img
-                    src={peer.avatar || APP_CONFIG.logoUrl}
-                    alt={peer.name}
-                    className={`w-6 h-6 rounded-full object-cover border-2 ${
-                      peer.micEnabled ? 'border-emerald-400' : 'border-slate-600'
-                    }`}
-                  />
-                </div>
-              ))}
+              {remotePeers.slice(0, 3).map((peer) => {
+                const peerHostMuted = hostMutedVoiceIds.includes(peer.peerId);
+                return (
+                  <div
+                    key={peer.peerId}
+                    className="relative"
+                    title={`${peer.name} (${peerHostMuted ? 'Host Muted' : peer.micEnabled ? 'Mic On' : 'Muted'})`}
+                  >
+                    <img
+                      src={peer.avatar || APP_CONFIG.logoUrl}
+                      alt={peer.name}
+                      className={`w-6 h-6 rounded-full object-cover border-2 ${
+                        peerHostMuted
+                          ? 'border-red-500'
+                          : peer.micEnabled
+                          ? 'border-emerald-400'
+                          : 'border-slate-600'
+                      }`}
+                    />
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -107,23 +126,25 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
           <button
             type="button"
             onClick={onToggleMic}
-            disabled={isConnectingMic}
+            disabled={isConnectingMic || isHostMutedMic}
             aria-pressed={isMicEnabled}
-            aria-label={isMicEnabled ? 'Mute Microphone' : 'Unmute Microphone'}
-            className={`px-3 py-1.5 min-h-[38px] rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 ${
-              isMicEnabled
+            aria-label={isHostMutedMic ? 'Microphone muted by host' : isMicEnabled ? 'Mute Microphone' : 'Unmute Microphone'}
+            className={`px-3 py-1.5 min-h-[38px] rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all active:scale-95 whitespace-nowrap ${
+              isHostMutedMic
+                ? 'bg-red-950/60 text-red-300 border border-red-700/60 cursor-not-allowed'
+                : isMicEnabled
                 ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm shadow-emerald-500/30'
                 : 'bg-slate-700 hover:bg-slate-600 text-slate-200 border border-slate-600'
             }`}
           >
             {isConnectingMic ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : isMicEnabled ? (
+            ) : isMicEnabled && !isHostMutedMic ? (
               <Mic className="w-3.5 h-3.5" />
             ) : (
               <MicOff className="w-3.5 h-3.5 text-red-400" />
             )}
-            <span>{isMicEnabled ? 'Mic On' : 'Mic Off'}</span>
+            <span>{isHostMutedMic ? 'Host Muted' : isMicEnabled ? 'Mic On' : 'Mic Off'}</span>
           </button>
 
           <button
