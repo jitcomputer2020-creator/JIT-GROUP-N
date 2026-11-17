@@ -1821,6 +1821,357 @@ export function subscribeToPublicMatchmakingQueue(
   );
 }
 
+export interface MatchmakingTicket {
+  id: string;
+  playerId: string;
+  playerName: string;
+  playerAvatar: string;
+  gameId: string;
+  status: 'waiting' | 'matched';
+  matchedRoomCode: string;
+  matchedWithId: string;
+  joinedAtMs: number;
+}
+
+function parseMatchmakingTicket(data: Record<string, any>): MatchmakingTicket {
+  return {
+    id: String(data.id || data.playerId || ''),
+    playerId: String(data.playerId || data.id || ''),
+    playerName: String(data.playerName || 'JIT Player'),
+    playerAvatar: String(data.playerAvatar || ''),
+    gameId: String(data.gameId || 'tictactoe'),
+    status: data.status === 'matched' ? 'matched' : 'waiting',
+    matchedRoomCode: String(data.matchedRoomCode || ''),
+    matchedWithId: String(data.matchedWithId || ''),
+    joinedAtMs: Number(data.joinedAtMs || Date.now()),
+  };
+}
+
+function filterActiveQueueTickets(
+  docs: Array<{ data: () => Record<string, any> }>,
+  gameId: string,
+  excludePlayerId: string
+): MatchmakingTicket[] {
+  const active: MatchmakingTicket[] = [];
+  for (const d of docs) {
+    const data = d.data();
+    const ticket = parseMatchmakingTicket(data);
+    if (ticket.status !== 'waiting' || ticket.gameId !== gameId) {
+      continue;
+    }
+    if (!ticket.playerId || ticket.playerId === excludePlayerId) {
+      continue;
+    }
+    if (isRoomDocStale(data, PUBLIC_QUEUE_STALE_MS)) {
+      deleteDoc(doc(db, 'matchmakingQueue', ticket.playerId)).catch(() => {});
+      continue;
+    }
+    active.push(ticket);
+  }
+  return active.sort((a, b) =>
+    a.joinedAtMs !== b.joinedAtMs
+      ? a.joinedAtMs - b.joinedAtMs
+      : a.playerId.localeCompare(b.playerId)
+  );
+}
+
+export async function fetchFirestoreGameRoomByCode(roomCode: string): Promise<MultiplayerRoom | null> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return null;
+  try {
+    const snap = await fetchDocServerFirst(['gameRooms', cleanCode]);
+    if (!snap.exists()) return null;
+    return parseRoomSnapshotData(snap.data());
+  } catch {
+    return null;
+  }
+}
+
+export async function leaveMatchmakingQueue(playerId: string): Promise<void> {
+  if (!playerId) return;
+  try {
+    await deleteDoc(doc(db, 'matchmakingQueue', playerId));
+  } catch {
+    // Best-effort queue cleanup
+  }
+}
+
+export async function touchMatchmakingQueueHeartbeat(playerId: string): Promise<void> {
+  if (!playerId) return;
+  try {
+    await updateDoc(doc(db, 'matchmakingQueue', playerId), {
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Ignore transient heartbeat errors
+  }
+}
+
+export async function findWaitingQueueTicketForGame(
+  gameId: string,
+  excludePlayerId: string
+): Promise<MatchmakingTicket | null> {
+  try {
+    const q = query(
+      collection(db, 'matchmakingQueue'),
+      where('status', '==', 'waiting'),
+      limit(50)
+    );
+    const snap = await getDocs(q);
+    const candidates = filterActiveQueueTickets(snap.docs, gameId, excludePlayerId);
+    return candidates[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+export function subscribeToMatchmakingQueueForGame(
+  gameId: string,
+  excludePlayerId: string,
+  onWaitingTickets: (tickets: MatchmakingTicket[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, 'matchmakingQueue'),
+    where('status', '==', 'waiting'),
+    limit(50)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const tickets = filterActiveQueueTickets(snap.docs, gameId, excludePlayerId);
+      onWaitingTickets(tickets);
+    },
+    (err) => {
+      console.warn('Matchmaking queue collection listener notice:', err);
+    }
+  );
+}
+
+export function subscribeToMyMatchmakingTicket(
+  playerId: string,
+  onMatchedRoom: (roomCode: string, matchedWithId: string) => void
+): Unsubscribe {
+  return onSnapshot(
+    doc(db, 'matchmakingQueue', playerId),
+    (snap) => {
+      if (!snap.exists()) return;
+      const ticket = parseMatchmakingTicket(snap.data());
+      if (ticket.status === 'matched' && /^\d{4}$/.test(ticket.matchedRoomCode)) {
+        onMatchedRoom(ticket.matchedRoomCode, ticket.matchedWithId);
+      }
+    },
+    (err) => {
+      console.warn('My matchmaking ticket listener notice:', err);
+    }
+  );
+}
+
+async function enterMatchmakingQueueTicket(
+  player: { id: string; name: string; avatar: string },
+  gameId: string
+): Promise<MatchmakingTicket> {
+  const ticketRef = doc(db, 'matchmakingQueue', player.id);
+  const nowMs = Date.now();
+  const cleanAvatar = sanitizeAvatarUrl(player.avatar);
+  const cleanName = (player.name || 'JIT Player').slice(0, 80);
+
+  await runTransaction(db, async (tx) => {
+    const existingSnap = await tx.get(ticketRef);
+    if (existingSnap.exists()) {
+      tx.update(ticketRef, {
+        gameId,
+        playerName: cleanName,
+        playerAvatar: cleanAvatar,
+        status: 'waiting',
+        matchedRoomCode: '',
+        matchedWithId: '',
+        joinedAtMs: nowMs,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      tx.set(ticketRef, {
+        id: player.id,
+        playerId: player.id,
+        playerName: cleanName,
+        playerAvatar: cleanAvatar,
+        gameId,
+        status: 'waiting',
+        matchedRoomCode: '',
+        matchedWithId: '',
+        joinedAtMs: nowMs,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    }
+  });
+
+  return {
+    id: player.id,
+    playerId: player.id,
+    playerName: cleanName,
+    playerAvatar: cleanAvatar,
+    gameId,
+    status: 'waiting',
+    matchedRoomCode: '',
+    matchedWithId: '',
+    joinedAtMs: nowMs,
+  };
+}
+
+export async function pairQueuePlayersIntoRoom(
+  initiator: { id: string; name: string; avatar: string },
+  opponentTicket: MatchmakingTicket,
+  gameId: string,
+  maxPlayers = 2
+): Promise<MultiplayerRoom | null> {
+  if (!opponentTicket?.playerId || opponentTicket.playerId === initiator.id) {
+    return null;
+  }
+  const safeMax = Math.min(4, Math.max(2, maxPlayers || 2));
+  const oppRef = doc(db, 'matchmakingQueue', opponentTicket.playerId);
+  const myRef = doc(db, 'matchmakingQueue', initiator.id);
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const roomCode = await pickAvailableRoomCodeAndCleanStale(initiator.id);
+    const roomRef = doc(db, 'gameRooms', roomCode);
+
+    try {
+      const txResult = await runTransaction(db, async (tx) => {
+        const oppSnap = await tx.get(oppRef);
+        const mySnap = await tx.get(myRef);
+        const roomSnap = await tx.get(roomRef);
+
+        // If our own queue ticket was already matched by the other player concurrently, use THAT room!
+        if (mySnap.exists()) {
+          const myData = mySnap.data();
+          if (myData.status === 'matched' && /^\d{4}$/.test(String(myData.matchedRoomCode || ''))) {
+            return { existingRoomCode: String(myData.matchedRoomCode), room: null as MultiplayerRoom | null };
+          }
+        }
+
+        if (!oppSnap.exists()) {
+          return { existingRoomCode: null, room: null as MultiplayerRoom | null };
+        }
+        const oppData = oppSnap.data();
+        if (oppData.status !== 'waiting' || oppData.gameId !== gameId) {
+          return { existingRoomCode: null, room: null as MultiplayerRoom | null };
+        }
+
+        if (roomSnap.exists()) {
+          throw new Error('ROOM_CODE_COLLISION');
+        }
+
+        const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const oppPlayer: RoomPlayer = {
+          id: opponentTicket.playerId,
+          name: String(oppData.playerName || opponentTicket.playerName || 'Player 1').slice(0, 80),
+          avatar: sanitizeAvatarUrl(String(oppData.playerAvatar || opponentTicket.playerAvatar || '')),
+          isHost: true,
+          isReady: true,
+          color: 'Red',
+          joinedAtMs: Number(oppData.joinedAtMs || Date.now()),
+        };
+        const initPlayer: RoomPlayer = {
+          id: initiator.id,
+          name: initiator.name.slice(0, 80),
+          avatar: sanitizeAvatarUrl(initiator.avatar),
+          isHost: false,
+          isReady: true,
+          color: 'Yellow',
+          joinedAtMs: Date.now(),
+        };
+        const pairedPlayers = [oppPlayer, initPlayer];
+
+        tx.set(roomRef, {
+          roomCode,
+          gameId,
+          hostId: oppPlayer.id,
+          status: 'in_game',
+          maxPlayers: safeMax,
+          playerCount: 2,
+          isPublicMatch: true,
+          isOpenGroup: false,
+          activeSeatLimit: safeMax,
+          playersJson: JSON.stringify(pairedPlayers),
+          waitingPlayersJson: '[]',
+          reactionsJson: '[]',
+          mutedVoiceIdsJson: '[]',
+          mutedChatIdsJson: '[]',
+          gameStateJson: JSON.stringify({ _startId: startId, moveSeq: 0 }),
+          messagesJson: '[]',
+          moveAction: 'GAME_START',
+          currentTurn: oppPlayer.id,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        tx.update(oppRef, {
+          status: 'matched',
+          matchedRoomCode: roomCode,
+          matchedWithId: initiator.id,
+          updatedAt: serverTimestamp(),
+        });
+
+        if (mySnap.exists()) {
+          tx.update(myRef, {
+            status: 'matched',
+            matchedRoomCode: roomCode,
+            matchedWithId: oppPlayer.id,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        const createdRoom: MultiplayerRoom = {
+          roomCode,
+          gameId,
+          hostId: oppPlayer.id,
+          createdAt: Date.now(),
+          status: 'in_game',
+          maxPlayers: safeMax,
+          isPublicMatch: true,
+          isOpenGroup: false,
+          activeSeatLimit: safeMax,
+          players: pairedPlayers,
+          waitingPlayers: [],
+          reactions: [],
+          mutedVoiceIds: [],
+          mutedChatIds: [],
+          gameState: { _startId: startId, moveSeq: 0 },
+          currentTurn: oppPlayer.id,
+          messages: [],
+          callState: null,
+        };
+
+        return { existingRoomCode: null, room: createdRoom };
+      });
+
+      if (txResult.existingRoomCode) {
+        const fetched = await fetchFirestoreGameRoomByCode(txResult.existingRoomCode);
+        await leaveMatchmakingQueue(initiator.id);
+        if (fetched) return fetched;
+      }
+
+      if (txResult.room) {
+        setStoredHostedRoomCode(initiator.id, null);
+        await leaveMatchmakingQueue(initiator.id);
+        return txResult.room;
+      }
+
+      return null;
+    } catch (err: any) {
+      if (err?.message === 'ROOM_CODE_COLLISION') {
+        continue;
+      }
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.WRITE, `matchmakingQueue/${opponentTicket.playerId}`);
+      }
+      throw err;
+    }
+  }
+
+  return null;
+}
+
 export async function touchMatchmakingRoomHeartbeat(roomCode: string): Promise<void> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
   if (cleanCode.length !== 4) return;
@@ -1837,37 +2188,59 @@ export async function quickMatchFirestoreRoom(
   gameId: string,
   maxPlayers: number,
   player: { id: string; name: string; avatar: string }
-): Promise<{ room: MultiplayerRoom; matchedExisting: boolean }> {
-  // Clean up any abandoned waiting room owned by this user before entering queue
+): Promise<{ room: MultiplayerRoom | null; matchedExisting: boolean; ticket?: MatchmakingTicket }> {
+  // Clean up any abandoned room hosted by this user before entering matchmaking queue
   await releasePreviousHostedRoom(player.id);
 
+  // 1. Check active waiting tickets in dedicated matchmakingQueue collection first
   try {
-    // Single-field query avoids composite index precondition failures
     const q = query(
-      collection(db, 'gameRooms'),
-      where('isPublicMatch', '==', true),
-      limit(60)
+      collection(db, 'matchmakingQueue'),
+      where('status', '==', 'waiting'),
+      limit(50)
     );
     const snap = await getDocs(q);
-    const candidates = filterActiveWaitingRooms(snap.docs, gameId, '', player.id);
+    const waitingTickets = filterActiveQueueTickets(snap.docs, gameId, player.id);
 
-    for (const candidate of candidates) {
+    for (const candidateTicket of waitingTickets) {
       try {
-        const joined = await joinFirestoreGameRoom(candidate.roomCode, gameId, player);
-        return { room: joined, matchedExisting: true };
+        const pairedRoom = await pairQueuePlayersIntoRoom(player, candidateTicket, gameId, maxPlayers);
+        if (pairedRoom) {
+          return { room: pairedRoom, matchedExisting: true };
+        }
       } catch {
-        // Candidate filled or deleted concurrently; try next waiting player
+        // Candidate claimed concurrently; try next waiting player
       }
     }
   } catch {
-    // Fallback to creating a waiting room if read transiently fails
+    // Fall back gracefully
   }
 
-  const created = await createFirestoreGameRoom(gameId, maxPlayers, player, {
-    isPublicMatch: true,
-    isOpenGroup: false,
-  });
-  return { room: created, matchedExisting: false };
+  // 2. Also check any active waiting public gameRooms (legacy compatibility)
+  try {
+    const roomQ = query(
+      collection(db, 'gameRooms'),
+      where('isPublicMatch', '==', true),
+      limit(40)
+    );
+    const roomSnap = await getDocs(roomQ);
+    const waitingRooms = filterActiveWaitingRooms(roomSnap.docs, gameId, '', player.id);
+    for (const candidateRoom of waitingRooms) {
+      try {
+        const joined = await joinFirestoreGameRoom(candidateRoom.roomCode, gameId, player);
+        await leaveMatchmakingQueue(player.id);
+        return { room: joined, matchedExisting: true };
+      } catch {
+        // Candidate room filled concurrently; try next
+      }
+    }
+  } catch {
+    // Continue to queue ticket creation
+  }
+
+  // 3. No live waiting opponent found yet — register clean waiting ticket in matchmakingQueue
+  const ticket = await enterMatchmakingQueueTicket(player, gameId);
+  return { room: null, matchedExisting: false, ticket };
 }
 
 export async function startFirestoreGameRoom(

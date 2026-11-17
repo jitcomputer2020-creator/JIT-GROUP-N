@@ -264,8 +264,11 @@ service cloud.firestore {
 
     function isValidGameRoomCreate(data, roomCode) {
       return isValidGameRoomSchema(data, roomCode) &&
-        (data.status == 'waiting' || (data.get('isOpenGroup', false) == true && data.status == 'in_game')) &&
-        data.playerCount == 1 &&
+        (
+          (data.status == 'waiting' && data.playerCount == 1) ||
+          (data.get('isOpenGroup', false) == true && data.status == 'in_game' && data.playerCount == 1) ||
+          (data.isPublicMatch == true && data.status == 'in_game' && data.playerCount == 2)
+        ) &&
         data.createdAt == request.time;
     }
 
@@ -286,6 +289,29 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['mutedVoiceIdsJson', 'mutedChatIdsJson', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt'])
         );
+    }
+
+    function isValidMatchmakingQueueSchema(data, ticketId) {
+      return data.keys().hasAll([
+          'id', 'playerId', 'playerName', 'gameId',
+          'status', 'joinedAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'playerId', 'playerName', 'playerAvatar', 'gameId',
+          'status', 'matchedRoomCode', 'matchedWithId', 'joinedAtMs', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == ticketId &&
+        isValidId(data.playerId) &&
+        data.playerId == ticketId &&
+        data.playerName is string && data.playerName.size() >= 1 && data.playerName.size() <= 120 &&
+        (!('playerAvatar' in data) || (data.playerAvatar is string && data.playerAvatar.size() <= 400000)) &&
+        data.gameId is string && data.gameId in ['ludo', 'tictactoe', 'quiz', 'chess', 'snake_ladder', 'carrom', 'truth_dare'] &&
+        data.status in ['waiting', 'matched'] &&
+        (!('matchedRoomCode' in data) || (data.matchedRoomCode is string && (data.matchedRoomCode.size() == 0 || isValidRoomCode(data.matchedRoomCode)))) &&
+        (!('matchedWithId' in data) || (data.matchedWithId is string && data.matchedWithId.size() <= 64)) &&
+        data.joinedAtMs is int && data.joinedAtMs >= 0 &&
+        data.updatedAt == request.time;
     }
 
     function isValidVoicePeer(data, peerId) {
@@ -769,6 +795,27 @@ service cloud.firestore {
       allow create: if isValidId(announcementId) && isValidAnnouncementCreate(incoming(), announcementId);
       allow update: if false;
       allow delete: if isValidId(announcementId);
+    }
+
+    // 16. Real-Time Random Matchmaking Queue
+    match /matchmakingQueue/{ticketId} {
+      allow get: if isValidId(ticketId);
+      allow list: if existing().status == 'waiting';
+      allow create: if isValidId(ticketId) &&
+        isValidMatchmakingQueueSchema(incoming(), ticketId) &&
+        incoming().status == 'waiting' &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(ticketId) &&
+        isValidMatchmakingQueueSchema(incoming(), ticketId) &&
+        incoming().id == existing().id &&
+        incoming().playerId == existing().playerId &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'matchedRoomCode', 'matchedWithId', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['gameId', 'playerName', 'playerAvatar', 'status', 'matchedRoomCode', 'matchedWithId', 'joinedAtMs', 'updatedAt'])
+        );
+      allow delete: if isValidId(ticketId);
     }
   }
 }

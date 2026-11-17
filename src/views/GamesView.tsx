@@ -25,8 +25,14 @@ import {
   joinFirestoreGameRoom,
   quickMatchFirestoreRoom,
   findOtherWaitingQuickMatchRoom,
-  subscribeToPublicMatchmakingQueue,
   touchMatchmakingRoomHeartbeat,
+  fetchFirestoreGameRoomByCode,
+  leaveMatchmakingQueue,
+  touchMatchmakingQueueHeartbeat,
+  findWaitingQueueTicketForGame,
+  subscribeToMatchmakingQueueForGame,
+  subscribeToMyMatchmakingTicket,
+  pairQueuePlayersIntoRoom,
   releasePreviousHostedRoom,
   startFirestoreGameRoom,
   pushFirestoreGameMove,
@@ -200,6 +206,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }),
     [currentUser?.id, currentUser?.fullName, currentUser?.avatarUrl, guestPlayerId]
   );
+
+  const activePlayerIdRef = useRef<string>(activePlayer.id);
+  useEffect(() => {
+    activePlayerIdRef.current = activePlayer.id;
+  }, [activePlayer.id]);
 
   useEffect(() => {
     currentRoomRef.current = currentRoom;
@@ -765,6 +776,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   useEffect(() => {
     return () => {
+      void leaveMatchmakingQueue(activePlayerIdRef.current);
       if (roomUnsubRef.current) {
         roomUnsubRef.current();
         roomUnsubRef.current = null;
@@ -950,92 +962,129 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     spawnFloatingReaction,
   ]);
 
-  // Real-Time Auto-Matchmaking Queue: pairs simultaneous searchers instantaneously via onSnapshot + poll fallback
+  // Real-Time Auto-Matchmaking Queue: immediately pairs waiting live humans via matchmakingQueue into a shared game room
   useEffect(() => {
-    if (
-      !isMatchmakingOpen ||
-      gameMode !== 'random' ||
-      !currentRoom ||
-      currentRoom.status !== 'waiting'
-    ) {
+    if (!isMatchmakingOpen || gameMode !== 'random') {
       return;
     }
 
     let cancelled = false;
-    let isJoining = false;
-    const waitStartedAt = Date.now();
-    const myCode = currentRoom.roomCode;
-    const myCreatedAt = currentRoom.createdAt || waitStartedAt;
+    let settled = false;
+    let pairing = false;
 
-    const tryPairWithRoom = async (other: MultiplayerRoom | null) => {
-      if (!other || cancelled || isJoining) return;
-      if (other.roomCode === myCode) return;
+    const enterMatchedRoom = (room: MultiplayerRoom) => {
+      if (cancelled || settled) return;
+      settled = true;
+      void leaveMatchmakingQueue(activePlayer.id);
+      resetTtt(false);
+      resetChess(false);
+      resetLudo(false);
+      resetQuiz();
+      resetSnakeLadder(false);
+      resetTruthDare();
+      setSubView('play');
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
+      setIsModeSelectOpen(false);
+      setIsLobbyOpen(false);
+      setIsMatchmakingOpen(false);
+      soundFx.playWin();
+      showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+    };
 
-      // Deterministic tie-breaker prevents both simultaneous searchers from leaving their rooms at the same ms
-      const elapsed = Date.now() - waitStartedAt;
-      const partnerIsOlder =
-        other.createdAt < myCreatedAt ||
-        (other.createdAt === myCreatedAt && other.roomCode < myCode);
-      if (!partnerIsOlder && elapsed < 2500) {
-        return;
-      }
-
-      isJoining = true;
+    const tryPairWithQueueTicket = async (ticket: Awaited<ReturnType<typeof findWaitingQueueTicketForGame>>) => {
+      if (!ticket || cancelled || settled || pairing) return;
+      pairing = true;
       try {
-        const joined = await joinFirestoreGameRoom(other.roomCode, selectedGame, activePlayer);
-        if (cancelled) return;
-        await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
-        resetTtt(false);
-        resetChess(false);
-        resetLudo(false);
-        resetQuiz();
-        resetSnakeLadder(false);
-        resetTruthDare();
-        setCurrentRoom(joined);
-        attachFirestoreRoomSubscription(joined.roomCode);
-        setIsMatchmakingOpen(false);
-        soundFx.playWin();
-        showRewardToast(`Match found! Connected to Room #${joined.roomCode}`);
+        const pairedRoom = await pairQueuePlayersIntoRoom(activePlayer, ticket, selectedGame, 2);
+        if (pairedRoom) {
+          enterMatchedRoom(pairedRoom);
+          return;
+        }
       } catch {
-        isJoining = false;
+        // Retry if candidate was claimed concurrently
+      } finally {
+        pairing = false;
       }
     };
 
-    const unsubQueue = subscribeToPublicMatchmakingQueue(
-      selectedGame,
-      myCode,
+    const tryJoinLegacyRoom = async (other: MultiplayerRoom | null) => {
+      if (!other || cancelled || settled || pairing) return;
+      if (currentRoomRef.current?.roomCode === other.roomCode) return;
+      pairing = true;
+      try {
+        const joined = await joinFirestoreGameRoom(other.roomCode, selectedGame, activePlayer);
+        if (!cancelled && !settled) {
+          enterMatchedRoom(joined);
+        }
+      } catch {
+        // Retry if room filled concurrently
+      } finally {
+        pairing = false;
+      }
+    };
+
+    // 1. Listen for our own matchmakingQueue ticket receiving a matchedRoomCode from a peer
+    const unsubMyTicket = subscribeToMyMatchmakingTicket(
       activePlayer.id,
-      (waitingRooms) => {
-        if (waitingRooms.length > 0) {
-          void tryPairWithRoom(waitingRooms[0]);
+      async (matchedRoomCode) => {
+        if (cancelled || settled) return;
+        const matchedRoom = await fetchFirestoreGameRoomByCode(matchedRoomCode);
+        if (matchedRoom && !cancelled && !settled) {
+          enterMatchedRoom(matchedRoom);
         }
       }
     );
 
+    // 2. Listen for any waiting players in the same game queue and pair immediately (0ms delay)
+    const unsubQueue = subscribeToMatchmakingQueueForGame(
+      selectedGame,
+      activePlayer.id,
+      (waitingTickets) => {
+        if (waitingTickets.length > 0) {
+          void tryPairWithQueueTicket(waitingTickets[0]);
+        }
+      }
+    );
+
+    // 3. Fast fallback poll covers edge cases where initial query or snapshot missed a concurrent join
     const pollTimer = window.setInterval(async () => {
-      if (cancelled || isJoining) return;
+      if (cancelled || settled || pairing) return;
       try {
-        const other = await findOtherWaitingQuickMatchRoom(
-          selectedGame,
-          myCode,
-          activePlayer.id
-        );
-        if (other) {
-          await tryPairWithRoom(other);
+        const waitingTicket = await findWaitingQueueTicketForGame(selectedGame, activePlayer.id);
+        if (waitingTicket) {
+          await tryPairWithQueueTicket(waitingTicket);
+          return;
+        }
+        const myCode = currentRoomRef.current?.roomCode || '';
+        const legacyRoom = await findOtherWaitingQuickMatchRoom(selectedGame, myCode, activePlayer.id);
+        if (legacyRoom) {
+          await tryJoinLegacyRoom(legacyRoom);
         }
       } catch {
         // Retry on next poll tick
       }
-    }, 1500);
+    }, 1000);
 
+    // 4. Keep our queue ticket heartbeat alive while user remains in queue
     const heartbeatTimer = window.setInterval(() => {
-      if (!cancelled) {
-        void touchMatchmakingRoomHeartbeat(myCode);
+      if (!cancelled && !settled) {
+        void touchMatchmakingQueueHeartbeat(activePlayer.id);
+        if (currentRoomRef.current?.roomCode) {
+          void touchMatchmakingRoomHeartbeat(currentRoomRef.current.roomCode);
+        }
       }
-    }, 10000);
+    }, 8000);
+
+    const handleBeforeUnload = () => {
+      void leaveMatchmakingQueue(activePlayer.id);
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
       cancelled = true;
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      unsubMyTicket();
       unsubQueue();
       window.clearInterval(pollTimer);
       window.clearInterval(heartbeatTimer);
@@ -1043,9 +1092,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   }, [
     isMatchmakingOpen,
     gameMode,
-    currentRoom?.roomCode,
-    currentRoom?.createdAt,
-    currentRoom?.status,
     selectedGame,
     activePlayer,
     attachFirestoreRoomSubscription,
@@ -1062,6 +1108,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // Multiplayer Room Actions (Firestore Authoritative + WS Fast-Path)
   // --------------------------------------------------------------------------
   const cleanupActiveRoomBeforeSwitch = async () => {
+    await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     const existing = currentRoomRef.current;
     if (existing) {
       if (roomUnsubRef.current) {
@@ -1227,20 +1274,25 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         maxP,
         activePlayer
       );
-      setCurrentRoom(room);
-      attachFirestoreRoomSubscription(room.roomCode);
       setIsModeSelectOpen(false);
       setIsLobbyOpen(false);
-      setIsMatchmakingOpen(!matchedExisting && room.status === 'waiting');
-      if (matchedExisting) {
+
+      if (matchedExisting && room) {
         resetTtt(false);
         resetChess(false);
         resetLudo(false);
         resetQuiz();
         resetSnakeLadder(false);
         resetTruthDare();
+        setSubView('play');
+        setCurrentRoom(room);
+        attachFirestoreRoomSubscription(room.roomCode);
+        setIsMatchmakingOpen(false);
         soundFx.playWin();
         showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+      } else {
+        setCurrentRoom(null);
+        setIsMatchmakingOpen(true);
       }
     } catch (err: any) {
       setJoinError(err?.message || 'Quick matchmaking failed. Please try again.');
@@ -1250,6 +1302,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   const handlePlayAI = (diff: AIDifficulty) => {
+    void leaveMatchmakingQueue(activePlayer.id);
     if (roomUnsubRef.current) {
       roomUnsubRef.current();
       roomUnsubRef.current = null;
@@ -1289,6 +1342,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   const handleLeaveRoom = async () => {
+    await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     if (roomUnsubRef.current) {
       roomUnsubRef.current();
       roomUnsubRef.current = null;
@@ -1306,6 +1360,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   const handleFallbackToAI = async () => {
+    await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     if (roomUnsubRef.current) {
       roomUnsubRef.current();
       roomUnsubRef.current = null;

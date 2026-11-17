@@ -419,6 +419,25 @@
         "updatedAt"
       ]
     },
+    "MatchmakingQueueEntry": {
+      "title": "MatchmakingQueueEntry",
+      "description": "Real-time queue ticket for instant player-to-player random matchmaking.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "playerId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "playerName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "playerAvatar": { "type": "string", "maxLength": 400000 },
+        "gameId": { "type": "string", "enum": ["ludo", "tictactoe", "quiz", "chess", "snake_ladder", "carrom", "truth_dare"] },
+        "status": { "type": "string", "enum": ["waiting", "matched"] },
+        "matchedRoomCode": { "type": "string", "maxLength": 4 },
+        "matchedWithId": { "type": "string", "maxLength": 64 },
+        "joinedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "playerId", "playerName", "gameId", "status", "joinedAtMs", "createdAt", "updatedAt"]
+    },
     "VoicePeer": {
       "title": "VoicePeer",
       "description": "Active player voice presence state inside a multiplayer game room.",
@@ -637,6 +656,10 @@
     "/gameRooms/{roomCode}": {
       "schema": { "$ref": "#/entities/GameRoom" },
       "description": "Real-time 4-digit code multiplayer rooms synced via Firestore."
+    },
+    "/matchmakingQueue/{ticketId}": {
+      "schema": { "$ref": "#/entities/MatchmakingQueueEntry" },
+      "description": "Real-time random matchmaking queue entries paired transactionally into shared game rooms."
     },
     "/gameRooms/{roomCode}/voice_peers/{peerId}": {
       "schema": { "$ref": "#/entities/VoicePeer" },
