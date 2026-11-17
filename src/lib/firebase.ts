@@ -1375,8 +1375,63 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
 }
 
 const HOSTED_ROOM_STORAGE_PREFIX = 'jit_hosted_room_';
-const PUBLIC_QUEUE_STALE_MS = 3 * 60 * 1000;
+const PUBLIC_QUEUE_STALE_MS = 4 * 60 * 1000;
 const PRIVATE_ROOM_STALE_MS = 20 * 60 * 1000;
+
+let cachedServerTimeOffsetMs = 0;
+
+function getServerSyncedNowMs(): number {
+  return Date.now() + cachedServerTimeOffsetMs;
+}
+
+async function syncServerClockWithTicket(
+  player: { id: string; name: string; avatar: string },
+  gameId: string
+): Promise<void> {
+  if (!player.id) return;
+  try {
+    const ticketRef = doc(db, 'matchmakingQueue', player.id);
+    const cleanName = (player.name || 'JIT Player').slice(0, 80);
+    const cleanAvatar = sanitizeAvatarUrl(player.avatar);
+    const nowMs = Date.now();
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(ticketRef);
+      if (snap.exists()) {
+        tx.update(ticketRef, {
+          gameId,
+          playerName: cleanName,
+          playerAvatar: cleanAvatar,
+          status: 'waiting',
+          matchedRoomCode: '',
+          matchedWithId: '',
+          joinedAtMs: nowMs,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        tx.set(ticketRef, {
+          id: player.id,
+          playerId: player.id,
+          playerName: cleanName,
+          playerAvatar: cleanAvatar,
+          gameId,
+          status: 'waiting',
+          matchedRoomCode: '',
+          matchedWithId: '',
+          joinedAtMs: nowMs,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+    const serverSnap = await getDocFromServer(ticketRef).catch(() => null);
+    const ts = serverSnap?.exists() ? serverSnap.data()?.updatedAt : null;
+    if (ts && typeof ts.toMillis === 'function') {
+      cachedServerTimeOffsetMs = ts.toMillis() - Date.now();
+    }
+  } catch {
+    // Best-effort server clock calibration
+  }
+}
 
 function getStoredHostedRoomCode(hostId: string): string | null {
   if (typeof window === 'undefined' || !hostId) return null;
@@ -1408,12 +1463,12 @@ function getRoomUpdatedMs(data: Record<string, any>): number {
   if (data.createdAt && typeof data.createdAt.toMillis === 'function') {
     return data.createdAt.toMillis();
   }
-  return Date.now();
+  return getServerSyncedNowMs();
 }
 
 function isRoomDocStale(data: Record<string, any>, thresholdMs: number): boolean {
   const updatedMs = getRoomUpdatedMs(data);
-  return Date.now() - updatedMs > thresholdMs;
+  return getServerSyncedNowMs() - updatedMs > thresholdMs;
 }
 
 export async function releasePreviousHostedRoom(
@@ -1695,12 +1750,24 @@ export async function joinFirestoreGameRoom(
       // Auto-start as soon as the room reaches capacity (e.g. 2/2 players)
       const nextStatus =
         nextPlayers.length >= parsed.maxPlayers ? 'in_game' : parsed.status;
+      const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const nextGameState =
+        nextStatus === 'in_game' && !parsed.gameState?._startId
+          ? { ...(parsed.gameState || {}), _startId: startId, moveSeq: 0 }
+          : parsed.gameState || {};
 
       tx.update(roomRef, {
         playersJson: JSON.stringify(nextPlayers),
         playerCount: nextPlayers.length,
         hostId: parsed.hostId,
         status: nextStatus,
+        ...(nextStatus === 'in_game'
+          ? {
+              gameStateJson: JSON.stringify(nextGameState),
+              moveAction: 'GAME_START',
+              currentTurn: parsed.players[0]?.id || parsed.hostId,
+            }
+          : {}),
         updatedAt: serverTimestamp(),
       });
 
@@ -1708,6 +1775,12 @@ export async function joinFirestoreGameRoom(
         ...parsed,
         status: nextStatus,
         players: nextPlayers,
+        ...(nextStatus === 'in_game'
+          ? {
+              gameState: nextGameState,
+              currentTurn: parsed.players[0]?.id || parsed.hostId,
+            }
+          : {}),
       };
     });
 
@@ -1789,7 +1862,7 @@ export async function findOtherWaitingQuickMatchRoom(
     const q = query(
       collection(db, 'gameRooms'),
       where('isPublicMatch', '==', true),
-      limit(60)
+      limit(120)
     );
     const snap = await getDocsFromServer(q).catch(() => getDocs(q));
     const candidates = filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
@@ -2226,37 +2299,44 @@ export async function quickMatchFirestoreRoom(
   const slotId = `slot_${gameId}`;
   const slotRef = doc(db, 'matchmakingQueue', slotId);
 
-  // Clean up any prior solo abandoned room hosted by this user before entering queue
-  await releasePreviousHostedRoom(player.id);
-  await leaveMatchmakingQueue(player.id);
+  // Calibrate server UTC clock offset & release any prior solo abandoned room before entering queue
+  await Promise.allSettled([
+    releasePreviousHostedRoom(player.id),
+    syncServerClockWithTicket(player, gameId),
+  ]);
 
-  // 1. First check Firestore directly for any existing open waiting room for this exact game type
-  const existingWaiting = await findOtherWaitingQuickMatchRoom(gameId, '', player.id);
-  if (existingWaiting) {
-    try {
-      const joined = await joinFirestoreGameRoom(existingWaiting.roomCode, gameId, player);
-      // Mark slot as matched if it was pointing to this room
-      runTransaction(db, async (tx) => {
-        const slotSnap = await tx.get(slotRef);
-        if (slotSnap.exists() && slotSnap.data().matchedRoomCode === existingWaiting.roomCode) {
-          tx.update(slotRef, {
-            status: 'matched',
-            matchedRoomCode: existingWaiting.roomCode,
-            matchedWithId: player.id,
-            updatedAt: serverTimestamp(),
-          });
-        }
-      }).catch(() => {});
-      setStoredHostedRoomCode(player.id, null);
-      return { room: joined, matchedExisting: true };
-    } catch {
-      // Room filled concurrently; fall through to serialized slot transaction below
-    }
-  }
-
-  // 2. Canonical per-game queue slot transaction guarantees concurrent players share ONE room code (zero split rooms)
+  // 1. Canonical atomic transaction on `slot_${gameId}` FIRST:
+  //    Concurrent players requesting quick match serialize on this single lock document.
+  //    Player 1 creates/claims the shared waiting room; Player 2 retries transactionally and joins it immediately.
   let lastErr: any = null;
   for (let attempt = 0; attempt < 5; attempt++) {
+    // Also check if another public waiting room exists (e.g. if a slot cleared prematurely)
+    const discoveredWaiting =
+      attempt === 0
+        ? await findOtherWaitingQuickMatchRoom(gameId, '', player.id).catch(() => null)
+        : null;
+    if (discoveredWaiting) {
+      try {
+        const joined = await joinFirestoreGameRoom(discoveredWaiting.roomCode, gameId, player);
+        await runTransaction(db, async (tx) => {
+          const slotSnap = await tx.get(slotRef);
+          if (slotSnap.exists() && slotSnap.data().matchedRoomCode === discoveredWaiting.roomCode) {
+            tx.update(slotRef, {
+              status: 'matched',
+              matchedRoomCode: discoveredWaiting.roomCode,
+              matchedWithId: player.id,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }).catch(() => {});
+        await leaveMatchmakingQueue(player.id).catch(() => {});
+        setStoredHostedRoomCode(player.id, null);
+        return { room: joined, matchedExisting: true };
+      } catch {
+        // Room filled concurrently; fall through directly to serialized slot transaction
+      }
+    }
+
     const chosenCode = await pickAvailableRoomCodeAndCleanStale(player.id);
     const candidateRoomRef = doc(db, 'gameRooms', chosenCode);
 
@@ -2265,20 +2345,38 @@ export async function quickMatchFirestoreRoom(
         const slotSnap = await tx.get(slotRef);
         const slotData = slotSnap.exists() ? slotSnap.data() : null;
         const slotRoomCode = slotData ? String(slotData.matchedRoomCode || '') : '';
-        const slotWaitingCandidate =
-          Boolean(slotData) &&
-          slotData?.status === 'waiting' &&
-          slotData?.gameId === gameId &&
-          String(slotData?.playerId || '') !== player.id &&
-          /^\d{4}$/.test(slotRoomCode) &&
-          !isRoomDocStale(slotData || {}, PUBLIC_QUEUE_STALE_MS);
+        const slotNotStale =
+          Boolean(slotData) && !isRoomDocStale(slotData || {}, PUBLIC_QUEUE_STALE_MS);
 
-        if (slotWaitingCandidate) {
+        if (
+          slotData &&
+          slotData.status === 'waiting' &&
+          slotData.gameId === gameId &&
+          /^\d{4}$/.test(slotRoomCode) &&
+          slotNotStale
+        ) {
           const waitingRoomRef = doc(db, 'gameRooms', slotRoomCode);
           const waitingRoomSnap = await tx.get(waitingRoomRef);
           if (waitingRoomSnap.exists()) {
             const parsedWaiting = parseRoomSnapshotData(waitingRoomSnap.data());
+            // Re-use own active waiting room on rapid double-click
+            if (
+              String(slotData.playerId || '') === player.id &&
+              !parsedWaiting.isOpenGroup &&
+              parsedWaiting.gameId === gameId &&
+              parsedWaiting.status === 'waiting' &&
+              parsedWaiting.players.some((p) => p.id === player.id)
+            ) {
+              tx.update(waitingRoomRef, { updatedAt: serverTimestamp() });
+              tx.update(slotRef, { updatedAt: serverTimestamp() });
+              return {
+                matchedExisting: false,
+                room: parsedWaiting,
+              };
+            }
+
             const canForceJoin =
+              String(slotData.playerId || '') !== player.id &&
               !parsedWaiting.isOpenGroup &&
               parsedWaiting.gameId === gameId &&
               parsedWaiting.status === 'waiting' &&
@@ -2437,6 +2535,7 @@ export async function quickMatchFirestoreRoom(
 
       if (result.matchedExisting) {
         setStoredHostedRoomCode(player.id, null);
+        await leaveMatchmakingQueue(player.id).catch(() => {});
       } else {
         setStoredHostedRoomCode(player.id, result.room.roomCode);
       }
@@ -3673,19 +3772,172 @@ export async function sendFirestoreDirectMessage(
 // VIDEO / REEL UPLOAD (FIREBASE STORAGE + FALLBACKS) & 40-DAY AUTO-EXPIRY
 // ============================================================================
 
+const CLOUD_VIDEO_CHUNK_RAW_BYTES = 480_000; // 480KB raw -> 640KB base64 (under 700KB Firestore chunk cap)
+const MAX_CHUNKED_VIDEO_BYTES = 25 * 1024 * 1024; // 25MB max for chunked Firestore video sync
+const resolvedChunkBlobCache = new Map<string, string>();
+const inFlightChunkFetchMap = new Map<string, Promise<string>>();
+
+export async function uploadChunkedVideoToFirestore(
+  userId: string,
+  file: File,
+  expiresAt: number,
+  onProgress?: (pct: number) => void
+): Promise<string> {
+  if (file.size > MAX_CHUNKED_VIDEO_BYTES) {
+    throw new Error('Video file is too large for cloud fallback (max 25MB).');
+  }
+
+  const mediaId = `vmed_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const createdAtMs = Date.now();
+  const mimeType = (file.type || 'video/mp4').slice(0, 64);
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  const totalBytes = bytes.byteLength;
+  if (totalBytes <= 0) {
+    throw new Error('Selected video file is empty.');
+  }
+
+  const totalChunks = Math.max(1, Math.ceil(totalBytes / CLOUD_VIDEO_CHUNK_RAW_BYTES));
+  if (totalChunks > 60) {
+    throw new Error('Video exceeds maximum chunked cloud storage limit.');
+  }
+
+  const { uint8ToBase64, cacheCloudVideoBlobLocally } = await import('../services/mediaStorage');
+
+  // 1. Create parent metadata manifest doc first (required by Firestore Master Gate rule)
+  await setDoc(doc(db, 'video_media', mediaId), {
+    id: mediaId,
+    creatorId: userId || 'usr_jit_member',
+    mimeType,
+    totalChunks,
+    totalBytes,
+    createdAtMs,
+    expiresAt: Math.max(expiresAt, createdAtMs + VIDEO_EXPIRY_MS),
+    createdAt: serverTimestamp(),
+  });
+
+  // 2. Upload base64 chunks in parallel batches of 4
+  const BATCH_SIZE = 4;
+  let uploadedCount = 0;
+  for (let start = 0; start < totalChunks; start += BATCH_SIZE) {
+    const end = Math.min(totalChunks, start + BATCH_SIZE);
+    const promises: Promise<void>[] = [];
+    for (let idx = start; idx < end; idx++) {
+      const sliceStart = idx * CLOUD_VIDEO_CHUNK_RAW_BYTES;
+      const sliceEnd = Math.min(totalBytes, sliceStart + CLOUD_VIDEO_CHUNK_RAW_BYTES);
+      const b64 = uint8ToBase64(bytes.subarray(sliceStart, sliceEnd));
+      const chunkId = `c_${String(idx).padStart(3, '0')}`;
+      promises.push(
+        setDoc(doc(db, 'video_media', mediaId, 'chunks', chunkId), {
+          id: chunkId,
+          mediaId,
+          index: idx,
+          data: b64,
+          createdAt: serverTimestamp(),
+        }).then(() => {
+          uploadedCount++;
+          const pct = Math.min(98, Math.round(55 + (uploadedCount / totalChunks) * 43));
+          onProgress?.(pct);
+        })
+      );
+    }
+    await Promise.all(promises);
+  }
+
+  // 3. Cache locally in IndexedDB and in memory so uploader gets instant zero-latency playback too
+  await cacheCloudVideoBlobLocally(mediaId, file, expiresAt);
+  try {
+    const localBlobUrl = URL.createObjectURL(file);
+    resolvedChunkBlobCache.set(mediaId, localBlobUrl);
+  } catch {
+    // Ignore object URL errors in non-DOM contexts
+  }
+
+  onProgress?.(100);
+  return `fschunk://${mediaId}`;
+}
+
+export async function fetchCloudChunkedVideoBlobUrl(uri: string): Promise<string> {
+  const mediaId = uri.startsWith('fschunk://') ? uri.slice('fschunk://'.length).trim() : uri.trim();
+  if (!mediaId) return '';
+
+  const memCached = resolvedChunkBlobCache.get(mediaId);
+  if (memCached) return memCached;
+
+  const existingPromise = inFlightChunkFetchMap.get(mediaId);
+  if (existingPromise) return existingPromise;
+
+  const promise = (async () => {
+    try {
+      const { getCachedCloudVideoUrl, cacheCloudVideoBlobLocally, base64ToUint8 } = await import(
+        '../services/mediaStorage'
+      );
+
+      // 1. Check local IndexedDB read-through cache first
+      const idbUrl = await getCachedCloudVideoUrl(mediaId);
+      if (idbUrl) {
+        resolvedChunkBlobCache.set(mediaId, idbUrl);
+        return idbUrl;
+      }
+
+      // 2. Fetch metadata + sequential base64 chunks from Firestore
+      const metaSnap = await getDoc(doc(db, 'video_media', mediaId));
+      if (!metaSnap.exists()) {
+        return '';
+      }
+      const meta = metaSnap.data();
+      const mimeType = typeof meta.mimeType === 'string' && meta.mimeType ? meta.mimeType : 'video/mp4';
+      const expiresAt = typeof meta.expiresAt === 'number' ? meta.expiresAt : Date.now() + VIDEO_EXPIRY_MS;
+
+      const chunksSnap = await getDocs(
+        query(collection(db, 'video_media', mediaId, 'chunks'), where('index', '>=', 0), limit(80))
+      );
+      if (chunksSnap.empty) {
+        return '';
+      }
+
+      const orderedChunks: Array<{ index: number; data: string }> = [];
+      chunksSnap.forEach((d) => {
+        const data = d.data();
+        if (typeof data.data === 'string' && typeof data.index === 'number') {
+          orderedChunks.push({ index: data.index, data: data.data });
+        }
+      });
+      orderedChunks.sort((a, b) => a.index - b.index);
+
+      if (orderedChunks.length === 0) {
+        return '';
+      }
+
+      const binaryParts = orderedChunks.map((c) => base64ToUint8(c.data) as BlobPart);
+      const assembledBlob = new Blob(binaryParts, { type: mimeType });
+      await cacheCloudVideoBlobLocally(mediaId, assembledBlob, expiresAt);
+
+      const blobUrl = URL.createObjectURL(assembledBlob);
+      resolvedChunkBlobCache.set(mediaId, blobUrl);
+      return blobUrl;
+    } finally {
+      inFlightChunkFetchMap.delete(mediaId);
+    }
+  })();
+
+  inFlightChunkFetchMap.set(mediaId, promise);
+  return promise;
+}
+
 export async function uploadVideoAssetToCloud(
   userId: string,
   file: File,
   thumbnailDataUrl: string,
   expiresAt: number,
   onProgress?: (pct: number) => void
-): Promise<{ videoUrl: string; thumbnailUrl: string; storageSource: 'firebase' | 'server' | 'firestore' | 'idb' }> {
+): Promise<{ videoUrl: string; thumbnailUrl: string; storageSource: 'firebase' | 'server' | 'firestore' }> {
   const mediaId = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const ext = (file.name.split('.').pop() || 'mp4').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'mp4';
 
   let finalThumb = thumbnailDataUrl && thumbnailDataUrl.length <= 170_000 ? thumbnailDataUrl : '';
 
-  // 1. Try Firebase Storage first (uploads video & thumbnail with progress & fast failback)
+  // 1. Try Firebase Storage first (uploads video & thumbnail with fast failback)
   try {
     onProgress?.(10);
     const videoPath = `videos/${userId}/${mediaId}.${ext}`;
@@ -3699,7 +3951,7 @@ export async function uploadVideoAssetToCloud(
           // ignore
         }
         reject(new Error('Firebase Storage upload timed out'));
-      }, 45000);
+      }, 15000);
 
       const task = uploadBytesResumable(videoRef, file, {
         contentType: file.type || 'video/mp4',
@@ -3771,10 +4023,10 @@ export async function uploadVideoAssetToCloud(
     }
   }
 
-  // 3. Static serverless fallback: inline Data URL for small videos (<= 500KB) for cross-device Firestore sync
-  if (file.size <= 500_000) {
+  // 3. Direct Firestore Base64 Data URL for compact clips (<= 520KB binary -> <= 720KB Base64 string)
+  if (file.size <= 520_000) {
     try {
-      onProgress?.(85);
+      onProgress?.(75);
       const { fileToDataUrl } = await import('../services/mediaStorage');
       const dataUrl = await fileToDataUrl(file);
       if (dataUrl.length <= 720_000) {
@@ -3782,16 +4034,15 @@ export async function uploadVideoAssetToCloud(
         return { videoUrl: dataUrl, thumbnailUrl: finalThumb, storageSource: 'firestore' };
       }
     } catch {
-      // Fallback to IndexedDB Blob
+      // Fall through to chunked Firestore Base64 storage
     }
   }
 
-  // 4. Large video fallback without Storage/Express: store Blob in IndexedDB cleanly (never overflows localStorage)
-  onProgress?.(90);
-  const { saveVideoBlobLocally } = await import('../services/mediaStorage');
-  const { uri } = await saveVideoBlobLocally(file, expiresAt);
-  onProgress?.(100);
-  return { videoUrl: uri, thumbnailUrl: finalThumb, storageSource: 'idb' };
+  // 4. Universal Cross-Device Cloud Fallback: Chunked Base64 Storage in Firestore (`fschunk://<mediaId>`)
+  //    Ensures ALL users on ANY browser/device globally stream the exact video without device-only blobs!
+  onProgress?.(55);
+  const fschunkUri = await uploadChunkedVideoToFirestore(userId, file, expiresAt, onProgress);
+  return { videoUrl: fschunkUri, thumbnailUrl: finalThumb, storageSource: 'firestore' };
 }
 
 export function isAccessibleVideoUrl(url?: string): boolean {
@@ -3804,6 +4055,7 @@ export function isAccessibleVideoUrl(url?: string): boolean {
     clean.startsWith('/api/media/') ||
     clean.startsWith('/assets/') ||
     clean.startsWith('data:video/') ||
+    clean.startsWith('fschunk://') ||
     clean.startsWith('blob:')
   );
 }
@@ -3834,7 +4086,7 @@ function unwrapSingleMediaString(val: unknown): string {
 function isLikelyVideoUrl(url?: string): boolean {
   if (!url) return false;
   const lower = url.toLowerCase();
-  if (lower.startsWith('data:video/')) return true;
+  if (lower.startsWith('data:video/') || lower.startsWith('fschunk://')) return true;
   const cleanPath = lower.split('?')[0].split('#')[0];
   return (
     cleanPath.endsWith('.mp4') ||

@@ -617,6 +617,38 @@ service cloud.firestore {
         data.createdAtTs == request.time;
     }
 
+    function isValidVideoMedia(data, mediaId) {
+      return data.keys().hasAll([
+          'id', 'creatorId', 'mimeType', 'totalChunks',
+          'totalBytes', 'createdAtMs', 'expiresAt', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'creatorId', 'mimeType', 'totalChunks',
+          'totalBytes', 'createdAtMs', 'expiresAt', 'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.id == mediaId &&
+        isValidId(data.creatorId) &&
+        data.mimeType is string && data.mimeType.size() >= 6 && data.mimeType.size() <= 64 &&
+        data.totalChunks is int && data.totalChunks >= 1 && data.totalChunks <= 60 &&
+        data.totalBytes is int && data.totalBytes >= 1 && data.totalBytes <= 30000000 &&
+        data.createdAtMs is int && data.createdAtMs >= 0 &&
+        data.expiresAt is int && data.expiresAt >= data.createdAtMs &&
+        data.createdAt == request.time;
+    }
+
+    function isValidVideoMediaChunk(data, mediaId, chunkId) {
+      return data.keys().hasAll(['id', 'mediaId', 'index', 'data', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'mediaId', 'index', 'data', 'createdAt']) &&
+        isValidId(data.id) &&
+        data.id == chunkId &&
+        isValidId(data.mediaId) &&
+        data.mediaId == mediaId &&
+        data.index is int && data.index >= 0 && data.index < 60 &&
+        data.data is string && data.data.size() >= 1 && data.data.size() <= 700000 &&
+        data.createdAt == request.time;
+    }
+
     // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
     match /profiles/{profileId} {
       allow get: if isValidId(profileId);
@@ -815,6 +847,25 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['playerId', 'gameId', 'playerName', 'playerAvatar', 'status', 'matchedRoomCode', 'matchedWithId', 'joinedAtMs', 'updatedAt'])
         );
       allow delete: if isValidId(ticketId);
+    }
+
+    // 17. Cross-Device Chunked Cloud Video Storage (for global playback without Storage bucket auth errors)
+    match /video_media/{mediaId} {
+      allow get: if isValidId(mediaId);
+      allow list: if existing().expiresAt >= 0;
+      allow create: if isValidId(mediaId) && isValidVideoMedia(incoming(), mediaId);
+      allow update: if false;
+      allow delete: if isValidId(mediaId);
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(mediaId) && isValidId(chunkId);
+        allow list: if isValidId(mediaId) && existing().index >= 0;
+        allow create: if isValidId(mediaId) && isValidId(chunkId) &&
+          exists(/databases/$(database)/documents/video_media/$(mediaId)) &&
+          isValidVideoMediaChunk(incoming(), mediaId, chunkId);
+        allow update: if false;
+        allow delete: if isValidId(mediaId) && isValidId(chunkId);
+      }
     }
   }
 }

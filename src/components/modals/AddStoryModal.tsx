@@ -4,8 +4,15 @@
  */
 
 import React, { useState, useRef } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { useSocial } from '../../context/SocialContext';
-import { saveMediaFile, validateMediaFile } from '../../services/mediaStorage';
+import {
+  saveMediaFile,
+  validateMediaFile,
+  generateVideoThumbnail,
+  VIDEO_EXPIRY_MS,
+} from '../../services/mediaStorage';
+import { uploadVideoAssetToCloud } from '../../lib/firebase';
 import { ResilientVideo } from '../common/ResilientVideo';
 import { ResponsiveImage } from '../common/ResponsiveImage';
 import { X, UploadCloud, Image as ImageIcon, Send, Loader2 } from 'lucide-react';
@@ -16,6 +23,7 @@ interface AddStoryModalProps {
 }
 
 export const AddStoryModal: React.FC<AddStoryModalProps> = ({ isOpen, onClose }) => {
+  const { currentUser } = useAuth();
   const { addStory } = useSocial();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -68,20 +76,33 @@ export const AddStoryModal: React.FC<AddStoryModalProps> = ({ isOpen, onClose })
       setIsUploading(true);
       setErrorMsg(null);
 
-      // Save permanently to IndexedDB
-      const { dataUrl } = await saveMediaFile(selectedFile);
-
-      addStory({
-        mediaUrl: dataUrl,
-        mediaType,
-        caption: caption.trim() || undefined,
-      });
+      if (mediaType === 'video') {
+        const thumb = await generateVideoThumbnail(selectedFile).catch(() => '');
+        const uploaded = await uploadVideoAssetToCloud(
+          currentUser?.id || 'usr_jit_member',
+          selectedFile,
+          thumb,
+          Date.now() + VIDEO_EXPIRY_MS
+        );
+        addStory({
+          mediaUrl: uploaded.videoUrl,
+          mediaType,
+          caption: caption.trim() || undefined,
+        });
+      } else {
+        const { dataUrl } = await saveMediaFile(selectedFile);
+        addStory({
+          mediaUrl: dataUrl,
+          mediaType,
+          caption: caption.trim() || undefined,
+        });
+      }
 
       handleClearMedia();
       setCaption('');
       onClose();
-    } catch {
-      setErrorMsg('Failed to save story media. Please try again.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Failed to save story media. Please try again.');
     } finally {
       setIsUploading(false);
     }

@@ -4,8 +4,9 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Video, RotateCcw } from 'lucide-react';
+import { Video, RotateCcw, Loader2 } from 'lucide-react';
 import { resolveLocalMediaUrl } from '../../services/mediaStorage';
+import { fetchCloudChunkedVideoBlobUrl } from '../../lib/firebase';
 
 interface ResilientVideoProps {
   src?: string;
@@ -51,13 +52,13 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
   onLoadedData,
 }) => {
   const cleanSrc = typeof src === 'string' ? src.trim() : '';
-  const isIdbSource = cleanSrc.startsWith('idb://');
+  const isAsyncUri = cleanSrc.startsWith('idb://') || cleanSrc.startsWith('fschunk://');
 
   const [resolvedSrc, setResolvedSrc] = useState<string>(() =>
-    cleanSrc && !isIdbSource ? cleanSrc : ''
+    cleanSrc && !isAsyncUri ? cleanSrc : ''
   );
-  const [resolvingLocal, setResolvingLocal] = useState<boolean>(() => isIdbSource);
-  const [idbMissing, setIdbMissing] = useState<boolean>(false);
+  const [resolvingMedia, setResolvingMedia] = useState<boolean>(() => isAsyncUri);
+  const [mediaMissing, setMediaMissing] = useState<boolean>(false);
   // First try CORS-enabled native playback (<source type="video/mp4"> + crossOrigin="anonymous").
   // If remote storage lacks Access-Control-Allow-Origin, transparently fall back to direct src without crossOrigin.
   const [playbackMode, setPlaybackMode] = useState<'cors_source' | 'direct_no_cors'>('cors_source');
@@ -74,49 +75,71 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
 
   useEffect(() => {
     let cancelled = false;
-    let createdObjectUrl = '';
-    setIdbMissing(false);
+    let createdLegacyIdbObjectUrl = '';
+    setMediaMissing(false);
     setPlaybackMode('cors_source');
 
     if (!cleanSrc) {
-      setResolvingLocal(false);
+      setResolvingMedia(false);
       setResolvedSrc('');
       return;
     }
 
+    if (cleanSrc.startsWith('fschunk://')) {
+      setResolvingMedia(true);
+      fetchCloudChunkedVideoBlobUrl(cleanSrc)
+        .then((url) => {
+          if (cancelled) return;
+          setResolvingMedia(false);
+          if (!url) {
+            setMediaMissing(true);
+          }
+          setResolvedSrc(url);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setResolvingMedia(false);
+            setMediaMissing(true);
+          }
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     if (!cleanSrc.startsWith('idb://')) {
-      setResolvingLocal(false);
+      setResolvingMedia(false);
       setResolvedSrc(cleanSrc);
       return;
     }
 
-    setResolvingLocal(true);
+    setResolvingMedia(true);
     resolveLocalMediaUrl(cleanSrc)
       .then((url) => {
         if (cancelled) {
           if (url.startsWith('blob:')) URL.revokeObjectURL(url);
           return;
         }
-        setResolvingLocal(false);
+        setResolvingMedia(false);
         if (url.startsWith('blob:')) {
-          createdObjectUrl = url;
+          createdLegacyIdbObjectUrl = url;
         }
         if (!url) {
-          setIdbMissing(true);
+          setMediaMissing(true);
         }
         setResolvedSrc(url);
       })
       .catch(() => {
         if (!cancelled) {
-          setResolvingLocal(false);
-          setIdbMissing(true);
+          setResolvingMedia(false);
+          setMediaMissing(true);
         }
       });
 
     return () => {
       cancelled = true;
-      if (createdObjectUrl) {
-        URL.revokeObjectURL(createdObjectUrl);
+      if (createdLegacyIdbObjectUrl) {
+        URL.revokeObjectURL(createdLegacyIdbObjectUrl);
       }
     };
   }, [cleanSrc, retrySeed]);
@@ -142,7 +165,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
 
   const handleRetryVideo = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setIdbMissing(false);
+    setMediaMissing(false);
     setPlaybackMode('cors_source');
     setRetrySeed((n) => n + 1);
   };
@@ -151,7 +174,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
     return null;
   }
 
-  if (resolvingLocal || idbMissing || !resolvedSrc) {
+  if (resolvingMedia || mediaMissing || !resolvedSrc) {
     return (
       <div
         className={`relative w-full min-h-[190px] flex flex-col items-center justify-center bg-slate-900 text-slate-200 p-4 text-center ${containerClassName}`}
@@ -164,13 +187,17 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
           />
         )}
         <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/75 backdrop-blur-sm px-4 py-3 rounded-2xl border border-white/15">
-          <Video className="w-6 h-6 text-blue-400" />
+          {resolvingMedia ? (
+            <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
+          ) : (
+            <Video className="w-6 h-6 text-blue-400" />
+          )}
           <p className="text-xs font-semibold text-white">
-            {resolvingLocal
+            {resolvingMedia
               ? 'Loading video...'
-              : 'Video stored on uploader device'}
+              : 'Video unavailable on cloud — tap reload'}
           </p>
-          {!resolvingLocal && (
+          {!resolvingMedia && (
             <button
               type="button"
               onClick={handleRetryVideo}

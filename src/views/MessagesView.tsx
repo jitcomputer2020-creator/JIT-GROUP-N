@@ -9,7 +9,7 @@ import { useSocial } from '../context/SocialContext';
 import { Conversation, Message, CallType, CallStatus, NavTab, UserProfile } from '../types';
 import { INITIAL_FRIENDS, INITIAL_USER } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
-import { saveMediaFile, validateMediaFile } from '../services/mediaStorage';
+import { saveMediaFile, validateMediaFile, VIDEO_EXPIRY_MS } from '../services/mediaStorage';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { sendJitAiChat, JitAiChatTurn } from '../services/aiClient';
@@ -22,6 +22,7 @@ import {
   subscribeToFirestoreConversations,
   subscribeToFirestoreMessages,
   sendFirestoreDirectMessage,
+  uploadVideoAssetToCloud,
   deriveUsername,
 } from '../lib/firebase';
 import {
@@ -640,11 +641,22 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
     if (attachedFile) {
       try {
-        const { dataUrl } = await saveMediaFile(attachedFile);
-        mediaUrl = dataUrl;
-        mediaType = attachedFile.type.startsWith('image/') ? 'image' : 'file';
-      } catch {
-        setAttachError('Failed to process attached media');
+        if (attachedFile.type.startsWith('video/')) {
+          const uploaded = await uploadVideoAssetToCloud(
+            currentUser.id,
+            attachedFile,
+            '',
+            Date.now() + VIDEO_EXPIRY_MS
+          );
+          mediaUrl = uploaded.videoUrl;
+          mediaType = 'video';
+        } else {
+          const { dataUrl } = await saveMediaFile(attachedFile);
+          mediaUrl = dataUrl;
+          mediaType = attachedFile.type.startsWith('image/') ? 'image' : 'file';
+        }
+      } catch (err: any) {
+        setAttachError(err?.message || 'Failed to process attached media');
         setSendingMessage(false);
         return;
       }

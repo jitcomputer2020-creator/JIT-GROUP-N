@@ -626,6 +626,35 @@
         "createdAtTs": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "title", "message", "priority", "authorName", "createdAt", "createdAtMs", "createdAtTs"]
+    },
+    "VideoMedia": {
+      "title": "VideoMedia",
+      "description": "Metadata manifest for cross-device chunked cloud videos stored in Firestore.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "creatorId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "mimeType": { "type": "string", "minLength": 6, "maxLength": 64 },
+        "totalChunks": { "type": "integer" },
+        "totalBytes": { "type": "integer" },
+        "createdAtMs": { "type": "integer" },
+        "expiresAt": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "creatorId", "mimeType", "totalChunks", "totalBytes", "createdAtMs", "expiresAt", "createdAt"]
+    },
+    "VideoMediaChunk": {
+      "title": "VideoMediaChunk",
+      "description": "Sequential base64 chunk segment belonging to a VideoMedia manifest.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 2, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "mediaId": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "index": { "type": "integer" },
+        "data": { "type": "string", "maxLength": 700000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "mediaId", "index", "data", "createdAt"]
     }
   },
   "firestore": {
@@ -696,6 +725,14 @@
     "/announcements/{announcementId}": {
       "schema": { "$ref": "#/entities/GlobalAnnouncement" },
       "description": "Site-wide admin announcements with optional image or video banners."
+    },
+    "/video_media/{mediaId}": {
+      "schema": { "$ref": "#/entities/VideoMedia" },
+      "description": "Cross-device cloud video manifest documents."
+    },
+    "/video_media/{mediaId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/VideoMediaChunk" },
+      "description": "Sequential base64 chunks for cross-device video playback."
     }
   }
 }

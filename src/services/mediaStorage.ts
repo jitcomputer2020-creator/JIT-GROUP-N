@@ -458,6 +458,67 @@ export async function saveVideoBlobLocally(
 }
 
 /**
+ * Caches a downloaded or uploaded cloud video Blob in IndexedDB under key `cloud_<mediaId>`
+ * so repeat playback on this device is instant without re-downloading Firestore chunks.
+ */
+export async function cacheCloudVideoBlobLocally(
+  mediaId: string,
+  blob: Blob,
+  expiresAt: number = Date.now() + VIDEO_EXPIRY_MS
+): Promise<void> {
+  if (!mediaId) return;
+  try {
+    const db = await getDb();
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const record: StoredMediaRecord = {
+      id: `cloud_${mediaId}`,
+      blob,
+      mimeType: blob.type || 'video/mp4',
+      fileName: `${mediaId}.mp4`,
+      size: blob.size,
+      createdAt: Date.now(),
+      expiresAt,
+    };
+    await new Promise<void>((resolve, reject) => {
+      const req = store.put(record);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    // Non-fatal local cache failure
+  }
+}
+
+/**
+ * Checks IndexedDB cache for an already-assembled cloud video Blob (`cloud_<mediaId>`).
+ */
+export async function getCachedCloudVideoUrl(mediaId: string): Promise<string | null> {
+  if (!mediaId) return null;
+  return getMediaFile(`cloud_${mediaId}`);
+}
+
+export function uint8ToBase64(bytes: Uint8Array): string {
+  const SLICE = 0x4000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += SLICE) {
+    const chunk = bytes.subarray(i, Math.min(i + SLICE, bytes.length));
+    parts.push(String.fromCharCode(...chunk));
+  }
+  return btoa(parts.join(''));
+}
+
+export function base64ToUint8(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const len = binary.length;
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
+/**
  * Resolves `idb://<id>` URIs into playable Object URLs; passes HTTP/Data URLs straight through.
  */
 export async function resolveLocalMediaUrl(url?: string): Promise<string> {

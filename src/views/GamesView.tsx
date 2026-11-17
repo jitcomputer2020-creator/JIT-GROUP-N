@@ -25,6 +25,7 @@ import {
   joinFirestoreGameRoom,
   quickMatchFirestoreRoom,
   findOtherWaitingQuickMatchRoom,
+  subscribeToPublicMatchmakingQueue,
   touchMatchmakingRoomHeartbeat,
   releasePublicQueueSlotIfOwner,
   leaveMatchmakingQueue,
@@ -969,7 +970,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     let settled = false;
     let joining = false;
     const myCode = currentRoom.roomCode;
-    const myCreatedAt = currentRoom.createdAt || Date.now();
 
     const enterMatchedRoom = (room: MultiplayerRoom) => {
       if (cancelled || settled) return;
@@ -990,33 +990,48 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
     };
 
+    const tryMergeIntoWaitingRoom = async (candidate: MultiplayerRoom | null) => {
+      if (!candidate || cancelled || settled || joining) return;
+      // Deterministic clock-skew-free tie breaker: higher roomCode yields to lower roomCode
+      const shouldYield = candidate.roomCode < myCode;
+      if (!shouldYield) return;
+
+      joining = true;
+      try {
+        await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
+        const joined = await joinFirestoreGameRoom(candidate.roomCode, selectedGame, activePlayer);
+        if (!cancelled && !settled) {
+          await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
+          enterMatchedRoom(joined);
+        }
+      } catch {
+        joining = false;
+      }
+    };
+
     const mergeIntoOlderWaitingRoomIfPresent = async () => {
       if (cancelled || settled || joining) return;
       try {
-        const older = await findOtherWaitingQuickMatchRoom(selectedGame, myCode, activePlayer.id);
-        if (!older || cancelled || settled) return;
-        const otherIsOlder =
-          older.createdAt < myCreatedAt ||
-          (older.createdAt === myCreatedAt && older.roomCode < myCode);
-        if (!otherIsOlder) return;
-
-        joining = true;
-        try {
-          await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
-          const joined = await joinFirestoreGameRoom(older.roomCode, selectedGame, activePlayer);
-          if (!cancelled && !settled) {
-            await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
-            enterMatchedRoom(joined);
-          }
-        } catch {
-          joining = false;
-        }
+        const candidate = await findOtherWaitingQuickMatchRoom(selectedGame, myCode, activePlayer.id);
+        await tryMergeIntoWaitingRoom(candidate);
       } catch {
         // Retry on next poll tick
       }
     };
 
-    // Fast 1000ms verification + heartbeat keeps the single waiting room fresh and prevents split rooms
+    // Real-time queue listener + fast 1000ms verification guarantees single shared room pairing
+    const unsubQueue = subscribeToPublicMatchmakingQueue(
+      selectedGame,
+      myCode,
+      activePlayer.id,
+      (waitingRooms) => {
+        if (waitingRooms.length > 0 && !cancelled && !settled && !joining) {
+          const sorted = [...waitingRooms].sort((a, b) => a.roomCode.localeCompare(b.roomCode));
+          void tryMergeIntoWaitingRoom(sorted[0]);
+        }
+      }
+    );
+
     const pollTimer = window.setInterval(() => {
       void mergeIntoOlderWaitingRoomIfPresent();
     }, 1000);
@@ -1036,6 +1051,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
     return () => {
       cancelled = true;
+      unsubQueue();
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.clearInterval(pollTimer);
       window.clearInterval(heartbeatTimer);

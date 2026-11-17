@@ -217,8 +217,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
       setNewContent('');
       handleClearMedia();
-    } catch {
-      setPostError('Failed to upload media. Please try again.');
+    } catch (err: any) {
+      setPostError(err?.message || 'Failed to upload media. Please try again.');
     } finally {
       setIsPosting(false);
     }
