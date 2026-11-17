@@ -13,6 +13,7 @@ import { saveMediaFile, validateMediaFile } from '../services/mediaStorage';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { sendJitAiChat, JitAiChatTurn } from '../services/aiClient';
+import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
 import {
   fetchPublicDirectory,
   searchCloudUsers,
@@ -331,29 +332,29 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     return () => unsub();
   }, [activeConvId]);
 
-  // Preload Express backend messages only for primary demo fallback
+  // Preload Express backend messages only when Express API is available (validates JSON content-type)
   useEffect(() => {
     if (!isPrimaryDemo) return;
     let active = true;
-    fetch('/api/messages')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!active || !data) return;
-        if (Array.isArray(data.conversations) && data.conversations.length > 0) {
-          setLocalConversations((prev) => {
-            const map = new Map<string, Conversation>();
-            data.conversations.forEach((c: Conversation) => map.set(c.id, c));
-            prev.forEach((c) => {
-              if (!map.has(c.id)) map.set(c.id, c);
-            });
-            return Array.from(map.values());
+    (async () => {
+      if (!(await detectExpressBackendAvailable())) return;
+      const res = await safeFetchJson<{ conversations?: Conversation[]; messages?: Message[] }>('/api/messages');
+      if (!active || !res.ok || !res.data) return;
+      const data = res.data;
+      if (Array.isArray(data.conversations) && data.conversations.length > 0) {
+        setLocalConversations((prev) => {
+          const map = new Map<string, Conversation>();
+          data.conversations!.forEach((c: Conversation) => map.set(c.id, c));
+          prev.forEach((c) => {
+            if (!map.has(c.id)) map.set(c.id, c);
           });
-        }
-        if (Array.isArray(data.messages) && data.messages.length > 0) {
-          setLocalMessages(data.messages);
-        }
-      })
-      .catch(() => {});
+          return Array.from(map.values());
+        });
+      }
+      if (Array.isArray(data.messages) && data.messages.length > 0) {
+        setLocalMessages(data.messages);
+      }
+    })();
     return () => {
       active = false;
     };
@@ -681,12 +682,17 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         )
       );
 
-      // Best-effort Express mirror for Admin inspection
-      fetch('/api/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: sentMsg }),
-      }).catch(() => {});
+      // Best-effort Express mirror when server backend is running
+      detectExpressBackendAvailable()
+        .then((hasBackend) => {
+          if (!hasBackend) return;
+          return fetch('/api/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: sentMsg }),
+          });
+        })
+        .catch(() => {});
     } catch (err: any) {
       setMessageText(contentToSend);
       setSendError(err?.message || 'Message failed to send. Please check connection and retry.');
@@ -748,11 +754,16 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       setSelectedGroupMembers([]);
       setIsNewGroupModalOpen(false);
 
-      fetch('/api/conversations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversation: newConv }),
-      }).catch(() => {});
+      detectExpressBackendAvailable()
+        .then((hasBackend) => {
+          if (!hasBackend) return;
+          return fetch('/api/conversations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversation: newConv }),
+          });
+        })
+        .catch(() => {});
     } catch (err: any) {
       setSendError(err?.message || 'Failed to create group chat.');
     }

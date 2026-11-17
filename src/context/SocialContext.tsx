@@ -29,6 +29,7 @@ import {
 import { useAuth } from './AuthContext';
 import { APP_CONFIG } from '../constants/branding';
 import { purgeExpiredLocalMedia } from '../services/mediaStorage';
+import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
 import {
   VIDEO_EXPIRY_MS,
   deriveUsername,
@@ -583,51 +584,52 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const refreshAnnouncements = useCallback(async () => {
     try {
-      const [annRes, postsRes] = await Promise.all([
-        fetch('/api/announcements'),
-        fetch('/api/posts'),
-      ]);
-      if (annRes.ok) {
-        const annData = await annRes.json();
-        if (Array.isArray(annData.announcements)) {
-          setServerAnnouncements(annData.announcements.filter((a: GlobalAnnouncement) => !isVideoContentExpired(a)));
-        }
+      const hasBackend = await detectExpressBackendAvailable();
+      if (!hasBackend) {
+        return;
       }
-      if (postsRes.ok) {
-        const postsData = await postsRes.json();
-        if (Array.isArray(postsData.posts) && postsData.posts.length > 0) {
-          setPosts((prev) => {
-            const existingMap = new Map(prev.map((p) => [p.id, p]));
-            const merged: Post[] = [];
-            const seen = new Set<string>();
-            for (const sp of postsData.posts as Post[]) {
-              if (!seen.has(sp.id) && !deletedPostIdsRef.current.has(sp.id) && !isVideoContentExpired(sp)) {
-                seen.add(sp.id);
-                const localMatch = existingMap.get(sp.id);
-                merged.push(
-                  localMatch && sp.authorId !== 'usr_jit_admin_system'
-                    ? localMatch
-                    : sp
-                );
-              }
+      const [annRes, postsRes] = await Promise.all([
+        safeFetchJson<{ announcements?: GlobalAnnouncement[] }>('/api/announcements'),
+        safeFetchJson<{ posts?: Post[] }>('/api/posts'),
+      ]);
+      if (annRes.ok && annRes.data && Array.isArray(annRes.data.announcements)) {
+        setServerAnnouncements(
+          annRes.data.announcements.filter((a: GlobalAnnouncement) => !isVideoContentExpired(a))
+        );
+      }
+      if (postsRes.ok && postsRes.data && Array.isArray(postsRes.data.posts) && postsRes.data.posts.length > 0) {
+        const incomingPosts = postsRes.data.posts;
+        setPosts((prev) => {
+          const existingMap = new Map(prev.map((p) => [p.id, p]));
+          const merged: Post[] = [];
+          const seen = new Set<string>();
+          for (const sp of incomingPosts) {
+            if (!seen.has(sp.id) && !deletedPostIdsRef.current.has(sp.id) && !isVideoContentExpired(sp)) {
+              seen.add(sp.id);
+              const localMatch = existingMap.get(sp.id);
+              merged.push(
+                localMatch && sp.authorId !== 'usr_jit_admin_system'
+                  ? localMatch
+                  : sp
+              );
             }
-            for (const lp of prev) {
-              if (
-                !seen.has(lp.id) &&
-                !lp.id.startsWith('post_ann_') &&
-                !deletedPostIdsRef.current.has(lp.id) &&
-                !isVideoContentExpired(lp)
-              ) {
-                seen.add(lp.id);
-                merged.push(lp);
-              }
+          }
+          for (const lp of prev) {
+            if (
+              !seen.has(lp.id) &&
+              !lp.id.startsWith('post_ann_') &&
+              !deletedPostIdsRef.current.has(lp.id) &&
+              !isVideoContentExpired(lp)
+            ) {
+              seen.add(lp.id);
+              merged.push(lp);
             }
-            return merged;
-          });
-        }
+          }
+          return merged;
+        });
       }
     } catch {
-      // Non-fatal offline fallback
+      // Non-fatal offline / serverless fallback
     } finally {
       postsHydratedRef.current = true;
     }
@@ -639,10 +641,11 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => clearInterval(timer);
   }, [refreshAnnouncements]);
 
-  // Persist user post updates (new posts, edits, comments, likes) to backend store
+  // Persist user post updates (new posts, edits, comments, likes) when backend server is active
   useEffect(() => {
     if (!postsHydratedRef.current) return;
-    const timeout = setTimeout(() => {
+    const timeout = setTimeout(async () => {
+      if (!(await detectExpressBackendAvailable())) return;
       fetch('/api/posts/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

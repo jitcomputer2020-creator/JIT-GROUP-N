@@ -8,6 +8,7 @@
 
 import { AIDifficulty } from '../types/multiplayer';
 import { QuizQuestion, pickShuffledQuizQuestions } from './gameAIEngine';
+import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
 
 export interface JitAiChatTurn {
   role: 'user' | 'model';
@@ -26,23 +27,23 @@ export async function sendJitAiChat(params: {
   userName?: string;
   mode?: 'studies' | 'tech' | 'general';
 }): Promise<JitAiChatResult> {
-  const res = await fetch('/api/ai/chat', {
+  const res = await safeFetchJson<{ reply?: string; model?: string; createdAtMs?: number; error?: string }>('/api/ai/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
+  if (!res.ok || !res.data) {
     throw new Error(
-      data?.error || 'JIT AI Assistant is temporarily unavailable. Please verify server Gemini API configuration.'
+      res.data?.error ||
+        'JIT AI Assistant requires the full-stack server API and is unavailable on static serverless deployments.'
     );
   }
 
   return {
-    reply: String(data.reply || ''),
-    model: String(data.model || 'gemini-4-hydrogen'),
-    createdAtMs: Number(data.createdAtMs || Date.now()),
+    reply: String(res.data.reply || ''),
+    model: String(res.data.model || 'gemini-4-hydrogen'),
+    createdAtMs: Number(res.data.createdAtMs || Date.now()),
   };
 }
 
@@ -58,20 +59,19 @@ export async function generateAiCaptions(params: {
   contentType: 'post' | 'reel';
   tone?: string;
 }): Promise<SmartCaptionResult> {
-  const res = await fetch('/api/ai/captions', {
+  const res = await safeFetchJson<{ captions?: string[]; hashtags?: string[]; error?: string }>('/api/ai/captions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data?.error || 'Could not generate AI captions right now.');
+  if (!res.ok || !res.data) {
+    throw new Error(res.data?.error || 'Could not generate AI captions right now.');
   }
 
   return {
-    captions: Array.isArray(data.captions) ? data.captions : [],
-    hashtags: Array.isArray(data.hashtags) ? data.hashtags : [],
+    captions: Array.isArray(res.data.captions) ? res.data.captions : [],
+    hashtags: Array.isArray(res.data.hashtags) ? res.data.hashtags : [],
     source: 'ai',
   };
 }
@@ -99,31 +99,38 @@ export async function fetchAiQuizRound(params?: {
   const csTarget = Math.round(count * 0.7);
   const genTarget = count - csTarget;
 
+  let serverNotice: string | undefined;
   try {
-    const res = await fetch('/api/ai/quiz', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        count,
-        difficulty: params?.difficulty || 'medium',
-        excludeQuestions: params?.excludeQuestions || [],
-        topicHint: params?.topicHint,
-      }),
-    });
+    if (await detectExpressBackendAvailable()) {
+      const res = await safeFetchJson<{
+        questions?: QuizQuestion[];
+        breakdown?: QuizRoundResult['breakdown'];
+        error?: string;
+      }>('/api/ai/quiz', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          count,
+          difficulty: params?.difficulty || 'medium',
+          excludeQuestions: params?.excludeQuestions || [],
+          topicHint: params?.topicHint,
+        }),
+      });
 
-    const data = await res.json().catch(() => ({}));
-    if (res.ok && Array.isArray(data?.questions) && data.questions.length > 0) {
-      return {
-        questions: data.questions as QuizQuestion[],
-        breakdown: data.breakdown || {
-          total: data.questions.length,
-          csCount: csTarget,
-          generalCount: genTarget,
-          csPercent: 70,
-          generalPercent: 30,
-        },
-        source: 'ai',
-      };
+      if (res.ok && res.data && Array.isArray(res.data.questions) && res.data.questions.length > 0) {
+        return {
+          questions: res.data.questions,
+          breakdown: res.data.breakdown || {
+            total: res.data.questions.length,
+            csCount: csTarget,
+            generalCount: genTarget,
+            csPercent: 70,
+            generalPercent: 30,
+          },
+          source: 'ai',
+        };
+      }
+      serverNotice = res.data?.error;
     }
 
     const fallback = pickShuffledQuizQuestions(count, params?.excludeQuestions || []);
@@ -137,7 +144,7 @@ export async function fetchAiQuizRound(params?: {
         generalPercent: 30,
       },
       source: 'curated-70-30',
-      notice: data?.error || 'Loaded curated 70% CS / 30% General bank.',
+      notice: serverNotice || 'Loaded curated 70% CS / 30% General bank.',
     };
   } catch {
     const fallback = pickShuffledQuizQuestions(count, params?.excludeQuestions || []);
@@ -204,15 +211,18 @@ export async function moderatePublicContent(
   }
 
   try {
-    const res = await fetch('/api/ai/moderate', {
+    if (!(await detectExpressBackendAvailable())) {
+      return { allowed: true, flagged: false, severity: 'none', category: 'clean', reason: '' };
+    }
+    const res = await safeFetchJson<Partial<ClientModerationResult>>('/api/ai/moderate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text: clean, context }),
     });
-    if (!res.ok) {
+    if (!res.ok || !res.data) {
       return { allowed: true, flagged: false, severity: 'none', category: 'clean', reason: '' };
     }
-    const data = (await res.json()) as Partial<ClientModerationResult>;
+    const data = res.data;
     return {
       allowed: typeof data.allowed === 'boolean' ? data.allowed : data.severity !== 'block',
       flagged: Boolean(data.flagged),

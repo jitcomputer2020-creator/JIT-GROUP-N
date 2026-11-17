@@ -11,6 +11,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { LeaderboardEntry, MatchHistoryRecord } from '../../types';
 import { useAuth, LS_MATCH_HISTORY } from '../../context/AuthContext';
 import { fetchGlobalLeaderboard, fetchMatchHistory } from '../../lib/firebase';
+import { detectExpressBackendAvailable, safeFetchJson } from '../../utils/safeFetch';
 import { APP_CONFIG } from '../../constants/branding';
 import { Trophy, History, RefreshCw, Flame, Medal } from 'lucide-react';
 
@@ -62,16 +63,11 @@ export const LeaderboardPanel: React.FC = () => {
         });
       }
 
-      // If Firestore list returned empty offline, also try backend /api/games/leaderboard
-      if (map.size === 0) {
-        try {
-          const res = await fetch('/api/games/leaderboard');
-          if (res.ok) {
-            const data = await res.json();
-            (data.leaderboard || []).forEach((e: LeaderboardEntry) => map.set(e.profileId, e));
-          }
-        } catch {
-          // Non-fatal
+      // If Firestore list returned empty offline, try backend /api/games/leaderboard when server is active
+      if (map.size === 0 && (await detectExpressBackendAvailable())) {
+        const res = await safeFetchJson<{ leaderboard?: LeaderboardEntry[] }>('/api/games/leaderboard');
+        if (res.ok && res.data) {
+          (res.data.leaderboard || []).forEach((e: LeaderboardEntry) => map.set(e.profileId, e));
         }
       }
 

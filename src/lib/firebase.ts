@@ -49,6 +49,7 @@ import {
   Unsubscribe,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
 import {
   UserProfile,
   LeaderboardEntry,
@@ -1276,21 +1277,16 @@ export async function searchCloudUsers(queryStr: string, maxResults = 30): Promi
   }
 
   // 3. Also query backend /api/users/search when available (captures any local/Express profiles & full phone substrings)
-  if (typeof fetch === 'function') {
-    try {
-      const res = await fetch(`/api/users/search?q=${encodeURIComponent(raw)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.users)) {
-          for (const u of data.users as UserProfile[]) {
-            if (u?.id && !byId.has(u.id)) {
-              byId.set(u.id, u);
-            }
-          }
+  if (typeof fetch === 'function' && (await detectExpressBackendAvailable())) {
+    const res = await safeFetchJson<{ users?: UserProfile[] }>(
+      `/api/users/search?q=${encodeURIComponent(raw)}`
+    );
+    if (res.ok && res.data && Array.isArray(res.data.users)) {
+      for (const u of res.data.users) {
+        if (u?.id && !byId.has(u.id)) {
+          byId.set(u.id, u);
         }
       }
-    } catch {
-      // Static Vercel deployment fallback ignores missing /api
     }
   }
 
@@ -3168,28 +3164,21 @@ export async function uploadVideoAssetToCloud(
     console.info('Firebase Storage video upload fallback engaged:', err);
   }
 
-  // 2. Try Express binary /api/media/upload (persisted with Range streaming & 40-day expiry)
-  if (typeof window !== 'undefined' && typeof fetch === 'function') {
-    try {
-      onProgress?.(55);
-      const res = await fetch('/api/media/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': file.type || 'application/octet-stream',
-          'X-Media-Mime': file.type || 'video/mp4',
-          'X-Expires-At': String(expiresAt),
-        },
-        body: file,
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.url) {
-          onProgress?.(100);
-          return { videoUrl: String(data.url), thumbnailUrl: finalThumb, storageSource: 'server' };
-        }
-      }
-    } catch {
-      // Continue to static/serverless fallback
+  // 2. Try Express binary /api/media/upload only when Express backend API is active
+  if (typeof window !== 'undefined' && typeof fetch === 'function' && (await detectExpressBackendAvailable())) {
+    onProgress?.(55);
+    const res = await safeFetchJson<{ url?: string }>('/api/media/upload', {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-Media-Mime': file.type || 'video/mp4',
+        'X-Expires-At': String(expiresAt),
+      },
+      body: file,
+    });
+    if (res.ok && res.data?.url) {
+      onProgress?.(100);
+      return { videoUrl: String(res.data.url), thumbnailUrl: finalThumb, storageSource: 'server' };
     }
   }
 

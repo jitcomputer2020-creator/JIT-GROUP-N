@@ -19,6 +19,7 @@ import { useSocial } from '../context/SocialContext';
 import { saveCompressedProfileMediaFile, validateMediaFile } from '../services/mediaStorage';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
+import { detectExpressBackendAvailable, safeParseJsonResponse } from '../utils/safeFetch';
 import {
   auth,
   fetchAllCloudProfilesAsAdmin,
@@ -335,21 +336,21 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             return;
           }
 
-          const usersContentType = usersRes.headers.get('content-type') || '';
-          if (usersContentType.includes('application/json')) {
-            const data = await usersRes.json();
+          const data = await safeParseJsonResponse<{ success?: boolean; error?: string; users?: AdminUserRecord[]; firebaseCount?: number; analytics?: any; syncedAt?: string }>(usersRes);
+          if (data) {
             if (!usersRes.ok || !data.success) {
               setLoadError(data.error || 'Unable to load Firebase user directory.');
               return;
             }
             usedExpressApi = true;
 
-            if (annRes.ok && (annRes.headers.get('content-type') || '').includes('application/json')) {
-              const annData = await annRes.json();
-              if (Array.isArray(annData.announcements)) {
+            if (annRes.ok) {
+              const annData = await safeParseJsonResponse<{ announcements?: GlobalAnnouncement[] }>(annRes);
+              const incomingAnns = annData?.announcements;
+              if (Array.isArray(incomingAnns)) {
                 setAnnouncements((prev) => {
                   const byId = new Map<string, GlobalAnnouncement>();
-                  for (const a of [...annData.announcements, ...prev]) {
+                  for (const a of [...incomingAnns, ...prev]) {
                     if (!isVideoContentExpired(a) && !byId.has(a.id)) byId.set(a.id, a);
                   }
                   return Array.from(byId.values()).sort(
@@ -555,18 +556,15 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             clearSession();
             return;
           }
-          const contentType = res.headers.get('content-type') || '';
-          if (contentType.includes('application/json') && res.ok) {
-            const data = await res.json();
-            if (data?.success) {
-              if (data.user) resolvedUser = { ...resolvedUser, ...data.user };
-              (data.conversations || []).forEach((c: Conversation) => convMap.set(c.id, c));
-              (data.messages || []).forEach((m: any) => msgMap.set(m.id, m));
-              (data.inGameMessages || []).forEach((gm: any) => gameMsgMap.set(gm.id, gm));
-              (data.posts || []).forEach((p: Post) => postMap.set(p.id, p));
-              (data.reels || []).forEach((r: Reel) => reelMap.set(r.id, r));
-              (data.matchHistory || []).forEach((mh: MatchHistoryRecord) => matchMap.set(mh.id, mh));
-            }
+          const data = res.ok ? await safeParseJsonResponse<any>(res) : null;
+          if (data?.success) {
+            if (data.user) resolvedUser = { ...resolvedUser, ...data.user };
+            (data.conversations || []).forEach((c: Conversation) => convMap.set(c.id, c));
+            (data.messages || []).forEach((m: any) => msgMap.set(m.id, m));
+            (data.inGameMessages || []).forEach((gm: any) => gameMsgMap.set(gm.id, gm));
+            (data.posts || []).forEach((p: Post) => postMap.set(p.id, p));
+            (data.reels || []).forEach((r: Reel) => reelMap.set(r.id, r));
+            (data.matchHistory || []).forEach((mh: MatchHistoryRecord) => matchMap.set(mh.id, mh));
           }
         }
 
@@ -674,6 +672,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
 
     // Best-effort background upgrade to Express session token when local backend is active
     try {
+      if (!(await detectExpressBackendAvailable())) return;
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 2000);
       const res = await fetch('/api/admin/auth', {
@@ -683,21 +682,18 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
         signal: controller.signal,
       });
       window.clearTimeout(timeoutId);
-      const contentType = res.headers.get('content-type') || '';
-      if (contentType.includes('application/json') && res.ok) {
-        const data = await res.json();
-        if (data?.success && data?.token) {
-          try {
-            sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
-            sessionStorage.setItem(
-              ADMIN_EXPIRY_KEY,
-              String(data.expiresAt || Date.now() + 4 * 3600_000)
-            );
-          } catch {
-            // Ignore
-          }
-          setAdminToken(data.token);
+      const data = await safeParseJsonResponse<{ success?: boolean; token?: string; expiresAt?: number }>(res);
+      if (res.ok && data?.success && data?.token) {
+        try {
+          sessionStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+          sessionStorage.setItem(
+            ADMIN_EXPIRY_KEY,
+            String(data.expiresAt || Date.now() + 4 * 3600_000)
+          );
+        } catch {
+          // Ignore
         }
+        setAdminToken(data.token);
       }
     } catch {
       // Client-side admin dashboard remains unlocked cleanly
@@ -805,9 +801,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             return;
           }
 
-          const ct = res.headers.get('content-type') || '';
-          if (ct.includes('application/json')) {
-            const data = await res.json();
+          const data = await safeParseJsonResponse<{ success?: boolean; error?: string; user?: AdminUserRecord }>(res);
+          if (data) {
             if (!res.ok || !data.success || !data.user) {
               setEditFeedback({ type: 'err', text: data.error || 'Failed to save user overrides.' });
               return;
@@ -873,9 +868,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             return;
           }
 
-          const ct = res.headers.get('content-type') || '';
-          if (ct.includes('application/json')) {
-            const data = await res.json();
+          const data = await safeParseJsonResponse<{ success?: boolean; error?: string; user?: UserProfile }>(res);
+          if (data) {
             if (!res.ok || !data.success) {
               setModerationFeedback({ type: 'err', text: data.error || 'Moderation action failed.' });
               return;
@@ -1112,9 +1106,8 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
             return;
           }
 
-          const ct = res.headers.get('content-type') || '';
-          if (ct.includes('application/json')) {
-            const data = await res.json();
+          const data = await safeParseJsonResponse<{ success?: boolean; error?: string; announcement?: GlobalAnnouncement; announcements?: GlobalAnnouncement[] }>(res);
+          if (data) {
             if (!res.ok || !data.success) {
               setBroadcastFeedback({ type: 'err', text: data.error || 'Failed to publish announcement.' });
               return;
@@ -1185,13 +1178,13 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
   const handleDeleteAnnouncement = async (id: string) => {
     if (!adminToken) return;
     try {
-      if (adminToken !== 'vercel-spa-admin') {
+      if (adminToken !== 'vercel-spa-admin' && (await detectExpressBackendAvailable())) {
         const res = await fetch(`/api/admin/announcements/${encodeURIComponent(id)}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${adminToken}` },
         }).catch(() => null);
         if (res && res.ok) {
-          const data = await res.json().catch(() => null);
+          const data = await safeParseJsonResponse<{ announcements?: GlobalAnnouncement[] }>(res);
           if (Array.isArray(data?.announcements)) {
             setAnnouncements(data.announcements);
           }

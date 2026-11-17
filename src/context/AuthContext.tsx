@@ -23,6 +23,11 @@ import {
   recordCloudMatchHistory,
   subscribeToCloudProfile,
 } from '../lib/firebase';
+import {
+  detectExpressBackendAvailable,
+  safeFetchJson,
+  safeParseJsonResponse,
+} from '../utils/safeFetch';
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
 
@@ -368,10 +373,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // 1. Fetch server profiles from shared backend (accessible across all browsers/devices)
-      const res = await fetch('/api/profiles');
-      if (res.ok) {
-        const data = await res.json();
+      // 1. Fetch server profiles only when Express backend API is available (validates JSON content-type)
+      const hasBackend = await detectExpressBackendAvailable();
+      const serverProfilesRes = hasBackend
+        ? await safeFetchJson<{ profiles?: Array<UserProfile & { adminPointsUpdatedAt?: string }> }>('/api/profiles')
+        : { ok: false, status: 0, isJson: false, data: null };
+      if (serverProfilesRes.ok && serverProfilesRes.data) {
+        const data = serverProfilesRes.data;
         const serverProfiles: Array<UserProfile & { adminPointsUpdatedAt?: string }> = data.profiles || [];
         const activeServerProfiles = serverProfiles.filter(
           (p) => !isProfileExpired(p) && p.status !== 'deleted'
@@ -485,11 +493,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         for (const p of nonExpired) {
           ensureCloudProfileSeeded(p).catch(() => {});
         }
-        await fetch('/api/profiles/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profiles: nonExpired }),
-        }).catch(() => {});
+        if (hasBackend) {
+          await fetch('/api/profiles/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profiles: nonExpired }),
+          }).catch(() => {});
+        }
       }
     } catch (err) {
       console.warn('Initial server profiles sync notice:', err);
@@ -573,15 +583,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLogin: profile.lastLogin || profile.lastLoginAt || nowIso,
     };
 
-    // 1. Backend Server Persistence (shared mirror)
-    try {
-      await fetch('/api/profiles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(profileToPersist),
-      });
-    } catch (e) {
-      console.warn('Failed to persist profile to server endpoint:', e);
+    // 1. Backend Server Persistence (only when Express API is reachable)
+    if (await detectExpressBackendAvailable()) {
+      try {
+        await fetch('/api/profiles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(profileToPersist),
+        });
+      } catch (e) {
+        console.warn('Failed to persist profile to server endpoint:', e);
+      }
     }
 
     // 2. Supabase if credentials are provided
@@ -664,23 +676,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.warn('Firestore login lookup notice, falling back to server/local:', cloudErr);
     }
 
-    // 2. Try server login endpoint
-    try {
-      const serverRes = await fetch('/api/profiles/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contactNumber }),
-      });
-      if (serverRes.status === 403) {
-        const errData = await serverRes.json().catch(() => ({}));
-        return {
-          success: false,
-          error: errData.error || 'This account has been suspended by an administrator.',
-        };
-      }
-      if (serverRes.ok) {
-        const data = await serverRes.json();
-        if (data.success && data.profile) {
+    // 2. Try server login endpoint (only if Express API returns JSON, skips HTML SPA rewrites)
+    const hasBackendApi = await detectExpressBackendAvailable();
+    if (hasBackendApi) {
+      try {
+        const serverRes = await fetch('/api/profiles/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contactNumber }),
+        });
+        if (serverRes.status === 403) {
+          const errData = (await safeParseJsonResponse<{ error?: string }>(serverRes)) || {};
+          return {
+            success: false,
+            error: errData.error || 'This account has been suspended by an administrator.',
+          };
+        }
+        const data = await safeParseJsonResponse<{ success?: boolean; profile?: UserProfile }>(serverRes);
+        if (serverRes.ok && data?.success && data.profile) {
           const activeUser: UserProfile = {
             ...data.profile,
             lastLoginAt: nowIso,
@@ -702,26 +715,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           await ensureCloudProfileSeeded(activeUser).catch(() => {});
           return { success: true, user: activeUser };
         }
+      } catch (e) {
+        console.warn('Backend login endpoint notice, attempting lookup:', e);
       }
-    } catch (e) {
-      console.warn('Backend login endpoint notice, attempting lookup:', e);
     }
 
     // 3. Check local registered profiles
     let matched = registeredProfiles.find((p) => isPhoneNumberMatch(p.contactNumber, contactNumber));
 
-    // 4. If not found locally, query server API
-    if (!matched) {
-      try {
-        const res = await fetch(`/api/profiles/lookup/${encodeURIComponent(contactNumber.trim())}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.found && data.profile) {
-            matched = data.profile;
-          }
-        }
-      } catch (e) {
-        console.warn('Server lookup error:', e);
+    // 4. If not found locally, query server API when available
+    if (!matched && hasBackendApi) {
+      const lookupRes = await safeFetchJson<{ found?: boolean; profile?: UserProfile }>(
+        `/api/profiles/lookup/${encodeURIComponent(contactNumber.trim())}`
+      );
+      if (lookupRes.ok && lookupRes.data?.found && lookupRes.data.profile) {
+        matched = lookupRes.data.profile;
       }
     }
 
@@ -849,17 +857,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       (p) => isPhoneNumberMatch(p.contactNumber, contactNumber) && !isProfileExpired(p)
     );
 
-    if (!seedCandidate) {
-      try {
-        const res = await fetch(`/api/profiles/lookup/${encodeURIComponent(contactNumber.trim())}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.found && data.profile && !isProfileExpired(data.profile)) {
-            seedCandidate = data.profile;
-          }
-        }
-      } catch (e) {
-        console.warn('Server lookup error during register:', e);
+    if (!seedCandidate && (await detectExpressBackendAvailable())) {
+      const lookupRes = await safeFetchJson<{ found?: boolean; profile?: UserProfile }>(
+        `/api/profiles/lookup/${encodeURIComponent(contactNumber.trim())}`
+      );
+      if (lookupRes.ok && lookupRes.data?.found && lookupRes.data.profile && !isProfileExpired(lookupRes.data.profile)) {
+        seedCandidate = lookupRes.data.profile;
       }
     }
 
