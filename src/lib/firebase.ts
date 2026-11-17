@@ -32,6 +32,7 @@ import {
   getDoc,
   getDocs,
   getDocFromServer,
+  getDocsFromServer,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -1784,13 +1785,13 @@ export async function findOtherWaitingQuickMatchRoom(
   playerId: string
 ): Promise<MultiplayerRoom | null> {
   try {
-    // Single-field query guarantees instant execution with zero composite indexes
+    // Single-field server-first query avoids stale cache and composite indexes
     const q = query(
       collection(db, 'gameRooms'),
       where('isPublicMatch', '==', true),
       limit(60)
     );
-    const snap = await getDocs(q);
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
     const candidates = filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
     return candidates[0] || null;
   } catch {
@@ -2184,63 +2185,278 @@ export async function touchMatchmakingRoomHeartbeat(roomCode: string): Promise<v
   }
 }
 
+export async function releasePublicQueueSlotIfOwner(
+  gameId: string,
+  playerId: string,
+  roomCode?: string
+): Promise<void> {
+  if (!gameId || !playerId) return;
+  const slotId = `slot_${gameId}`;
+  const slotRef = doc(db, 'matchmakingQueue', slotId);
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(slotRef);
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const ownsSlot = data.playerId === playerId && data.status === 'waiting';
+      const matchesRoom = !roomCode || String(data.matchedRoomCode || '') === roomCode;
+      if (ownsSlot && matchesRoom) {
+        tx.update(slotRef, {
+          status: 'matched',
+          matchedRoomCode: '',
+          matchedWithId: '',
+          updatedAt: serverTimestamp(),
+        });
+      }
+    });
+  } catch {
+    // Best-effort slot release
+  }
+  await leaveMatchmakingQueue(playerId).catch(() => {});
+}
+
 export async function quickMatchFirestoreRoom(
   gameId: string,
   maxPlayers: number,
   player: { id: string; name: string; avatar: string }
-): Promise<{ room: MultiplayerRoom | null; matchedExisting: boolean; ticket?: MatchmakingTicket }> {
-  // Clean up any abandoned room hosted by this user before entering matchmaking queue
+): Promise<{ room: MultiplayerRoom; matchedExisting: boolean }> {
+  const safeMax = Math.min(4, Math.max(2, maxPlayers || 2));
+  const cleanName = (player.name || 'JIT Player').slice(0, 80);
+  const cleanAvatar = sanitizeAvatarUrl(player.avatar);
+  const slotId = `slot_${gameId}`;
+  const slotRef = doc(db, 'matchmakingQueue', slotId);
+
+  // Clean up any prior solo abandoned room hosted by this user before entering queue
   await releasePreviousHostedRoom(player.id);
+  await leaveMatchmakingQueue(player.id);
 
-  // 1. Check active waiting tickets in dedicated matchmakingQueue collection first
-  try {
-    const q = query(
-      collection(db, 'matchmakingQueue'),
-      where('status', '==', 'waiting'),
-      limit(50)
-    );
-    const snap = await getDocs(q);
-    const waitingTickets = filterActiveQueueTickets(snap.docs, gameId, player.id);
-
-    for (const candidateTicket of waitingTickets) {
-      try {
-        const pairedRoom = await pairQueuePlayersIntoRoom(player, candidateTicket, gameId, maxPlayers);
-        if (pairedRoom) {
-          return { room: pairedRoom, matchedExisting: true };
+  // 1. First check Firestore directly for any existing open waiting room for this exact game type
+  const existingWaiting = await findOtherWaitingQuickMatchRoom(gameId, '', player.id);
+  if (existingWaiting) {
+    try {
+      const joined = await joinFirestoreGameRoom(existingWaiting.roomCode, gameId, player);
+      // Mark slot as matched if it was pointing to this room
+      runTransaction(db, async (tx) => {
+        const slotSnap = await tx.get(slotRef);
+        if (slotSnap.exists() && slotSnap.data().matchedRoomCode === existingWaiting.roomCode) {
+          tx.update(slotRef, {
+            status: 'matched',
+            matchedRoomCode: existingWaiting.roomCode,
+            matchedWithId: player.id,
+            updatedAt: serverTimestamp(),
+          });
         }
-      } catch {
-        // Candidate claimed concurrently; try next waiting player
-      }
+      }).catch(() => {});
+      setStoredHostedRoomCode(player.id, null);
+      return { room: joined, matchedExisting: true };
+    } catch {
+      // Room filled concurrently; fall through to serialized slot transaction below
     }
-  } catch {
-    // Fall back gracefully
   }
 
-  // 2. Also check any active waiting public gameRooms (legacy compatibility)
-  try {
-    const roomQ = query(
-      collection(db, 'gameRooms'),
-      where('isPublicMatch', '==', true),
-      limit(40)
-    );
-    const roomSnap = await getDocs(roomQ);
-    const waitingRooms = filterActiveWaitingRooms(roomSnap.docs, gameId, '', player.id);
-    for (const candidateRoom of waitingRooms) {
-      try {
-        const joined = await joinFirestoreGameRoom(candidateRoom.roomCode, gameId, player);
-        await leaveMatchmakingQueue(player.id);
-        return { room: joined, matchedExisting: true };
-      } catch {
-        // Candidate room filled concurrently; try next
+  // 2. Canonical per-game queue slot transaction guarantees concurrent players share ONE room code (zero split rooms)
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const chosenCode = await pickAvailableRoomCodeAndCleanStale(player.id);
+    const candidateRoomRef = doc(db, 'gameRooms', chosenCode);
+
+    try {
+      const result = await runTransaction(db, async (tx) => {
+        const slotSnap = await tx.get(slotRef);
+        const slotData = slotSnap.exists() ? slotSnap.data() : null;
+        const slotRoomCode = slotData ? String(slotData.matchedRoomCode || '') : '';
+        const slotWaitingCandidate =
+          Boolean(slotData) &&
+          slotData?.status === 'waiting' &&
+          slotData?.gameId === gameId &&
+          String(slotData?.playerId || '') !== player.id &&
+          /^\d{4}$/.test(slotRoomCode) &&
+          !isRoomDocStale(slotData || {}, PUBLIC_QUEUE_STALE_MS);
+
+        if (slotWaitingCandidate) {
+          const waitingRoomRef = doc(db, 'gameRooms', slotRoomCode);
+          const waitingRoomSnap = await tx.get(waitingRoomRef);
+          if (waitingRoomSnap.exists()) {
+            const parsedWaiting = parseRoomSnapshotData(waitingRoomSnap.data());
+            const canForceJoin =
+              !parsedWaiting.isOpenGroup &&
+              parsedWaiting.gameId === gameId &&
+              parsedWaiting.status === 'waiting' &&
+              parsedWaiting.players.length < parsedWaiting.maxPlayers &&
+              !parsedWaiting.players.some((p) => p.id === player.id) &&
+              !isRoomDocStale(waitingRoomSnap.data(), PUBLIC_QUEUE_STALE_MS);
+
+            if (canForceJoin) {
+              const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+              const hostPlayer = parsedWaiting.players[0];
+              const seatColors = ['Red', 'Yellow', 'Green', 'Blue'];
+              const nextPlayers: RoomPlayer[] = [
+                ...parsedWaiting.players,
+                {
+                  id: player.id,
+                  name: cleanName,
+                  avatar: cleanAvatar,
+                  isHost: false,
+                  isReady: true,
+                  color: seatColors[parsedWaiting.players.length % seatColors.length],
+                  joinedAtMs: Date.now(),
+                },
+              ];
+              const nextStatus: MultiplayerRoom['status'] =
+                nextPlayers.length >= parsedWaiting.maxPlayers ? 'in_game' : 'waiting';
+              const updatedGameState =
+                nextStatus === 'in_game'
+                  ? { ...(parsedWaiting.gameState || {}), _startId: startId, moveSeq: 0 }
+                  : parsedWaiting.gameState || {};
+
+              tx.update(waitingRoomRef, {
+                playersJson: JSON.stringify(nextPlayers),
+                playerCount: nextPlayers.length,
+                hostId: parsedWaiting.hostId,
+                status: nextStatus,
+                gameStateJson: JSON.stringify(updatedGameState),
+                moveAction: nextStatus === 'in_game' ? 'GAME_START' : 'ROOM_CREATED',
+                currentTurn: hostPlayer?.id || parsedWaiting.hostId,
+                updatedAt: serverTimestamp(),
+              });
+
+              tx.update(slotRef, {
+                status: 'matched',
+                matchedRoomCode: slotRoomCode,
+                matchedWithId: player.id,
+                updatedAt: serverTimestamp(),
+              });
+
+              return {
+                matchedExisting: true,
+                room: {
+                  ...parsedWaiting,
+                  status: nextStatus,
+                  players: nextPlayers,
+                  gameState: updatedGameState,
+                  currentTurn: hostPlayer?.id || parsedWaiting.hostId,
+                } as MultiplayerRoom,
+              };
+            }
+          }
+        }
+
+        // No active waiting room in slot — create the single waiting room for this game atomically
+        const existingCandidateSnap = await tx.get(candidateRoomRef);
+        if (existingCandidateSnap.exists()) {
+          throw new Error('ROOM_CODE_COLLISION');
+        }
+
+        const nowMs = Date.now();
+        const hostEntry: RoomPlayer = {
+          id: player.id,
+          name: cleanName,
+          avatar: cleanAvatar,
+          isHost: true,
+          isReady: true,
+          color: 'Red',
+          joinedAtMs: nowMs,
+        };
+        const initialPlayers = [hostEntry];
+
+        tx.set(candidateRoomRef, {
+          roomCode: chosenCode,
+          gameId,
+          hostId: player.id,
+          status: 'waiting',
+          maxPlayers: safeMax,
+          playerCount: 1,
+          isPublicMatch: true,
+          isOpenGroup: false,
+          activeSeatLimit: safeMax,
+          playersJson: JSON.stringify(initialPlayers),
+          waitingPlayersJson: '[]',
+          reactionsJson: '[]',
+          mutedVoiceIdsJson: '[]',
+          mutedChatIdsJson: '[]',
+          gameStateJson: '{}',
+          messagesJson: '[]',
+          moveAction: 'ROOM_CREATED',
+          currentTurn: player.id,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        if (slotSnap.exists()) {
+          tx.update(slotRef, {
+            playerId: player.id,
+            playerName: cleanName,
+            playerAvatar: cleanAvatar,
+            gameId,
+            status: 'waiting',
+            matchedRoomCode: chosenCode,
+            matchedWithId: '',
+            joinedAtMs: nowMs,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          tx.set(slotRef, {
+            id: slotId,
+            playerId: player.id,
+            playerName: cleanName,
+            playerAvatar: cleanAvatar,
+            gameId,
+            status: 'waiting',
+            matchedRoomCode: chosenCode,
+            matchedWithId: '',
+            joinedAtMs: nowMs,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        return {
+          matchedExisting: false,
+          room: {
+            roomCode: chosenCode,
+            gameId,
+            hostId: player.id,
+            createdAt: nowMs,
+            status: 'waiting',
+            maxPlayers: safeMax,
+            isPublicMatch: true,
+            isOpenGroup: false,
+            activeSeatLimit: safeMax,
+            players: initialPlayers,
+            waitingPlayers: [],
+            reactions: [],
+            mutedVoiceIds: [],
+            mutedChatIds: [],
+            gameState: null,
+            currentTurn: player.id,
+            messages: [],
+            callState: null,
+          } as MultiplayerRoom,
+        };
+      });
+
+      if (result.matchedExisting) {
+        setStoredHostedRoomCode(player.id, null);
+      } else {
+        setStoredHostedRoomCode(player.id, result.room.roomCode);
       }
+      return result;
+    } catch (err: any) {
+      lastErr = err;
+      if (err?.message === 'ROOM_CODE_COLLISION') {
+        continue;
+      }
+      if (err?.code === 'permission-denied' && attempt < 3) {
+        continue;
+      }
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.WRITE, `matchmakingQueue/${slotId}`);
+      }
+      throw err;
     }
-  } catch {
-    // Continue to queue ticket creation
   }
 
-  // 3. No live waiting opponent found yet — register clean waiting ticket in matchmakingQueue
-  const ticket = await enterMatchmakingQueueTicket(player, gameId);
-  return { room: null, matchedExisting: false, ticket };
+  throw lastErr || new Error('Could not enter quick matchmaking queue. Please try again.');
 }
 
 export async function startFirestoreGameRoom(
@@ -3483,7 +3699,7 @@ export async function uploadVideoAssetToCloud(
           // ignore
         }
         reject(new Error('Firebase Storage upload timed out'));
-      }, 15000);
+      }, 45000);
 
       const task = uploadBytesResumable(videoRef, file, {
         contentType: file.type || 'video/mp4',
@@ -3607,6 +3823,90 @@ function normalizeEpochMs(value: unknown): number | undefined {
   return undefined;
 }
 
+function unwrapSingleMediaString(val: unknown): string {
+  if (typeof val === 'string') return val.trim();
+  if (val && typeof val === 'object' && 'url' in val && typeof (val as any).url === 'string') {
+    return (val as any).url.trim();
+  }
+  return '';
+}
+
+function isLikelyVideoUrl(url?: string): boolean {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  if (lower.startsWith('data:video/')) return true;
+  const cleanPath = lower.split('?')[0].split('#')[0];
+  return (
+    cleanPath.endsWith('.mp4') ||
+    cleanPath.endsWith('.webm') ||
+    cleanPath.endsWith('.mov') ||
+    cleanPath.endsWith('.ogv') ||
+    lower.includes('videos%2f') ||
+    lower.includes('/videos/')
+  );
+}
+
+function unwrapPostMediaFields(data: Record<string, any>): {
+  mediaUrls: string[] | undefined;
+  mediaUrl: string | undefined;
+  videoUrl: string | undefined;
+  mediaType: 'image' | 'video' | 'none';
+  primaryUrl: string | undefined;
+} {
+  const candidates: string[] = [];
+  if (Array.isArray(data.mediaUrls)) {
+    for (const entry of data.mediaUrls) {
+      const s = unwrapSingleMediaString(entry);
+      if (s && !candidates.includes(s)) candidates.push(s);
+    }
+  } else if (typeof data.mediaUrls === 'string' && data.mediaUrls.trim()) {
+    const raw = data.mediaUrls.trim();
+    if (raw.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          for (const entry of parsed) {
+            const s = unwrapSingleMediaString(entry);
+            if (s && !candidates.includes(s)) candidates.push(s);
+          }
+        }
+      } catch {
+        candidates.push(raw);
+      }
+    } else {
+      candidates.push(raw);
+    }
+  }
+
+  const videoUrl = unwrapSingleMediaString(data.videoUrl) || undefined;
+  const mediaUrl = unwrapSingleMediaString(data.mediaUrl) || undefined;
+  const imageUrl = unwrapSingleMediaString(data.imageUrl) || undefined;
+
+  if (videoUrl && !candidates.includes(videoUrl)) candidates.unshift(videoUrl);
+  if (mediaUrl && !candidates.includes(mediaUrl)) candidates.push(mediaUrl);
+  if (imageUrl && !candidates.includes(imageUrl)) candidates.push(imageUrl);
+
+  const primaryUrl = candidates[0];
+  let mediaType: 'image' | 'video' | 'none' =
+    data.mediaType === 'video' || data.mediaType === 'image' || data.mediaType === 'none'
+      ? data.mediaType
+      : 'none';
+
+  if (videoUrl || (primaryUrl && isLikelyVideoUrl(primaryUrl))) {
+    mediaType = 'video';
+  } else if (mediaType === 'none' && primaryUrl) {
+    mediaType = 'image';
+  }
+
+  return {
+    mediaUrls: candidates.length > 0 ? candidates : undefined,
+    mediaUrl,
+    videoUrl,
+    mediaType,
+    primaryUrl,
+  };
+}
+
 function extractItemPrimaryVideoUrl(item: {
   videoUrl?: string;
   mediaUrl?: string;
@@ -3719,7 +4019,7 @@ export function subscribeToFirestoreReels(
         const data = d.data();
         const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
         const createdAtMs = Number(data.createdAtMs || 0);
-        const videoUrl = String(data.videoUrl || '');
+        const videoUrl = unwrapSingleMediaString(data.videoUrl || data.mediaUrl || (Array.isArray(data.mediaUrls) ? data.mediaUrls[0] : ''));
         if (
           isVideoContentExpired(
             { expiresAt, createdAtMs, mediaType: 'video', videoUrl },
@@ -3744,6 +4044,7 @@ export function subscribeToFirestoreReels(
           creatorName: String(data.creatorName || 'JIT Member'),
           creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
           videoUrl,
+          mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
           thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
           caption: String(data.caption || ''),
           musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
@@ -3844,18 +4145,23 @@ export function subscribeToFirestorePosts(
       const active: Post[] = [];
       snap.forEach((d) => {
         const data = d.data();
-        const mediaType = (data.mediaType as Post['mediaType']) || 'none';
+        const unwrapped = unwrapPostMediaFields(data);
         const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
         const createdAtMs = Number(data.createdAtMs || 0);
-        const mediaUrls = Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined;
-        const primaryUrl = mediaUrls?.find((u: any) => typeof u === 'string' && u.trim());
         if (
-          mediaType === 'video' &&
+          unwrapped.mediaType === 'video' &&
           isVideoContentExpired(
-            { expiresAt, createdAtMs, mediaType, mediaUrls },
+            {
+              expiresAt,
+              createdAtMs,
+              mediaType: unwrapped.mediaType,
+              mediaUrls: unwrapped.mediaUrls,
+              mediaUrl: unwrapped.mediaUrl,
+              videoUrl: unwrapped.videoUrl,
+            },
             { enforceStrictAgeOnly: true }
           ) &&
-          !isAccessibleVideoUrl(primaryUrl)
+          !isAccessibleVideoUrl(unwrapped.primaryUrl)
         ) {
           // Auto-remove genuinely expired video post (>40 days old) from Firestore
           deleteDoc(d.ref).catch(() => {});
@@ -3875,8 +4181,10 @@ export function subscribeToFirestorePosts(
           authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
           authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
           content: String(data.content || ''),
-          mediaUrls,
-          mediaType,
+          mediaUrls: unwrapped.mediaUrls,
+          ...(unwrapped.mediaUrl ? { mediaUrl: unwrapped.mediaUrl } : {}),
+          ...(unwrapped.videoUrl ? { videoUrl: unwrapped.videoUrl } : {}),
+          mediaType: unwrapped.mediaType,
           thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
           category: (data.category as Post['category']) || 'all',
           likesCount: Number(data.likesCount || 0),
@@ -4333,13 +4641,19 @@ export async function adminFetchUserActivityClient(
     );
     postsSnap.forEach((d) => {
       const data = d.data();
-      const mediaType = (data.mediaType as Post['mediaType']) || 'none';
+      const unwrapped = unwrapPostMediaFields(data);
       const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
       const createdAtMs = Number(data.createdAtMs || 0);
-      const mediaUrls = Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined;
       if (
-        mediaType === 'video' &&
-        isVideoContentExpired({ expiresAt, createdAtMs, mediaType, mediaUrls })
+        unwrapped.mediaType === 'video' &&
+        isVideoContentExpired({
+          expiresAt,
+          createdAtMs,
+          mediaType: unwrapped.mediaType,
+          mediaUrls: unwrapped.mediaUrls,
+          mediaUrl: unwrapped.mediaUrl,
+          videoUrl: unwrapped.videoUrl,
+        })
       ) {
         return;
       }
@@ -4361,8 +4675,10 @@ export async function adminFetchUserActivityClient(
           authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
           authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
           content: String(data.content || ''),
-          mediaUrls,
-          mediaType,
+          mediaUrls: unwrapped.mediaUrls,
+          ...(unwrapped.mediaUrl ? { mediaUrl: unwrapped.mediaUrl } : {}),
+          ...(unwrapped.videoUrl ? { videoUrl: unwrapped.videoUrl } : {}),
+          mediaType: unwrapped.mediaType,
           thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
           category: (data.category as Post['category']) || 'all',
           likesCount: Number(data.likesCount || 0),
@@ -4388,7 +4704,7 @@ export async function adminFetchUserActivityClient(
       const data = d.data();
       const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
       const createdAtMs = Number(data.createdAtMs || 0);
-      const videoUrl = String(data.videoUrl || '');
+      const videoUrl = unwrapSingleMediaString(data.videoUrl || data.mediaUrl || (Array.isArray(data.mediaUrls) ? data.mediaUrls[0] : ''));
       if (
         isVideoContentExpired({ expiresAt, createdAtMs, mediaType: 'video', videoUrl })
       ) {
@@ -4407,7 +4723,8 @@ export async function adminFetchUserActivityClient(
         creatorId: String(data.creatorId || ''),
         creatorName: String(data.creatorName || 'JIT Member'),
         creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
-        videoUrl: String(data.videoUrl || ''),
+        videoUrl,
+        mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
         thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
         caption: String(data.caption || ''),
         musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,

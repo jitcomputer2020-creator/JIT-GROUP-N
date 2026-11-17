@@ -670,13 +670,15 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
               {/* Post Attached Media (if any) */}
               {(() => {
-                const primaryMediaUrl = post.mediaUrls?.find(
-                  (u) => typeof u === 'string' && u.trim().length > 0
-                );
-                if (!primaryMediaUrl || post.mediaType === 'none') return null;
+                const primaryMediaUrl =
+                  post.mediaUrls?.find((u) => typeof u === 'string' && u.trim().length > 0) ||
+                  (typeof post.videoUrl === 'string' && post.videoUrl.trim() ? post.videoUrl.trim() : undefined) ||
+                  (typeof post.mediaUrl === 'string' && post.mediaUrl.trim() ? post.mediaUrl.trim() : undefined);
+                if (!primaryMediaUrl || (post.mediaType === 'none' && !post.videoUrl)) return null;
+                const isVideoMedia = post.mediaType === 'video' || Boolean(post.videoUrl);
                 return (
                   <div className="relative mb-4 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
-                    {post.mediaType === 'video' ? (
+                    {isVideoMedia ? (
                       <>
                         <ResilientVideo
                           src={primaryMediaUrl}

@@ -26,13 +26,9 @@ import {
   quickMatchFirestoreRoom,
   findOtherWaitingQuickMatchRoom,
   touchMatchmakingRoomHeartbeat,
-  fetchFirestoreGameRoomByCode,
+  releasePublicQueueSlotIfOwner,
   leaveMatchmakingQueue,
   touchMatchmakingQueueHeartbeat,
-  findWaitingQueueTicketForGame,
-  subscribeToMatchmakingQueueForGame,
-  subscribeToMyMatchmakingTicket,
-  pairQueuePlayersIntoRoom,
   releasePreviousHostedRoom,
   startFirestoreGameRoom,
   pushFirestoreGameMove,
@@ -162,8 +158,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const lastStartIdRef = useRef<string | null>(null);
   const prevRoomStatusRef = useRef<string | null>(null);
   const isChatOpenRef = useRef<boolean>(false);
-  const [waitingSecondsLeft, setWaitingSecondsLeft] = useState<number>(30);
-  const roomWaitStartRef = useRef<number>(Date.now());
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isRoomSubmitting, setIsRoomSubmitting] = useState(false);
   const [socketConnected, setSocketConnected] = useState(false);
@@ -175,19 +169,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   useEffect(() => {
     isChatOpenRef.current = isChatOpen;
   }, [isChatOpen]);
-
-  useEffect(() => {
-    if (!currentRoom || currentRoom.status !== 'waiting' || currentRoom.players.length >= 2) {
-      setWaitingSecondsLeft(30);
-      return;
-    }
-    roomWaitStartRef.current = currentRoom.createdAt || Date.now();
-    const timer = window.setInterval(() => {
-      const elapsed = Math.floor((Date.now() - roomWaitStartRef.current) / 1000);
-      setWaitingSecondsLeft(Math.max(0, 30 - elapsed));
-    }, 500);
-    return () => window.clearInterval(timer);
-  }, [currentRoom?.roomCode, currentRoom?.status, currentRoom?.players.length, currentRoom?.createdAt]);
 
   const guestPlayerId = useMemo(() => {
     if (typeof window === 'undefined') return 'usr_jit_guest_001';
@@ -211,6 +192,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   useEffect(() => {
     activePlayerIdRef.current = activePlayer.id;
   }, [activePlayer.id]);
+
+  const selectedGameRef = useRef<GameId>(selectedGame);
+  useEffect(() => {
+    selectedGameRef.current = selectedGame;
+  }, [selectedGame]);
 
   useEffect(() => {
     currentRoomRef.current = currentRoom;
@@ -776,6 +762,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   useEffect(() => {
     return () => {
+      void releasePublicQueueSlotIfOwner(
+        selectedGameRef.current,
+        activePlayerIdRef.current,
+        currentRoomRef.current?.roomCode
+      );
       void leaveMatchmakingQueue(activePlayerIdRef.current);
       if (roomUnsubRef.current) {
         roomUnsubRef.current();
@@ -962,20 +953,27 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     spawnFloatingReaction,
   ]);
 
-  // Real-Time Auto-Matchmaking Queue: immediately pairs waiting live humans via matchmakingQueue into a shared game room
+  // Real-Time Single Shared Room Matchmaking Sync:
+  // Keeps Player 1 subscribed to their single shared waiting room and deterministically converges if any older waiting room exists.
   useEffect(() => {
-    if (!isMatchmakingOpen || gameMode !== 'random') {
+    if (
+      !isMatchmakingOpen ||
+      gameMode !== 'random' ||
+      !currentRoom ||
+      currentRoom.status !== 'waiting'
+    ) {
       return;
     }
 
     let cancelled = false;
     let settled = false;
-    let pairing = false;
+    let joining = false;
+    const myCode = currentRoom.roomCode;
+    const myCreatedAt = currentRoom.createdAt || Date.now();
 
     const enterMatchedRoom = (room: MultiplayerRoom) => {
       if (cancelled || settled) return;
       settled = true;
-      void leaveMatchmakingQueue(activePlayer.id);
       resetTtt(false);
       resetChess(false);
       resetLudo(false);
@@ -992,106 +990,62 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
     };
 
-    const tryPairWithQueueTicket = async (ticket: Awaited<ReturnType<typeof findWaitingQueueTicketForGame>>) => {
-      if (!ticket || cancelled || settled || pairing) return;
-      pairing = true;
+    const mergeIntoOlderWaitingRoomIfPresent = async () => {
+      if (cancelled || settled || joining) return;
       try {
-        const pairedRoom = await pairQueuePlayersIntoRoom(activePlayer, ticket, selectedGame, 2);
-        if (pairedRoom) {
-          enterMatchedRoom(pairedRoom);
-          return;
-        }
-      } catch {
-        // Retry if candidate was claimed concurrently
-      } finally {
-        pairing = false;
-      }
-    };
+        const older = await findOtherWaitingQuickMatchRoom(selectedGame, myCode, activePlayer.id);
+        if (!older || cancelled || settled) return;
+        const otherIsOlder =
+          older.createdAt < myCreatedAt ||
+          (older.createdAt === myCreatedAt && older.roomCode < myCode);
+        if (!otherIsOlder) return;
 
-    const tryJoinLegacyRoom = async (other: MultiplayerRoom | null) => {
-      if (!other || cancelled || settled || pairing) return;
-      if (currentRoomRef.current?.roomCode === other.roomCode) return;
-      pairing = true;
-      try {
-        const joined = await joinFirestoreGameRoom(other.roomCode, selectedGame, activePlayer);
-        if (!cancelled && !settled) {
-          enterMatchedRoom(joined);
-        }
-      } catch {
-        // Retry if room filled concurrently
-      } finally {
-        pairing = false;
-      }
-    };
-
-    // 1. Listen for our own matchmakingQueue ticket receiving a matchedRoomCode from a peer
-    const unsubMyTicket = subscribeToMyMatchmakingTicket(
-      activePlayer.id,
-      async (matchedRoomCode) => {
-        if (cancelled || settled) return;
-        const matchedRoom = await fetchFirestoreGameRoomByCode(matchedRoomCode);
-        if (matchedRoom && !cancelled && !settled) {
-          enterMatchedRoom(matchedRoom);
-        }
-      }
-    );
-
-    // 2. Listen for any waiting players in the same game queue and pair immediately (0ms delay)
-    const unsubQueue = subscribeToMatchmakingQueueForGame(
-      selectedGame,
-      activePlayer.id,
-      (waitingTickets) => {
-        if (waitingTickets.length > 0) {
-          void tryPairWithQueueTicket(waitingTickets[0]);
-        }
-      }
-    );
-
-    // 3. Fast fallback poll covers edge cases where initial query or snapshot missed a concurrent join
-    const pollTimer = window.setInterval(async () => {
-      if (cancelled || settled || pairing) return;
-      try {
-        const waitingTicket = await findWaitingQueueTicketForGame(selectedGame, activePlayer.id);
-        if (waitingTicket) {
-          await tryPairWithQueueTicket(waitingTicket);
-          return;
-        }
-        const myCode = currentRoomRef.current?.roomCode || '';
-        const legacyRoom = await findOtherWaitingQuickMatchRoom(selectedGame, myCode, activePlayer.id);
-        if (legacyRoom) {
-          await tryJoinLegacyRoom(legacyRoom);
+        joining = true;
+        try {
+          await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
+          const joined = await joinFirestoreGameRoom(older.roomCode, selectedGame, activePlayer);
+          if (!cancelled && !settled) {
+            await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
+            enterMatchedRoom(joined);
+          }
+        } catch {
+          joining = false;
         }
       } catch {
         // Retry on next poll tick
       }
+    };
+
+    // Fast 1000ms verification + heartbeat keeps the single waiting room fresh and prevents split rooms
+    const pollTimer = window.setInterval(() => {
+      void mergeIntoOlderWaitingRoomIfPresent();
     }, 1000);
 
-    // 4. Keep our queue ticket heartbeat alive while user remains in queue
     const heartbeatTimer = window.setInterval(() => {
       if (!cancelled && !settled) {
-        void touchMatchmakingQueueHeartbeat(activePlayer.id);
-        if (currentRoomRef.current?.roomCode) {
-          void touchMatchmakingRoomHeartbeat(currentRoomRef.current.roomCode);
-        }
+        void touchMatchmakingRoomHeartbeat(myCode);
+        void touchMatchmakingQueueHeartbeat(`slot_${selectedGame}`);
       }
     }, 8000);
 
     const handleBeforeUnload = () => {
-      void leaveMatchmakingQueue(activePlayer.id);
+      void releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode);
+      void kickOrLeaveFirestoreRoom(myCode, activePlayer.id);
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
       cancelled = true;
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      unsubMyTicket();
-      unsubQueue();
       window.clearInterval(pollTimer);
       window.clearInterval(heartbeatTimer);
     };
   }, [
     isMatchmakingOpen,
     gameMode,
+    currentRoom?.roomCode,
+    currentRoom?.createdAt,
+    currentRoom?.status,
     selectedGame,
     activePlayer,
     attachFirestoreRoomSubscription,
@@ -1108,8 +1062,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // Multiplayer Room Actions (Firestore Authoritative + WS Fast-Path)
   // --------------------------------------------------------------------------
   const cleanupActiveRoomBeforeSwitch = async () => {
-    await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     const existing = currentRoomRef.current;
+    await releasePublicQueueSlotIfOwner(
+      selectedGameRef.current,
+      activePlayer.id,
+      existing?.roomCode
+    ).catch(() => {});
+    await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     if (existing) {
       if (roomUnsubRef.current) {
         roomUnsubRef.current();
@@ -1276,22 +1235,21 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       );
       setIsModeSelectOpen(false);
       setIsLobbyOpen(false);
+      setSubView('play');
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
 
-      if (matchedExisting && room) {
+      if (matchedExisting || room.status === 'in_game') {
         resetTtt(false);
         resetChess(false);
         resetLudo(false);
         resetQuiz();
         resetSnakeLadder(false);
         resetTruthDare();
-        setSubView('play');
-        setCurrentRoom(room);
-        attachFirestoreRoomSubscription(room.roomCode);
         setIsMatchmakingOpen(false);
         soundFx.playWin();
         showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
       } else {
-        setCurrentRoom(null);
         setIsMatchmakingOpen(true);
       }
     } catch (err: any) {
@@ -1302,6 +1260,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   const handlePlayAI = (diff: AIDifficulty) => {
+    void releasePublicQueueSlotIfOwner(
+      selectedGameRef.current,
+      activePlayer.id,
+      currentRoomRef.current?.roomCode
+    );
     void leaveMatchmakingQueue(activePlayer.id);
     if (roomUnsubRef.current) {
       roomUnsubRef.current();
@@ -1342,6 +1305,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   const handleLeaveRoom = async () => {
+    await releasePublicQueueSlotIfOwner(
+      selectedGameRef.current,
+      activePlayer.id,
+      currentRoomRef.current?.roomCode
+    ).catch(() => {});
     await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     if (roomUnsubRef.current) {
       roomUnsubRef.current();
@@ -1360,6 +1328,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   };
 
   const handleFallbackToAI = async () => {
+    await releasePublicQueueSlotIfOwner(
+      selectedGameRef.current,
+      activePlayer.id,
+      currentRoomRef.current?.roomCode
+    ).catch(() => {});
     await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     if (roomUnsubRef.current) {
       roomUnsubRef.current();
@@ -2681,31 +2654,18 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               )}
 
             {currentRoom && !currentRoom.isOpenGroup && currentRoom.status === 'waiting' && currentRoom.players.length < 2 && (
-              <div className="mb-4 p-3.5 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div className="text-amber-900 dark:text-amber-200">
-                  <span className="font-bold">Room #{currentRoom.roomCode}</span> ·{' '}
-                  {waitingSecondsLeft > 0
-                    ? `Waiting for 2nd player to join (${waitingSecondsLeft}s until AI Bot fallback)...`
-                    : 'No second player joined within 30s — AI Bot fallback is ready!'}
+              <div className="mb-4 p-3.5 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-2xl flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="text-blue-900 dark:text-blue-200">
+                  <span className="font-bold">Room #{currentRoom.roomCode}</span> · Waiting for opponent to join...
                 </div>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={() => setIsLobbyOpen(true)}
-                    className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-700 font-bold text-amber-800 dark:text-amber-200"
+                    className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-blue-300 dark:border-blue-700 font-bold text-blue-800 dark:text-blue-200"
                   >
                     Room Lobby
                   </button>
-                  {waitingSecondsLeft === 0 && (
-                    <button
-                      type="button"
-                      onClick={handleFallbackToAI}
-                      className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center gap-1.5 shadow-sm"
-                    >
-                      <Bot className="w-3.5 h-3.5" />
-                      <span>Play vs AI Bot</span>
-                    </button>
-                  )}
                 </div>
               </div>
             )}

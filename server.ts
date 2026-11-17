@@ -1245,6 +1245,14 @@ app.post(
   }
 );
 
+app.options('/api/media/:filename', (_req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.status(204).end();
+});
+
 app.get('/api/media/:filename', (req, res) => {
   const safeName = path.basename(req.params.filename || '');
   if (!safeName || !/^[a-zA-Z0-9_.\-]+$/.test(safeName)) {
@@ -1261,7 +1269,7 @@ app.get('/api/media/:filename', (req, res) => {
     ? 'video/quicktime'
     : safeName.endsWith('.mp4')
     ? 'video/mp4'
-    : 'application/octet-stream';
+    : 'video/mp4';
   if (fs.existsSync(metaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
@@ -1279,6 +1287,10 @@ app.get('/api/media/:filename', (req, res) => {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
   const range = req.headers.range;
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Accept-Ranges, Content-Length');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Cache-Control', 'public, max-age=86400');
 

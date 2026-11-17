@@ -43,7 +43,6 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
   const gameMeta = APP_CONFIG.games.find((g) => g.id === gameId);
   const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, '0');
   const secs = String(elapsedSeconds % 60).padStart(2, '0');
-  const showAiHint = elapsedSeconds >= 30;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/65 backdrop-blur-sm animate-in fade-in">
@@ -83,7 +82,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
             Searching for Player...
           </h4>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 max-w-xs">
-            Pairing you automatically the instant another online JIT player enters the queue.
+            Pairing you automatically into a shared live room as soon as the next online player joins.
           </p>
 
           <div className="mt-4 flex items-center gap-3">
@@ -104,12 +103,6 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
             )}
           </div>
         </div>
-
-        {showAiHint && (
-          <div className="mb-4 p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-            Still searching live queue — stays open until another player joins, or click below to play AI now.
-          </div>
-        )}
 
         <div className="space-y-2.5">
           <button

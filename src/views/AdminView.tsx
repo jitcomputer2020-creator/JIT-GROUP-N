@@ -2982,13 +2982,15 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                   {p.content}
                                 </p>
                                 {(() => {
-                                  const primaryMediaUrl = p.mediaUrls?.find(
-                                    (u) => typeof u === 'string' && u.trim().length > 0
-                                  );
-                                  if (!primaryMediaUrl || p.mediaType === 'none') return null;
+                                  const primaryMediaUrl =
+                                    p.mediaUrls?.find((u) => typeof u === 'string' && u.trim().length > 0) ||
+                                    (typeof p.videoUrl === 'string' && p.videoUrl.trim() ? p.videoUrl.trim() : undefined) ||
+                                    (typeof p.mediaUrl === 'string' && p.mediaUrl.trim() ? p.mediaUrl.trim() : undefined);
+                                  if (!primaryMediaUrl || (p.mediaType === 'none' && !p.videoUrl)) return null;
+                                  const isVideoMedia = p.mediaType === 'video' || Boolean(p.videoUrl);
                                   return (
                                     <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
-                                      {p.mediaType === 'video' ? (
+                                      {isVideoMedia ? (
                                         <ResilientVideo
                                           src={primaryMediaUrl}
                                           poster={p.thumbnailUrl}

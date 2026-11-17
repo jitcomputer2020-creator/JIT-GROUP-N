@@ -228,7 +228,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           <ResilientVideo
             key={currentReel.id}
             videoRef={videoRef}
-            src={currentReel.videoUrl}
+            src={currentReel.videoUrl || currentReel.mediaUrl}
             poster={currentReel.thumbnailUrl}
             controls={false}
             autoPlay

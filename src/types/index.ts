@@ -72,6 +72,8 @@ export interface Post {
   authorHandle?: string;
   content: string;
   mediaUrls?: string[];
+  mediaUrl?: string;
+  videoUrl?: string;
   mediaType?: 'image' | 'video' | 'none';
   thumbnailUrl?: string;
   createdAt: string;
@@ -120,6 +122,7 @@ export interface Reel {
   creatorName: string;
   creatorAvatar?: string;
   videoUrl: string;
+  mediaUrl?: string;
   thumbnailUrl?: string;
   caption: string;
   musicTitle?: string;

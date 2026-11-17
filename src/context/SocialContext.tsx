@@ -457,7 +457,11 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         for (const r of cloudReels) {
           const prevMatch = prevMap.get(r.id);
           const resolvedVideoUrl =
-            r.videoUrl && r.videoUrl.trim() ? r.videoUrl : prevMatch?.videoUrl || '';
+            (r.videoUrl && r.videoUrl.trim()) ||
+            (r.mediaUrl && r.mediaUrl.trim()) ||
+            prevMatch?.videoUrl ||
+            prevMatch?.mediaUrl ||
+            '';
           const candidate: Reel = { ...r, videoUrl: resolvedVideoUrl };
           if (!deletedReelIdsRef.current.has(r.id) && !isVideoContentExpired(candidate)) {
             const isLiked = currentUser?.id ? (r.likedBy || []).includes(currentUser.id) : false;
@@ -496,8 +500,15 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const byId = new Map<string, Post>();
         for (const p of cloudPosts) {
           const prevMatch = prevMap.get(p.id);
+          const fallbackUrl = p.videoUrl || p.mediaUrl || prevMatch?.videoUrl || prevMatch?.mediaUrl;
           const resolvedMediaUrls =
-            p.mediaUrls && p.mediaUrls.length > 0 ? p.mediaUrls : prevMatch?.mediaUrls;
+            p.mediaUrls && p.mediaUrls.length > 0
+              ? p.mediaUrls
+              : prevMatch?.mediaUrls && prevMatch.mediaUrls.length > 0
+              ? prevMatch.mediaUrls
+              : fallbackUrl
+              ? [fallbackUrl]
+              : undefined;
           const candidate: Post = { ...p, ...(resolvedMediaUrls ? { mediaUrls: resolvedMediaUrls } : {}) };
           if (!deletedPostIdsRef.current.has(p.id) && !isVideoContentExpired(candidate)) {
             const isLiked = currentUser?.id ? (p.likedBy || []).includes(currentUser.id) : false;
