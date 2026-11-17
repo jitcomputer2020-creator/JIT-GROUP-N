@@ -84,6 +84,8 @@ export interface RoomState {
   gameId: string;
   hostId: string;
   createdAt: number;
+  lastActivityAt?: number;
+  isPublicMatch?: boolean;
   status: 'waiting' | 'in_game' | 'finished';
   maxPlayers: number;
   isOpenGroup?: boolean;
@@ -107,8 +109,36 @@ export interface RoomState {
 const rooms = new Map<string, RoomState>();
 const socketToPlayer = new Map<WebSocket, { roomCode: string; playerId: string }>();
 
+function cleanupStaleServerRooms() {
+  const now = Date.now();
+  for (const [code, room] of rooms.entries()) {
+    const lastActive = room.lastActivityAt || room.createdAt || now;
+    const isDeadPublicQueue =
+      room.isPublicMatch &&
+      room.status === 'waiting' &&
+      room.players.length <= 1 &&
+      now - lastActive > 4 * 60 * 1000;
+    const isExpiredRoom = now - lastActive > 30 * 60 * 1000;
+    if (isDeadPublicQueue || isExpiredRoom || room.players.length === 0) {
+      rooms.delete(code);
+    }
+  }
+}
+
+setInterval(cleanupStaleServerRooms, 2 * 60 * 1000);
+
+function releaseSoloHostedServerRooms(playerId: string) {
+  if (!playerId) return;
+  for (const [code, room] of rooms.entries()) {
+    if (room.hostId === playerId && room.players.length <= 1 && (room.waitingPlayers?.length || 0) === 0) {
+      rooms.delete(code);
+    }
+  }
+}
+
 // Generates a collision-free 4-digit room code (1000 - 9999)
 function generate4DigitCode(): string {
+  cleanupStaleServerRooms();
   let code = '';
   let attempts = 0;
   do {
@@ -147,6 +177,7 @@ wss.on('connection', (ws: WebSocket) => {
         // 1. Create a 4-Digit Game Room
         case 'CREATE_ROOM': {
           const { gameId, maxPlayers = 2, player } = payload;
+          releaseSoloHostedServerRooms(player.id);
           const roomCode = generate4DigitCode();
 
           const newRoom: RoomState = {
@@ -154,6 +185,8 @@ wss.on('connection', (ws: WebSocket) => {
             gameId,
             hostId: player.id,
             createdAt: Date.now(),
+            lastActivityAt: Date.now(),
+            isPublicMatch: false,
             status: 'waiting',
             maxPlayers,
             players: [
@@ -206,7 +239,7 @@ wss.on('connection', (ws: WebSocket) => {
             return;
           }
 
-          if (room.gameId !== gameId) {
+          if (gameId && room.gameId !== gameId) {
             ws.send(
               JSON.stringify({
                 type: 'ERROR',
@@ -246,6 +279,7 @@ wss.on('connection', (ws: WebSocket) => {
             });
           }
 
+          room.lastActivityAt = Date.now();
           socketToPlayer.set(ws, { roomCode: cleanCode, playerId: player.id });
 
           broadcastToRoom(cleanCode, {
@@ -258,18 +292,23 @@ wss.on('connection', (ws: WebSocket) => {
         // 3. Quick Matchmaking (Play with Random Player)
         case 'QUICK_MATCH': {
           const { gameId, maxPlayers = 2, player } = payload;
+          cleanupStaleServerRooms();
+          releaseSoloHostedServerRooms(player.id);
 
-          // Find an existing open room for this game
+          // Find an existing open public waiting room for this game (oldest first)
           let matchedRoom: RoomState | null = null;
           for (const room of rooms.values()) {
             if (
+              room.isPublicMatch &&
+              !room.isOpenGroup &&
               room.gameId === gameId &&
               room.status === 'waiting' &&
               room.players.length < room.maxPlayers &&
               !room.players.some((p) => p.id === player.id)
             ) {
-              matchedRoom = room;
-              break;
+              if (!matchedRoom || room.createdAt < matchedRoom.createdAt) {
+                matchedRoom = room;
+              }
             }
           }
 
@@ -281,8 +320,9 @@ wss.on('connection', (ws: WebSocket) => {
               isHost: false,
               isReady: true,
             });
+            matchedRoom.lastActivityAt = Date.now();
 
-            // If capacity met, auto-start
+            // If capacity met, auto-start immediately
             if (matchedRoom.players.length >= matchedRoom.maxPlayers) {
               matchedRoom.status = 'in_game';
             }
@@ -301,6 +341,8 @@ wss.on('connection', (ws: WebSocket) => {
               gameId,
               hostId: player.id,
               createdAt: Date.now(),
+              lastActivityAt: Date.now(),
+              isPublicMatch: true,
               status: 'waiting',
               maxPlayers,
               players: [
@@ -1095,17 +1137,49 @@ if (!fs.existsSync(MEDIA_DIR)) {
   }
 }
 
+function isServerVideoExpired(item: {
+  createdAtMs?: unknown;
+  expiresAt?: unknown;
+  mediaType?: unknown;
+}): boolean {
+  if (item.mediaType === 'image' || item.mediaType === 'none') return false;
+  const now = Date.now();
+  const created = Number(item.createdAtMs);
+  const rawExp = Number(item.expiresAt);
+  const createdMs =
+    Number.isFinite(created) && created > 0
+      ? created < 1_000_000_000_000 && created > 1_000_000_000
+        ? created * 1000
+        : created
+      : undefined;
+  const expMs =
+    Number.isFinite(rawExp) && rawExp > 0
+      ? rawExp < 1_000_000_000_000 && rawExp > 1_000_000_000
+        ? rawExp * 1000
+        : rawExp
+      : undefined;
+
+  if (createdMs && createdMs > 1_000_000_000_000) {
+    const minFullExpiry = createdMs + VIDEO_EXPIRY_MS;
+    const effectiveExpiry = expMs && expMs > minFullExpiry ? expMs : minFullExpiry;
+    return now >= effectiveExpiry;
+  }
+  if (expMs && expMs > 1_000_000_000_000) {
+    return now >= expMs;
+  }
+  return false;
+}
+
 function purgeExpiredServerMedia() {
   try {
     if (!fs.existsSync(MEDIA_DIR)) return;
     const files = fs.readdirSync(MEDIA_DIR);
-    const now = Date.now();
     for (const f of files) {
       if (!f.endsWith('.meta.json')) continue;
       const metaPath = path.join(MEDIA_DIR, f);
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        if (typeof meta.expiresAt === 'number' && meta.expiresAt <= now) {
+        if (isServerVideoExpired(meta)) {
           const mediaPath = path.join(MEDIA_DIR, String(meta.filename || ''));
           if (meta.filename && fs.existsSync(mediaPath)) fs.unlinkSync(mediaPath);
           fs.unlinkSync(metaPath);
@@ -1144,12 +1218,18 @@ app.post(
       const ext = extMap[mime] || (mime.startsWith('video/') ? 'mp4' : 'bin');
       const mediaId = `med_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const filename = `${mediaId}.${ext}`;
-      const expiresAt = Number(req.headers['x-expires-at']) || Date.now() + VIDEO_EXPIRY_MS;
+      const nowMs = Date.now();
+      const parsedHeaderExpiry = Number(req.headers['x-expires-at']);
+      const minFullExpiry = nowMs + VIDEO_EXPIRY_MS;
+      const expiresAt =
+        Number.isFinite(parsedHeaderExpiry) && parsedHeaderExpiry >= minFullExpiry
+          ? parsedHeaderExpiry
+          : minFullExpiry;
 
       fs.writeFileSync(path.join(MEDIA_DIR, filename), buf);
       fs.writeFileSync(
         path.join(MEDIA_DIR, `${filename}.meta.json`),
-        JSON.stringify({ id: mediaId, filename, mime, size: buf.length, createdAtMs: Date.now(), expiresAt })
+        JSON.stringify({ id: mediaId, filename, mime, size: buf.length, createdAtMs: nowMs, expiresAt })
       );
 
       return res.json({
@@ -1175,11 +1255,17 @@ app.get('/api/media/:filename', (req, res) => {
   if (!fs.existsSync(filePath)) {
     return res.status(404).send('Media not found or expired');
   }
-  let mime = 'application/octet-stream';
+  let mime = safeName.endsWith('.webm')
+    ? 'video/webm'
+    : safeName.endsWith('.mov')
+    ? 'video/quicktime'
+    : safeName.endsWith('.mp4')
+    ? 'video/mp4'
+    : 'application/octet-stream';
   if (fs.existsSync(metaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-      if (typeof meta.expiresAt === 'number' && meta.expiresAt <= Date.now()) {
+      if (isServerVideoExpired(meta)) {
         fs.unlinkSync(filePath);
         fs.unlinkSync(metaPath);
         return res.status(404).send('Media expired');
@@ -1218,9 +1304,8 @@ app.get('/api/media/:filename', (req, res) => {
 
 // Public Posts & Announcements Endpoints
 app.get('/api/posts', (req, res) => {
-  const now = Date.now();
   const activePosts = readPostsData().filter(
-    (p: any) => !(p.mediaType === 'video' && typeof p.expiresAt === 'number' && p.expiresAt <= now)
+    (p: any) => !(p.mediaType === 'video' && isServerVideoExpired(p))
   );
   return res.json({ posts: activePosts });
 });
@@ -1230,26 +1315,24 @@ app.post('/api/posts/sync', (req, res) => {
   if (!clientPosts) {
     return res.status(400).json({ error: 'posts array required' });
   }
-  const now = Date.now();
   const serverPosts = readPostsData();
   const adminBroadcastPosts = serverPosts.filter((p: any) => p.authorId === 'usr_jit_admin_system');
   const clientIds = new Set(clientPosts.map((p: any) => p.id));
   const merged = [
     ...adminBroadcastPosts.filter((ap: any) => !clientIds.has(ap.id)),
     ...clientPosts,
-  ].filter((p: any) => !(p.mediaType === 'video' && typeof p.expiresAt === 'number' && p.expiresAt <= now));
+  ].filter((p: any) => !(p.mediaType === 'video' && isServerVideoExpired(p)));
   writePostsData(merged);
   return res.json({ success: true, posts: merged });
 });
 
 app.get('/api/announcements', async (req, res) => {
-  const now = Date.now();
   const local = readAnnouncementsData();
   const cloud = await fetchNodeAnnouncements().catch(() => []);
   const byId = new Map<string, any>();
   for (const a of [...cloud, ...local]) {
     if (!a || !a.id) continue;
-    if (a.mediaType === 'video' && typeof a.expiresAt === 'number' && a.expiresAt <= now) continue;
+    if (a.mediaType === 'video' && isServerVideoExpired(a)) continue;
     if (!byId.has(a.id)) byId.set(a.id, a);
   }
   const merged = Array.from(byId.values()).sort(
@@ -2135,13 +2218,12 @@ app.delete('/api/admin/matches/:matchId', async (req, res) => {
 // Admin: Global Announcement Broadcast System (with Photo & Video Attachments + Firestore Sync)
 app.get('/api/admin/announcements', async (req, res) => {
   if (!requireAdminSession(req, res)) return;
-  const now = Date.now();
   const local = readAnnouncementsData();
   const cloud = await fetchNodeAnnouncements().catch(() => []);
   const byId = new Map<string, any>();
   for (const a of [...cloud, ...local]) {
     if (!a || !a.id) continue;
-    if (a.mediaType === 'video' && typeof a.expiresAt === 'number' && a.expiresAt <= now) continue;
+    if (a.mediaType === 'video' && isServerVideoExpired(a)) continue;
     if (!byId.has(a.id)) byId.set(a.id, a);
   }
   const merged = Array.from(byId.values()).sort(

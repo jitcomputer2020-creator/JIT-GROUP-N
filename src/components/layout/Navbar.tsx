@@ -88,7 +88,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         return;
       }
     }
-    onNavigate('home');
+    onNavigate(isAuthenticated ? 'home' : 'login');
   };
 
   useEffect(() => {
@@ -202,28 +202,31 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         </div>
 
-        {/* Zone 2: Navigation Links (Desktop) */}
-        <nav className="hidden lg:flex items-center gap-0.5 xl:gap-1.5">
-          {navLinks.map((link) => {
-            const isActive = activeTab === link.id;
-            return (
-              <button
-                key={link.id}
-                onClick={() => onNavigate(link.id)}
-                className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap transition-all ${
-                  isActive
-                    ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/60'
-                }`}
-              >
-                {link.label}
-              </button>
-            );
-          })}
-        </nav>
+        {/* Zone 2: Navigation Links (Desktop - Authenticated Only) */}
+        {isAuthenticated && (
+          <nav className="hidden lg:flex items-center gap-0.5 xl:gap-1.5">
+            {navLinks.map((link) => {
+              const isActive = activeTab === link.id;
+              return (
+                <button
+                  key={link.id}
+                  onClick={() => onNavigate(link.id)}
+                  className={`px-2.5 py-1.5 text-xs font-semibold rounded-lg whitespace-nowrap transition-all ${
+                    isActive
+                      ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-50 dark:hover:bg-slate-800/60'
+                  }`}
+                >
+                  {link.label}
+                </button>
+              );
+            })}
+          </nav>
+        )}
 
-        {/* Zone 2.5: Live User Search Input (Tablet & Desktop) */}
-        <div ref={searchBoxRef} className="hidden sm:block relative w-44 md:w-52 xl:w-64 shrink">
+        {/* Zone 2.5: Live User Search Input (Tablet & Desktop - Authenticated Only) */}
+        {isAuthenticated && (
+          <div ref={searchBoxRef} className="hidden sm:block relative w-44 md:w-52 xl:w-64 shrink">
           <div className="relative flex items-center">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
             <input
@@ -351,22 +354,25 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             </div>
           )}
-        </div>
+          </div>
+        )}
 
         {/* Zone 3: Interactive Affordances & User Controls */}
         <div className="flex items-center gap-1 sm:gap-2 shrink-0">
           {/* Mobile / Quick Global Search Trigger */}
-          <button
-            onClick={onOpenSearch}
-            className="sm:hidden min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            title="Search JIT GROUP (Ctrl+K)"
-            aria-label="Search"
-          >
-            <Search className="w-4 h-4" />
-          </button>
+          {isAuthenticated && (
+            <button
+              onClick={onOpenSearch}
+              className="sm:hidden min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              title="Search JIT GROUP (Ctrl+K)"
+              aria-label="Search"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+          )}
 
           {/* Reward Points Pill */}
-          {currentUser && (
+          {isAuthenticated && currentUser && (
             <button
               onClick={() => onNavigate('wallet')}
               className="flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 min-h-[36px] py-1 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/40 rounded-xl hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
@@ -394,19 +400,21 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           {/* Notifications Trigger */}
-          <button
-            onClick={onOpenNotifications}
-            className="relative min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-            title="Notifications"
-            aria-label="Notifications"
-          >
-            <Bell className="w-4 h-4" />
-            {badgeCount > 0 && (
-              <span className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-blue-600 text-white text-[9px] font-bold flex items-center justify-center ring-2 ring-white dark:ring-slate-900">
-                {badgeCount > 9 ? '9+' : badgeCount}
-              </span>
-            )}
-          </button>
+          {isAuthenticated && (
+            <button
+              onClick={onOpenNotifications}
+              className="relative min-w-[40px] min-h-[40px] flex items-center justify-center p-2 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              title="Notifications"
+              aria-label="Notifications"
+            >
+              <Bell className="w-4 h-4" />
+              {badgeCount > 0 && (
+                <span className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-blue-600 text-white text-[9px] font-bold flex items-center justify-center ring-2 ring-white dark:ring-slate-900">
+                  {badgeCount > 9 ? '9+' : badgeCount}
+                </span>
+              )}
+            </button>
+          )}
 
           {/* User Profile or Login Trigger */}
           {isAuthenticated && currentUser ? (

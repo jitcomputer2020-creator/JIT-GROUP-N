@@ -12,6 +12,7 @@ import {
   VolumeX,
   Maximize2,
   Minimize2,
+  RotateCcw,
 } from 'lucide-react';
 import { resolveLocalMediaUrl } from '../../services/mediaStorage';
 
@@ -39,6 +40,19 @@ function formatTime(sec: number): string {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+function inferVideoMimeType(url: string): string {
+  const lower = url.toLowerCase();
+  if (lower.startsWith('data:video/')) {
+    const match = lower.match(/^data:(video\/[a-z0-9.+-]+);/);
+    return match?.[1] || 'video/mp4';
+  }
+  const cleanPath = lower.split('?')[0].split('#')[0];
+  if (cleanPath.endsWith('.webm')) return 'video/webm';
+  if (cleanPath.endsWith('.ogv') || cleanPath.endsWith('.ogg')) return 'video/ogg';
+  if (cleanPath.endsWith('.mov')) return 'video/quicktime';
+  return 'video/mp4';
+}
+
 export const ResilientVideo: React.FC<ResilientVideoProps> = ({
   src,
   poster,
@@ -58,7 +72,10 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
   const [resolvedSrc, setResolvedSrc] = useState<string>(() =>
     cleanSrc && !cleanSrc.startsWith('idb://') ? cleanSrc : ''
   );
+  const [resolvingLocal, setResolvingLocal] = useState<boolean>(() => cleanSrc.startsWith('idb://'));
   const [failed, setFailed] = useState(false);
+  const [useDirectSrcFallback, setUseDirectSrcFallback] = useState(false);
+  const [retrySeed, setRetrySeed] = useState(0);
 
   const internalVideoRef = useRef<HTMLVideoElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -80,26 +97,31 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
     let cancelled = false;
     let createdObjectUrl = '';
     setFailed(false);
+    setUseDirectSrcFallback(false);
     setCurrentTime(0);
     setDuration(0);
     setIsPlaying(autoPlay);
 
     if (!cleanSrc) {
+      setResolvingLocal(false);
       setResolvedSrc('');
       return;
     }
 
     if (!cleanSrc.startsWith('idb://')) {
+      setResolvingLocal(false);
       setResolvedSrc(cleanSrc);
       return;
     }
 
+    setResolvingLocal(true);
     resolveLocalMediaUrl(cleanSrc)
       .then((url) => {
         if (cancelled) {
           if (url.startsWith('blob:')) URL.revokeObjectURL(url);
           return;
         }
+        setResolvingLocal(false);
         if (url.startsWith('blob:')) {
           createdObjectUrl = url;
         }
@@ -109,7 +131,10 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
         setResolvedSrc(url);
       })
       .catch(() => {
-        if (!cancelled) setFailed(true);
+        if (!cancelled) {
+          setResolvingLocal(false);
+          setFailed(true);
+        }
       });
 
     return () => {
@@ -118,11 +143,22 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
         URL.revokeObjectURL(createdObjectUrl);
       }
     };
-  }, [cleanSrc, autoPlay]);
+  }, [cleanSrc, autoPlay, retrySeed]);
 
   useEffect(() => {
     setIsMuted(muted);
   }, [muted]);
+
+  useEffect(() => {
+    const el = internalVideoRef.current;
+    if (el && resolvedSrc) {
+      try {
+        el.load();
+      } catch {
+        // Ignore load errors
+      }
+    }
+  }, [resolvedSrc, useDirectSrcFallback]);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -131,6 +167,23 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
     document.addEventListener('fullscreenchange', onFsChange);
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
+
+  const handleVideoDecodeError = () => {
+    // First fallback: bind direct src without restrictive <source type=...> in case browser container MIME differs
+    if (!useDirectSrcFallback && resolvedSrc) {
+      setUseDirectSrcFallback(true);
+      return;
+    }
+    setFailed(true);
+    onError?.();
+  };
+
+  const handleRetryVideo = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFailed(false);
+    setUseDirectSrcFallback(false);
+    setRetrySeed((n) => n + 1);
+  };
 
   const togglePlay = async (e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -189,33 +242,44 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
   if (failed || !resolvedSrc) {
     return (
       <div
-        className={`relative w-full min-h-[180px] flex flex-col items-center justify-center bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 p-4 text-center ${containerClassName}`}
+        className={`relative w-full min-h-[190px] flex flex-col items-center justify-center bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 p-4 text-center ${containerClassName}`}
       >
         {poster && (
           <img
             src={poster}
-            alt="Video preview"
-            className="absolute inset-0 w-full h-full object-cover opacity-30"
+            alt="Video thumbnail preview"
+            className="absolute inset-0 w-full h-full object-cover opacity-35"
           />
         )}
-        <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/75 backdrop-blur-sm px-4 py-3 rounded-2xl border border-white/10">
+        <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/70 backdrop-blur-sm px-4 py-3 rounded-2xl border border-white/10">
           <Video className="w-6 h-6 text-blue-400" />
           <p className="text-xs font-semibold text-white">
-            {cleanSrc?.startsWith('idb://') && !failed
-              ? 'Loading video...'
-              : 'Video unavailable or expired'}
+            {resolvingLocal ? 'Loading video preview...' : 'Video preview unavailable'}
           </p>
+          {!resolvingLocal && cleanSrc && (
+            <button
+              type="button"
+              onClick={handleRetryVideo}
+              className="mt-0.5 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-[11px] font-semibold text-white transition-colors"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Retry
+            </button>
+          )}
         </div>
       </div>
     );
   }
 
+  const videoMimeType = inferVideoMimeType(resolvedSrc);
+
   // Raw passthrough mode (used inside ReelsView & small loop thumbnails with external overlays)
   if (!controls) {
     return (
       <video
+        key={`${resolvedSrc}_${useDirectSrcFallback ? 'direct' : 'source'}`}
         ref={setMergedVideoRef}
-        src={resolvedSrc}
+        src={useDirectSrcFallback ? resolvedSrc : undefined}
         poster={poster || undefined}
         controls={false}
         autoPlay={autoPlay}
@@ -224,12 +288,13 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
         playsInline={playsInline}
         preload="metadata"
         onLoadedData={onLoadedData}
-        onError={() => {
-          setFailed(true);
-          onError?.();
-        }}
+        onError={handleVideoDecodeError}
         className={className}
-      />
+      >
+        {!useDirectSrcFallback && (
+          <source src={resolvedSrc} type={videoMimeType} />
+        )}
+      </video>
     );
   }
 
@@ -244,8 +309,9 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
       } ${containerClassName}`}
     >
       <video
+        key={`${resolvedSrc}_${useDirectSrcFallback ? 'direct' : 'source'}`}
         ref={setMergedVideoRef}
-        src={resolvedSrc}
+        src={useDirectSrcFallback ? resolvedSrc : undefined}
         poster={poster || undefined}
         controls={false}
         autoPlay={autoPlay}
@@ -266,12 +332,13 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
           }
           onLoadedData?.();
         }}
-        onError={() => {
-          setFailed(true);
-          onError?.();
-        }}
+        onError={handleVideoDecodeError}
         className={`w-full block mx-auto ${isFullscreen ? 'max-h-[calc(100vh-64px)] object-contain' : className}`}
-      />
+      >
+        {!useDirectSrcFallback && (
+          <source src={resolvedSrc} type={videoMimeType} />
+        )}
+      </video>
 
       {/* Center Play Overlay when paused */}
       {!isPlaying && (

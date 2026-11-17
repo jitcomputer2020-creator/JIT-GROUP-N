@@ -16,6 +16,8 @@ import { SearchModal } from './components/modals/SearchModal';
 import { NotificationsDrawer } from './components/modals/NotificationsDrawer';
 import { StoryViewerModal } from './components/modals/StoryViewerModal';
 
+import { Loader2 } from 'lucide-react';
+import { APP_CONFIG } from './constants/branding';
 import { SocialProvider } from './context/SocialContext';
 
 // Views
@@ -40,10 +42,11 @@ function isAdminPathActive(): boolean {
 }
 
 const MainLayout: React.FC = () => {
-  const { currentUser, isAuthenticated } = useAuth();
-  const [activeTab, setActiveTab] = useState<NavTab>(() =>
-    isAdminPathActive() ? 'admin' : 'home'
-  );
+  const { isAuthenticated, isAuthLoading } = useAuth();
+  const [activeTab, setActiveTab] = useState<NavTab>(() => {
+    if (isAdminPathActive()) return 'admin';
+    return isAuthenticated ? 'home' : 'login';
+  });
 
   // Modal states
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -55,12 +58,25 @@ const MainLayout: React.FC = () => {
     const handlePopState = () => {
       setActiveTab((prev) => {
         if (isAdminPathActive()) return 'admin';
-        return prev === 'admin' ? 'home' : prev;
+        if (prev === 'admin') return isAuthenticated ? 'home' : 'login';
+        return prev;
       });
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [isAuthenticated]);
+
+  // Automatic route guard once auth verification finishes
+  useEffect(() => {
+    if (isAuthLoading) return;
+    if (activeTab === 'admin' || isAdminPathActive()) return;
+
+    if (isAuthenticated && (activeTab === 'login' || activeTab === 'register')) {
+      setActiveTab('home');
+    } else if (!isAuthenticated && activeTab !== 'login' && activeTab !== 'register') {
+      setActiveTab('login');
+    }
+  }, [isAuthenticated, isAuthLoading, activeTab]);
 
   const handleOpenAdmin = () => {
     if (typeof window !== 'undefined' && !isAdminPathActive()) {
@@ -74,7 +90,7 @@ const MainLayout: React.FC = () => {
     if (typeof window !== 'undefined' && isAdminPathActive()) {
       window.history.pushState(null, '', '/');
     }
-    setActiveTab('home');
+    setActiveTab(isAuthenticated ? 'home' : 'login');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -83,12 +99,37 @@ const MainLayout: React.FC = () => {
       handleOpenAdmin();
       return;
     }
+    if (!isAuthenticated && tab !== 'login' && tab !== 'register') {
+      setActiveTab('login');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
     if (typeof window !== 'undefined' && isAdminPathActive()) {
       window.history.pushState(null, '', '/');
     }
     setActiveTab(tab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  const isAdminScreen = activeTab === 'admin';
+
+  // Minimal centered splash/loading screen while Firebase onAuthStateChanged verifies persistence
+  if (isAuthLoading && !isAdminScreen) {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-slate-950 flex flex-col items-center justify-center p-6 transition-colors duration-200">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-14 h-14 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-lg p-2 flex items-center justify-center">
+            <img
+              src={APP_CONFIG.logoUrl}
+              alt={APP_CONFIG.name}
+              className="w-full h-full object-contain"
+            />
+          </div>
+          <Loader2 className="w-6 h-6 animate-spin text-blue-600 dark:text-blue-400" />
+        </div>
+      </div>
+    );
+  }
 
   const renderActiveView = () => {
     switch (activeTab) {
@@ -122,12 +163,15 @@ const MainLayout: React.FC = () => {
       case 'admin':
         return <AdminView onExitAdmin={handleExitAdmin} />;
       default:
-        return <HomeView onNavigate={handleNavigate} onOpenStoryViewer={(s) => setViewingStory(s)} />;
+        return isAuthenticated ? (
+          <HomeView onNavigate={handleNavigate} onOpenStoryViewer={(s) => setViewingStory(s)} />
+        ) : (
+          <LoginView onNavigate={handleNavigate} />
+        );
     }
   };
 
   const isAuthScreen = activeTab === 'login' || activeTab === 'register';
-  const isAdminScreen = activeTab === 'admin';
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200 overflow-x-clip">
@@ -143,8 +187,8 @@ const MainLayout: React.FC = () => {
 
       {/* 2. Responsive 3-Column Layout Container */}
       <div className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 flex gap-6 pb-20 sm:pb-24 lg:pb-8">
-        {/* Left Desktop Sidebar (Desktop only) */}
-        {!isAuthScreen && !isAdminScreen && (
+        {/* Left Desktop Sidebar (Desktop only, when authenticated) */}
+        {isAuthenticated && !isAuthScreen && !isAdminScreen && (
           <div className="hidden lg:block">
             <Sidebar
               activeTab={activeTab}
@@ -159,14 +203,16 @@ const MainLayout: React.FC = () => {
           {renderActiveView()}
         </main>
 
-        {/* Right Desktop Widgets (Only on large screens, not on Reels, Auth, or Admin views) */}
-        {activeTab !== 'reels' && !isAuthScreen && !isAdminScreen && (
+        {/* Right Desktop Widgets (Only on large screens, when authenticated, not on Reels/Auth/Admin) */}
+        {isAuthenticated && activeTab !== 'reels' && !isAuthScreen && !isAdminScreen && (
           <RightWidgetPanel onNavigate={handleNavigate} />
         )}
       </div>
 
-      {/* 3. Mobile Fixed Bottom Navigation */}
-      {!isAdminScreen && <BottomNav activeTab={activeTab} onNavigate={handleNavigate} />}
+      {/* 3. Mobile Fixed Bottom Navigation (only when authenticated) */}
+      {isAuthenticated && !isAdminScreen && (
+        <BottomNav activeTab={activeTab} onNavigate={handleNavigate} />
+      )}
 
       {/* 4. Global Modals and Slide-overs */}
       <AuthModal

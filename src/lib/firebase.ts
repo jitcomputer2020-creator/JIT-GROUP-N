@@ -8,7 +8,16 @@
  */
 
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  setPersistence,
+  browserLocalPersistence,
+  onAuthStateChanged,
+  User as FirebaseAuthUser,
+} from 'firebase/auth';
 import {
   getStorage,
   ref as storageRef,
@@ -27,6 +36,7 @@ import {
   updateDoc,
   deleteDoc,
   onSnapshot,
+  runTransaction,
   writeBatch,
   collection,
   collectionGroup,
@@ -63,6 +73,27 @@ const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const storage = getStorage(app);
+
+export const authPersistenceReady: Promise<void> =
+  typeof window !== 'undefined'
+    ? setPersistence(auth, browserLocalPersistence).catch((err) => {
+        console.warn('Firebase browserLocalPersistence notice:', err);
+      })
+    : Promise.resolve();
+
+export function subscribeToFirebaseAuthState(
+  callback: (user: FirebaseAuthUser | null) => void
+): Unsubscribe {
+  return onAuthStateChanged(auth, callback);
+}
+
+export async function signOutFirebaseAuth(): Promise<void> {
+  try {
+    await signOut(auth);
+  } catch {
+    // Non-fatal offline sign-out fallback
+  }
+}
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
 export const VIDEO_EXPIRY_MS = 40 * 24 * 60 * 60 * 1000; // 40 days auto-delete for videos & reels
@@ -1346,17 +1377,125 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   };
 }
 
+const HOSTED_ROOM_STORAGE_PREFIX = 'jit_hosted_room_';
+const PUBLIC_QUEUE_STALE_MS = 3 * 60 * 1000;
+const PRIVATE_ROOM_STALE_MS = 20 * 60 * 1000;
+
+function getStoredHostedRoomCode(hostId: string): string | null {
+  if (typeof window === 'undefined' || !hostId) return null;
+  try {
+    const val = window.localStorage.getItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`);
+    return val && /^\d{4}$/.test(val) ? val : null;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredHostedRoomCode(hostId: string, roomCode: string | null): void {
+  if (typeof window === 'undefined' || !hostId) return;
+  try {
+    if (roomCode && /^\d{4}$/.test(roomCode)) {
+      window.localStorage.setItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`, roomCode);
+    } else {
+      window.localStorage.removeItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`);
+    }
+  } catch {
+    // Ignore storage quota / private mode issues
+  }
+}
+
+function getRoomUpdatedMs(data: Record<string, any>): number {
+  if (data.updatedAt && typeof data.updatedAt.toMillis === 'function') {
+    return data.updatedAt.toMillis();
+  }
+  if (data.createdAt && typeof data.createdAt.toMillis === 'function') {
+    return data.createdAt.toMillis();
+  }
+  return Date.now();
+}
+
+function isRoomDocStale(data: Record<string, any>, thresholdMs: number): boolean {
+  const updatedMs = getRoomUpdatedMs(data);
+  return Date.now() - updatedMs > thresholdMs;
+}
+
+export async function releasePreviousHostedRoom(
+  hostId: string,
+  preserveRoomCode?: string
+): Promise<void> {
+  if (!hostId) return;
+  const previousCode = getStoredHostedRoomCode(hostId);
+  if (!previousCode || previousCode === preserveRoomCode) {
+    return;
+  }
+  setStoredHostedRoomCode(hostId, null);
+  try {
+    const prevRef = doc(db, 'gameRooms', previousCode);
+    const snap = await getDoc(prevRef);
+    if (!snap.exists()) return;
+    const parsed = parseRoomSnapshotData(snap.data());
+    const totalMembers = parsed.players.length + (parsed.waitingPlayers?.length || 0);
+    if (parsed.hostId === hostId && totalMembers <= 1) {
+      await deleteDoc(prevRef);
+    } else if (
+      parsed.players.some((p) => p.id === hostId) ||
+      (parsed.waitingPlayers || []).some((p) => p.id === hostId)
+    ) {
+      await kickOrLeaveFirestoreRoom(previousCode, hostId);
+    }
+  } catch {
+    // Best-effort cleanup of previous room
+  }
+}
+
+async function pickAvailableRoomCodeAndCleanStale(hostId: string): Promise<string> {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const candidate = Math.floor(1000 + Math.random() * 9000).toString();
+    try {
+      const candidateRef = doc(db, 'gameRooms', candidate);
+      const snap = await getDocFromServer(candidateRef);
+      if (!snap.exists()) {
+        return candidate;
+      }
+      const existingData = snap.data();
+      const playerCount = Number(existingData.playerCount || 1);
+      const canRecycle =
+        existingData.status === 'finished' ||
+        (existingData.hostId === hostId && playerCount <= 1) ||
+        (Boolean(existingData.isPublicMatch) &&
+          !Boolean(existingData.isOpenGroup) &&
+          existingData.status === 'waiting' &&
+          playerCount <= 1 &&
+          isRoomDocStale(existingData, PUBLIC_QUEUE_STALE_MS)) ||
+        (playerCount <= 1 && isRoomDocStale(existingData, PRIVATE_ROOM_STALE_MS)) ||
+        isRoomDocStale(existingData, PRIVATE_ROOM_STALE_MS);
+
+      if (canRecycle) {
+        try {
+          await deleteDoc(candidateRef);
+          return candidate;
+        } catch {
+          // Another client may own or be deleting it; try another code
+        }
+      }
+    } catch {
+      // Transient read error; try next candidate
+    }
+  }
+  return Math.floor(1000 + Math.random() * 9000).toString();
+}
+
 export async function createFirestoreGameRoom(
   gameId: string,
   maxPlayers: number,
   hostPlayer: { id: string; name: string; avatar: string },
   isPublicMatchOrOptions:
     | boolean
-    | { isPublicMatch?: boolean; isOpenGroup?: boolean; activeSeatLimit?: number } = false
+    | { isPublicMatch?: boolean; isOpenGroup?: boolean; activeSeatLimit?: number; recycleRoomCode?: string } = false
 ): Promise<MultiplayerRoom> {
   const opts =
     typeof isPublicMatchOrOptions === 'boolean'
-      ? { isPublicMatch: isPublicMatchOrOptions, isOpenGroup: false, activeSeatLimit: undefined }
+      ? { isPublicMatch: isPublicMatchOrOptions, isOpenGroup: false, activeSeatLimit: undefined, recycleRoomCode: undefined }
       : isPublicMatchOrOptions || {};
   const isPublicMatch = Boolean(opts.isPublicMatch);
   const isOpenGroup = Boolean(opts.isOpenGroup);
@@ -1367,23 +1506,11 @@ export async function createFirestoreGameRoom(
     ? Math.min(8, Math.max(2, opts.activeSeatLimit || (gameId === 'truth_dare' ? 6 : gameId === 'ludo' ? 4 : 2)))
     : safeMax;
 
-  let chosenCode = '';
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const candidate = Math.floor(1000 + Math.random() * 9000).toString();
-    try {
-      const snap = await getDocFromServer(doc(db, 'gameRooms', candidate));
-      if (!snap.exists()) {
-        chosenCode = candidate;
-        break;
-      }
-    } catch {
-      chosenCode = candidate;
-      break;
-    }
+  // Automatically release any prior orphaned room hosted by this user so room limits are never hit
+  if (opts.recycleRoomCode) {
+    await kickOrLeaveFirestoreRoom(opts.recycleRoomCode, hostPlayer.id).catch(() => {});
   }
-  if (!chosenCode) {
-    chosenCode = Math.floor(1000 + Math.random() * 9000).toString();
-  }
+  await releasePreviousHostedRoom(hostPlayer.id);
 
   const players: RoomPlayer[] = [
     {
@@ -1399,58 +1526,82 @@ export async function createFirestoreGameRoom(
 
   const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'in_game' : 'waiting';
 
-  const payload = {
-    roomCode: chosenCode,
-    gameId,
-    hostId: hostPlayer.id,
-    status: initialStatus,
-    maxPlayers: safeMax,
-    playerCount: 1,
-    isPublicMatch,
-    isOpenGroup,
-    activeSeatLimit: safeSeatLimit,
-    playersJson: JSON.stringify(players),
-    waitingPlayersJson: '[]',
-    reactionsJson: '[]',
-    mutedVoiceIdsJson: '[]',
-    mutedChatIdsJson: '[]',
-    gameStateJson: '{}',
-    messagesJson: '[]',
-    moveAction: 'ROOM_CREATED',
-    currentTurn: hostPlayer.id,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  };
+  let lastErr: any = null;
+  for (let createAttempt = 0; createAttempt < 4; createAttempt++) {
+    const chosenCode = await pickAvailableRoomCodeAndCleanStale(hostPlayer.id);
+    const payload = {
+      roomCode: chosenCode,
+      gameId,
+      hostId: hostPlayer.id,
+      status: initialStatus,
+      maxPlayers: safeMax,
+      playerCount: 1,
+      isPublicMatch,
+      isOpenGroup,
+      activeSeatLimit: safeSeatLimit,
+      playersJson: JSON.stringify(players),
+      waitingPlayersJson: '[]',
+      reactionsJson: '[]',
+      mutedVoiceIdsJson: '[]',
+      mutedChatIdsJson: '[]',
+      gameStateJson: '{}',
+      messagesJson: '[]',
+      moveAction: 'ROOM_CREATED',
+      currentTurn: hostPlayer.id,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
 
-  try {
-    await setDoc(doc(db, 'gameRooms', chosenCode), payload);
-  } catch (err: any) {
-    if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.CREATE, `gameRooms/${chosenCode}`);
+    try {
+      const created = await runTransaction(db, async (tx) => {
+        const roomRef = doc(db, 'gameRooms', chosenCode);
+        const existingSnap = await tx.get(roomRef);
+        if (existingSnap.exists()) {
+          throw new Error('ROOM_CODE_COLLISION');
+        }
+        tx.set(roomRef, payload);
+        return true;
+      });
+      if (created) {
+        setStoredHostedRoomCode(hostPlayer.id, chosenCode);
+        return {
+          roomCode: chosenCode,
+          gameId,
+          hostId: hostPlayer.id,
+          createdAt: Date.now(),
+          status: initialStatus,
+          maxPlayers: safeMax,
+          isPublicMatch,
+          isOpenGroup,
+          activeSeatLimit: safeSeatLimit,
+          players,
+          waitingPlayers: [],
+          reactions: [],
+          mutedVoiceIds: [],
+          mutedChatIds: [],
+          gameState: null,
+          currentTurn: hostPlayer.id,
+          messages: [],
+          callState: null,
+        };
+      }
+    } catch (err: any) {
+      lastErr = err;
+      if (err?.message === 'ROOM_CODE_COLLISION') {
+        continue;
+      }
+      if (err?.code === 'permission-denied' && createAttempt < 3) {
+        // Retry with another unused 4-digit code if concurrent creation caused update check failure
+        continue;
+      }
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.CREATE, `gameRooms/${chosenCode}`);
+      }
+      throw err;
     }
-    throw err;
   }
 
-  return {
-    roomCode: chosenCode,
-    gameId,
-    hostId: hostPlayer.id,
-    createdAt: Date.now(),
-    status: initialStatus,
-    maxPlayers: safeMax,
-    isPublicMatch,
-    isOpenGroup,
-    activeSeatLimit: safeSeatLimit,
-    players,
-    waitingPlayers: [],
-    reactions: [],
-    mutedVoiceIds: [],
-    mutedChatIds: [],
-    gameState: null,
-    currentTurn: hostPlayer.id,
-    messages: [],
-    callState: null,
-  };
+  throw lastErr || new Error('Could not allocate an unused 4-digit room code. Please retry.');
 }
 
 export async function joinFirestoreGameRoom(
@@ -1464,128 +1615,131 @@ export async function joinFirestoreGameRoom(
   }
 
   const roomRef = doc(db, 'gameRooms', cleanCode);
-  const snap = await fetchDocServerFirst(['gameRooms', cleanCode]);
-  if (!snap.exists()) {
-    throw new Error(`Room #${cleanCode} not found. Please verify the 4-digit code.`);
-  }
-
-  const data = snap.data();
-  if (gameId && data.gameId !== gameId) {
-    throw new Error(`Room #${cleanCode} is for ${String(data.gameId || '').toUpperCase()}, not ${gameId.toUpperCase()}.`);
-  }
-
-  const parsed = parseRoomSnapshotData(data);
-  const currentWaiting = parsed.waitingPlayers || [];
-  const alreadyJoined =
-    parsed.players.some((p) => p.id === player.id) ||
-    currentWaiting.some((p) => p.id === player.id);
-  if (alreadyJoined) {
-    return parsed;
-  }
-
   const seatColors = ['Red', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink'];
 
-  if (parsed.isOpenGroup) {
-    const seatLimit = Math.max(
-      2,
-      parsed.activeSeatLimit ||
-        (parsed.gameId === 'truth_dare' ? 6 : parsed.gameId === 'ludo' ? 4 : 2)
-    );
-    const hasOpenActiveSeat = parsed.players.length < seatLimit;
-    const newEntry: RoomPlayer = {
-      id: player.id,
-      name: player.name.slice(0, 80),
-      avatar: sanitizeAvatarUrl(player.avatar),
-      isHost: false,
-      isReady: true,
-      color: seatColors[(parsed.players.length + currentWaiting.length) % seatColors.length],
-      joinedAtMs: Date.now(),
-    };
+  try {
+    const resultRoom = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) {
+        throw new Error(`Room #${cleanCode} not found. Please verify the 4-digit code.`);
+      }
 
-    const nextPlayers = hasOpenActiveSeat ? [...parsed.players, newEntry] : parsed.players;
-    const nextWaiting = hasOpenActiveSeat ? currentWaiting : [...currentWaiting, newEntry];
-    const nextCount = Math.min(500, nextPlayers.length + nextWaiting.length);
+      const data = snap.data();
+      if (gameId && data.gameId !== gameId) {
+        throw new Error(
+          `Room #${cleanCode} is for ${String(data.gameId || '').toUpperCase()}, not ${gameId.toUpperCase()}.`
+        );
+      }
 
-    try {
-      await updateDoc(roomRef, {
+      const parsed = parseRoomSnapshotData(data);
+      const currentWaiting = parsed.waitingPlayers || [];
+      const alreadyJoined =
+        parsed.players.some((p) => p.id === player.id) ||
+        currentWaiting.some((p) => p.id === player.id);
+      if (alreadyJoined) {
+        return parsed;
+      }
+
+      if (parsed.isOpenGroup) {
+        const seatLimit = Math.max(
+          2,
+          parsed.activeSeatLimit ||
+            (parsed.gameId === 'truth_dare' ? 6 : parsed.gameId === 'ludo' ? 4 : 2)
+        );
+        const hasOpenActiveSeat = parsed.players.length < seatLimit;
+        const newEntry: RoomPlayer = {
+          id: player.id,
+          name: player.name.slice(0, 80),
+          avatar: sanitizeAvatarUrl(player.avatar),
+          isHost: false,
+          isReady: true,
+          color: seatColors[(parsed.players.length + currentWaiting.length) % seatColors.length],
+          joinedAtMs: Date.now(),
+        };
+
+        const nextPlayers = hasOpenActiveSeat ? [...parsed.players, newEntry] : parsed.players;
+        const nextWaiting = hasOpenActiveSeat ? currentWaiting : [...currentWaiting, newEntry];
+        const nextCount = Math.min(500, nextPlayers.length + nextWaiting.length);
+
+        tx.update(roomRef, {
+          playersJson: JSON.stringify(nextPlayers),
+          waitingPlayersJson: JSON.stringify(nextWaiting),
+          playerCount: nextCount,
+          hostId: parsed.hostId,
+          status: 'in_game',
+          updatedAt: serverTimestamp(),
+        });
+
+        return {
+          ...parsed,
+          status: 'in_game' as const,
+          players: nextPlayers,
+          waitingPlayers: nextWaiting,
+        };
+      }
+
+      if (parsed.players.length >= parsed.maxPlayers) {
+        throw new Error(`Room #${cleanCode} is full (max ${parsed.maxPlayers} players).`);
+      }
+
+      const nextPlayers: RoomPlayer[] = [
+        ...parsed.players,
+        {
+          id: player.id,
+          name: player.name.slice(0, 80),
+          avatar: sanitizeAvatarUrl(player.avatar),
+          isHost: false,
+          isReady: true,
+          color: seatColors[parsed.players.length % seatColors.length],
+          joinedAtMs: Date.now(),
+        },
+      ];
+
+      // Auto-start as soon as the room reaches capacity (e.g. 2/2 players)
+      const nextStatus =
+        nextPlayers.length >= parsed.maxPlayers ? 'in_game' : parsed.status;
+
+      tx.update(roomRef, {
         playersJson: JSON.stringify(nextPlayers),
-        waitingPlayersJson: JSON.stringify(nextWaiting),
-        playerCount: nextCount,
+        playerCount: nextPlayers.length,
         hostId: parsed.hostId,
-        status: 'in_game',
+        status: nextStatus,
         updatedAt: serverTimestamp(),
       });
-    } catch (err: any) {
-      if (err?.code === 'permission-denied') {
-        handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
-      }
-      throw err;
-    }
 
-    return {
-      ...parsed,
-      status: 'in_game',
-      players: nextPlayers,
-      waitingPlayers: nextWaiting,
-    };
-  }
-
-  if (parsed.players.length >= parsed.maxPlayers) {
-    throw new Error(`Room #${cleanCode} is full (max ${parsed.maxPlayers} players).`);
-  }
-
-  const nextPlayers: RoomPlayer[] = [
-    ...parsed.players,
-    {
-      id: player.id,
-      name: player.name.slice(0, 80),
-      avatar: sanitizeAvatarUrl(player.avatar),
-      isHost: false,
-      isReady: true,
-      color: seatColors[parsed.players.length % seatColors.length],
-      joinedAtMs: Date.now(),
-    },
-  ];
-
-  // Auto-start as soon as the room reaches capacity (e.g. 2/2 players) so neither player gets stuck waiting
-  const nextStatus =
-    nextPlayers.length >= parsed.maxPlayers ? 'in_game' : parsed.status;
-
-  try {
-    await updateDoc(roomRef, {
-      playersJson: JSON.stringify(nextPlayers),
-      playerCount: nextPlayers.length,
-      hostId: parsed.hostId,
-      status: nextStatus,
-      updatedAt: serverTimestamp(),
+      return {
+        ...parsed,
+        status: nextStatus,
+        players: nextPlayers,
+      };
     });
+
+    return resultRoom;
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
     }
     throw err;
   }
-
-  return {
-    ...parsed,
-    status: nextStatus,
-    players: nextPlayers,
-  };
 }
 
 export async function listPublicOpenGroupRooms(gameId?: string): Promise<MultiplayerRoom[]> {
   try {
-    const constraints = [
+    // Single-field query avoids composite index failures
+    const q = query(
+      collection(db, 'gameRooms'),
       where('isPublicMatch', '==', true),
-      where('isOpenGroup', '==', true),
-      limit(20),
-    ];
-    const snap = await getDocs(query(collection(db, 'gameRooms'), ...constraints));
+      limit(60)
+    );
+    const snap = await getDocs(q);
     const roomsList: MultiplayerRoom[] = [];
     for (const d of snap.docs) {
-      const parsed = parseRoomSnapshotData(d.data());
+      const data = d.data();
+      const parsed = parseRoomSnapshotData(data);
+      if (!parsed.isOpenGroup) continue;
       if (gameId && parsed.gameId !== gameId) continue;
       if (parsed.players.length === 0) continue;
+      if (isRoomDocStale(data, PRIVATE_ROOM_STALE_MS * 3)) continue;
       roomsList.push(parsed);
     }
     return roomsList.sort((a, b) => b.createdAt - a.createdAt);
@@ -1594,35 +1748,93 @@ export async function listPublicOpenGroupRooms(gameId?: string): Promise<Multipl
   }
 }
 
+function filterActiveWaitingRooms(
+  docs: Array<{ data: () => Record<string, any> }>,
+  gameId: string,
+  excludeRoomCode: string,
+  playerId: string
+): MultiplayerRoom[] {
+  const active: MultiplayerRoom[] = [];
+  for (const d of docs) {
+    const data = d.data();
+    const parsed = parseRoomSnapshotData(data);
+    if (parsed.isOpenGroup || parsed.status !== 'waiting' || parsed.gameId !== gameId) {
+      continue;
+    }
+    if (parsed.players.length >= parsed.maxPlayers) {
+      continue;
+    }
+    if (isRoomDocStale(data, PUBLIC_QUEUE_STALE_MS)) {
+      // Lazily prune dead public queue rooms so queue stays healthy
+      if (parsed.players.length <= 1 && parsed.roomCode && /^\d{4}$/.test(parsed.roomCode)) {
+        deleteDoc(doc(db, 'gameRooms', parsed.roomCode)).catch(() => {});
+      }
+      continue;
+    }
+    if (parsed.roomCode === excludeRoomCode) continue;
+    if (parsed.players.some((p) => p.id === playerId)) continue;
+    active.push(parsed);
+  }
+  return active.sort((a, b) =>
+    a.createdAt !== b.createdAt
+      ? a.createdAt - b.createdAt
+      : a.roomCode.localeCompare(b.roomCode)
+  );
+}
+
 export async function findOtherWaitingQuickMatchRoom(
   gameId: string,
   excludeRoomCode: string,
   playerId: string
 ): Promise<MultiplayerRoom | null> {
   try {
+    // Single-field query guarantees instant execution with zero composite indexes
     const q = query(
       collection(db, 'gameRooms'),
       where('isPublicMatch', '==', true),
-      where('status', '==', 'waiting'),
-      where('gameId', '==', gameId),
-      limit(15)
+      limit(60)
     );
     const snap = await getDocs(q);
-    for (const d of snap.docs) {
-      const parsed = parseRoomSnapshotData(d.data());
-      if (
-        !parsed.isOpenGroup &&
-        parsed.roomCode !== excludeRoomCode &&
-        parsed.players.length < parsed.maxPlayers &&
-        !parsed.players.some((p) => p.id === playerId)
-      ) {
-        return parsed;
-      }
-    }
+    const candidates = filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
+    return candidates[0] || null;
   } catch {
-    // Ignore polling error
+    return null;
   }
-  return null;
+}
+
+export function subscribeToPublicMatchmakingQueue(
+  gameId: string,
+  excludeRoomCode: string,
+  playerId: string,
+  onWaitingRooms: (rooms: MultiplayerRoom[]) => void
+): Unsubscribe {
+  const q = query(
+    collection(db, 'gameRooms'),
+    where('isPublicMatch', '==', true),
+    limit(60)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const waiting = filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
+      onWaitingRooms(waiting);
+    },
+    (err) => {
+      console.warn('Public matchmaking queue listener notice:', err);
+    }
+  );
+}
+
+export async function touchMatchmakingRoomHeartbeat(roomCode: string): Promise<void> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return;
+  try {
+    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+      updatedAt: serverTimestamp(),
+    });
+  } catch {
+    // Ignore transient heartbeat failures
+  }
 }
 
 export async function quickMatchFirestoreRoom(
@@ -1630,28 +1842,29 @@ export async function quickMatchFirestoreRoom(
   maxPlayers: number,
   player: { id: string; name: string; avatar: string }
 ): Promise<{ room: MultiplayerRoom; matchedExisting: boolean }> {
+  // Clean up any abandoned waiting room owned by this user before entering queue
+  await releasePreviousHostedRoom(player.id);
+
   try {
+    // Single-field query avoids composite index precondition failures
     const q = query(
       collection(db, 'gameRooms'),
       where('isPublicMatch', '==', true),
-      where('status', '==', 'waiting'),
-      where('gameId', '==', gameId),
-      limit(15)
+      limit(60)
     );
     const snap = await getDocs(q);
-    for (const d of snap.docs) {
-      const parsed = parseRoomSnapshotData(d.data());
-      if (
-        !parsed.isOpenGroup &&
-        parsed.players.length < parsed.maxPlayers &&
-        !parsed.players.some((p) => p.id === player.id)
-      ) {
-        const joined = await joinFirestoreGameRoom(parsed.roomCode, gameId, player);
+    const candidates = filterActiveWaitingRooms(snap.docs, gameId, '', player.id);
+
+    for (const candidate of candidates) {
+      try {
+        const joined = await joinFirestoreGameRoom(candidate.roomCode, gameId, player);
         return { room: joined, matchedExisting: true };
+      } catch {
+        // Candidate filled or deleted concurrently; try next waiting player
       }
     }
   } catch {
-    // Create new public waiting room if query requires index or none found
+    // Fallback to creating a waiting room if read transiently fails
   }
 
   const created = await createFirestoreGameRoom(gameId, maxPlayers, player, {
@@ -1898,6 +2111,9 @@ export async function kickOrLeaveFirestoreRoom(
 ): Promise<void> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
   if (cleanCode.length !== 4) return;
+  if (getStoredHostedRoomCode(targetPlayerId) === cleanCode) {
+    setStoredHostedRoomCode(targetPlayerId, null);
+  }
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     const snap = await getDoc(roomRef);
@@ -3000,21 +3216,100 @@ export async function uploadVideoAssetToCloud(
   return { videoUrl: uri, thumbnailUrl: finalThumb, storageSource: 'idb' };
 }
 
-export function isVideoContentExpired(item: {
-  expiresAt?: number | string;
-  mediaType?: string;
-}): boolean {
-  if (typeof item.expiresAt === 'number' && item.expiresAt > 0) {
-    return Date.now() >= item.expiresAt;
+export function isAccessibleVideoUrl(url?: string): boolean {
+  if (typeof url !== 'string') return false;
+  const clean = url.trim();
+  if (!clean) return false;
+  return (
+    clean.startsWith('https://') ||
+    clean.startsWith('http://') ||
+    clean.startsWith('/api/media/') ||
+    clean.startsWith('/assets/') ||
+    clean.startsWith('data:video/') ||
+    clean.startsWith('blob:')
+  );
+}
+
+function normalizeEpochMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value < 1_000_000_000_000 && value > 1_000_000_000 ? value * 1000 : value;
   }
+  if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric < 1_000_000_000_000 && numeric > 1_000_000_000 ? numeric * 1000 : numeric;
+    }
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return undefined;
+}
+
+function extractItemPrimaryVideoUrl(item: {
+  videoUrl?: string;
+  mediaUrl?: string;
+  mediaUrls?: string[];
+}): string | undefined {
+  if (typeof item.videoUrl === 'string' && item.videoUrl.trim()) {
+    return item.videoUrl.trim();
+  }
+  if (typeof item.mediaUrl === 'string' && item.mediaUrl.trim()) {
+    return item.mediaUrl.trim();
+  }
+  if (Array.isArray(item.mediaUrls)) {
+    return item.mediaUrls.find((u) => typeof u === 'string' && u.trim().length > 0)?.trim();
+  }
+  return undefined;
+}
+
+export function isVideoContentExpired(
+  item: {
+    expiresAt?: number | string;
+    createdAtMs?: number;
+    mediaType?: string;
+    videoUrl?: string;
+    mediaUrl?: string;
+    mediaUrls?: string[];
+  },
+  options?: { enforceStrictAgeOnly?: boolean }
+): boolean {
+  if (item.mediaType === 'image' || item.mediaType === 'none') {
+    return false;
+  }
+
+  const primaryUrl = extractItemPrimaryVideoUrl(item);
+  // Bypass expiry filtering for valid, accessible video URLs so playable videos always render
+  if (!options?.enforceStrictAgeOnly && isAccessibleVideoUrl(primaryUrl)) {
+    return false;
+  }
+
+  const now = Date.now();
+  const createdAtMs = normalizeEpochMs(item.createdAtMs);
+  const expiresAtMs = normalizeEpochMs(item.expiresAt);
+
+  // Enforce the exact 40-day window from creation time so newly uploaded videos never trigger false expiry
+  if (createdAtMs && createdAtMs > 1_000_000_000_000) {
+    const minimumFullExpiry = createdAtMs + VIDEO_EXPIRY_MS;
+    const effectiveExpiry =
+      expiresAtMs && expiresAtMs > minimumFullExpiry ? expiresAtMs : minimumFullExpiry;
+    return now >= effectiveExpiry;
+  }
+
+  if (expiresAtMs && expiresAtMs > 1_000_000_000_000) {
+    return now >= expiresAtMs;
+  }
+
   return false;
 }
 
 export async function publishFirestoreReel(reel: Reel): Promise<void> {
   const createdAtMs = reel.createdAtMs || Date.now();
-  const expiresAt = reel.expiresAt || createdAtMs + VIDEO_EXPIRY_MS;
+  const expiresAt =
+    reel.expiresAt && reel.expiresAt >= createdAtMs + VIDEO_EXPIRY_MS
+      ? reel.expiresAt
+      : createdAtMs + VIDEO_EXPIRY_MS;
   const safeVideoUrl =
-    reel.videoUrl && reel.videoUrl.length <= 740_000 ? reel.videoUrl : `idb://${reel.id}`;
+    reel.videoUrl && reel.videoUrl.length <= 740_000 ? reel.videoUrl : '';
   const safeThumb =
     reel.thumbnailUrl && reel.thumbnailUrl.length <= 175_000 ? reel.thumbnailUrl : '';
 
@@ -3057,13 +3352,20 @@ export function subscribeToFirestoreReels(
   return onSnapshot(
     q,
     (snap) => {
-      const now = Date.now();
       const active: Reel[] = [];
       snap.forEach((d) => {
         const data = d.data();
         const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
-        if (expiresAt !== undefined && expiresAt <= now) {
-          // Auto-remove expired reel (>40 days old) from Firestore
+        const createdAtMs = Number(data.createdAtMs || 0);
+        const videoUrl = String(data.videoUrl || '');
+        if (
+          isVideoContentExpired(
+            { expiresAt, createdAtMs, mediaType: 'video', videoUrl },
+            { enforceStrictAgeOnly: true }
+          ) &&
+          !isAccessibleVideoUrl(videoUrl)
+        ) {
+          // Auto-remove genuinely expired reel (>40 days old) from Firestore
           deleteDoc(d.ref).catch(() => {});
           return;
         }
@@ -3079,7 +3381,7 @@ export function subscribeToFirestoreReels(
           creatorId: String(data.creatorId || ''),
           creatorName: String(data.creatorName || 'JIT Member'),
           creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
-          videoUrl: String(data.videoUrl || ''),
+          videoUrl,
           thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
           caption: String(data.caption || ''),
           musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
@@ -3090,7 +3392,7 @@ export function subscribeToFirestoreReels(
           likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
           comments,
           createdAt: String(data.createdAt || 'Just now'),
-          createdAtMs: Number(data.createdAtMs || 0),
+          createdAtMs,
           expiresAt,
         });
       });
@@ -3126,7 +3428,11 @@ export async function updateFirestoreReelInteraction(
 export async function publishFirestorePost(post: Post): Promise<void> {
   const createdAtMs = post.createdAtMs || Date.now();
   const expiresAt =
-    post.mediaType === 'video' ? post.expiresAt || createdAtMs + VIDEO_EXPIRY_MS : post.expiresAt;
+    post.mediaType === 'video'
+      ? post.expiresAt && post.expiresAt >= createdAtMs + VIDEO_EXPIRY_MS
+        ? post.expiresAt
+        : createdAtMs + VIDEO_EXPIRY_MS
+      : post.expiresAt;
   const safeMediaUrls = Array.isArray(post.mediaUrls)
     ? post.mediaUrls.filter((u) => typeof u === 'string' && u.length <= 740_000).slice(0, 4)
     : undefined;
@@ -3173,14 +3479,23 @@ export function subscribeToFirestorePosts(
   return onSnapshot(
     q,
     (snap) => {
-      const now = Date.now();
       const active: Post[] = [];
       snap.forEach((d) => {
         const data = d.data();
         const mediaType = (data.mediaType as Post['mediaType']) || 'none';
         const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
-        if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) {
-          // Auto-remove expired video post (>40 days old) from Firestore
+        const createdAtMs = Number(data.createdAtMs || 0);
+        const mediaUrls = Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined;
+        const primaryUrl = mediaUrls?.find((u: any) => typeof u === 'string' && u.trim());
+        if (
+          mediaType === 'video' &&
+          isVideoContentExpired(
+            { expiresAt, createdAtMs, mediaType, mediaUrls },
+            { enforceStrictAgeOnly: true }
+          ) &&
+          !isAccessibleVideoUrl(primaryUrl)
+        ) {
+          // Auto-remove genuinely expired video post (>40 days old) from Firestore
           deleteDoc(d.ref).catch(() => {});
           return;
         }
@@ -3198,7 +3513,7 @@ export function subscribeToFirestorePosts(
           authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
           authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
           content: String(data.content || ''),
-          mediaUrls: Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined,
+          mediaUrls,
           mediaType,
           thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
           category: (data.category as Post['category']) || 'all',
@@ -3208,7 +3523,7 @@ export function subscribeToFirestorePosts(
           likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
           comments,
           createdAt: String(data.createdAt || 'Just now'),
-          createdAtMs: Number(data.createdAtMs || 0),
+          createdAtMs,
           expiresAt,
         });
       });
@@ -3246,8 +3561,8 @@ export async function deleteFirestorePost(postId: string): Promise<void> {
 }
 
 /**
- * Sweeps Firestore `reels` and `posts` for any video whose 40-day `expiresAt`
- * timestamp has passed and deletes them automatically.
+ * Sweeps Firestore `reels` and `posts` for any video whose genuine 40-day `expiresAt`
+ * window has elapsed and deletes them automatically.
  */
 export async function purgeExpiredCloudVideos(): Promise<number> {
   const now = Date.now();
@@ -3263,8 +3578,21 @@ export async function purgeExpiredCloudVideos(): Promise<number> {
     const reelsSnap = await getDocs(expiredReelsQ);
     for (const d of reelsSnap.docs) {
       try {
-        await deleteDoc(d.ref);
-        deletedCount++;
+        const data = d.data();
+        if (
+          isVideoContentExpired(
+            {
+              expiresAt: data.expiresAt,
+              createdAtMs: data.createdAtMs,
+              mediaType: 'video',
+              videoUrl: data.videoUrl,
+            },
+            { enforceStrictAgeOnly: true }
+          )
+        ) {
+          await deleteDoc(d.ref);
+          deletedCount++;
+        }
       } catch {
         // Ignore if already deleted
       }
@@ -3283,7 +3611,19 @@ export async function purgeExpiredCloudVideos(): Promise<number> {
     const postsSnap = await getDocs(expiredPostsQ);
     for (const d of postsSnap.docs) {
       try {
-        if (d.data()?.mediaType === 'video') {
+        const data = d.data();
+        if (
+          data?.mediaType === 'video' &&
+          isVideoContentExpired(
+            {
+              expiresAt: data.expiresAt,
+              createdAtMs: data.createdAtMs,
+              mediaType: 'video',
+              mediaUrls: data.mediaUrls,
+            },
+            { enforceStrictAgeOnly: true }
+          )
+        ) {
           await deleteDoc(d.ref);
           deletedCount++;
         }
@@ -3633,7 +3973,14 @@ export async function adminFetchUserActivityClient(
       const data = d.data();
       const mediaType = (data.mediaType as Post['mediaType']) || 'none';
       const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
-      if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) return;
+      const createdAtMs = Number(data.createdAtMs || 0);
+      const mediaUrls = Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined;
+      if (
+        mediaType === 'video' &&
+        isVideoContentExpired({ expiresAt, createdAtMs, mediaType, mediaUrls })
+      ) {
+        return;
+      }
       let comments: any[] = [];
       try {
         const parsed = JSON.parse(data.commentsJson || '[]');
@@ -3652,7 +3999,7 @@ export async function adminFetchUserActivityClient(
           authorAvatar: typeof data.authorAvatar === 'string' ? data.authorAvatar : undefined,
           authorHandle: typeof data.authorHandle === 'string' ? data.authorHandle : undefined,
           content: String(data.content || ''),
-          mediaUrls: Array.isArray(data.mediaUrls) ? data.mediaUrls : undefined,
+          mediaUrls,
           mediaType,
           thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
           category: (data.category as Post['category']) || 'all',
@@ -3662,7 +4009,7 @@ export async function adminFetchUserActivityClient(
           likedBy: Array.isArray(data.likedBy) ? data.likedBy : [],
           comments,
           createdAt: String(data.createdAt || 'Just now'),
-          createdAtMs: Number(data.createdAtMs || 0),
+          createdAtMs,
           expiresAt,
         });
       }
@@ -3678,7 +4025,13 @@ export async function adminFetchUserActivityClient(
     reelsSnap.forEach((d) => {
       const data = d.data();
       const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
-      if (expiresAt !== undefined && expiresAt <= now) return;
+      const createdAtMs = Number(data.createdAtMs || 0);
+      const videoUrl = String(data.videoUrl || '');
+      if (
+        isVideoContentExpired({ expiresAt, createdAtMs, mediaType: 'video', videoUrl })
+      ) {
+        return;
+      }
       if (data.creatorId !== userId) return;
       let comments: any[] = [];
       try {
@@ -3826,7 +4179,16 @@ export function subscribeToFirestoreAnnouncements(
         const data = d.data();
         const mediaType = (data.mediaType as GlobalAnnouncement['mediaType']) || 'none';
         const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
-        if (mediaType === 'video' && expiresAt !== undefined && expiresAt <= now) {
+        const createdAtMs = Number(data.createdAtMs || 0);
+        const mediaUrl = typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined;
+        if (
+          mediaType === 'video' &&
+          isVideoContentExpired(
+            { expiresAt, createdAtMs, mediaType, mediaUrl },
+            { enforceStrictAgeOnly: true }
+          ) &&
+          !isAccessibleVideoUrl(mediaUrl)
+        ) {
           deleteDoc(d.ref).catch(() => {});
           return;
         }

@@ -148,7 +148,9 @@ function sanitizePostsForCache(list: Post[]): Post[] {
     .slice(0, 60)
     .map((p) => ({
       ...p,
-      mediaUrls: p.mediaUrls?.map((u) => (u.startsWith('data:video/') && u.length > 250_000 ? `idb://${p.id}` : u)),
+      mediaUrls: p.mediaUrls?.filter(
+        (u) => !(typeof u === 'string' && u.startsWith('data:video/') && u.length > 250_000)
+      ),
     }));
 }
 
@@ -158,7 +160,10 @@ function sanitizeReelsForCache(list: Reel[]): Reel[] {
     .slice(0, 50)
     .map((r) => ({
       ...r,
-      videoUrl: r.videoUrl.startsWith('data:video/') && r.videoUrl.length > 250_000 ? `idb://${r.id}` : r.videoUrl,
+      videoUrl:
+        r.videoUrl && r.videoUrl.startsWith('data:video/') && r.videoUrl.length > 250_000
+          ? ''
+          : r.videoUrl,
     }));
 }
 
@@ -446,11 +451,16 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       cloudReelIdsSeenRef.current = nextCloudIds;
 
       setReels((prev) => {
+        const prevMap = new Map(prev.map((r) => [r.id, r]));
         const byId = new Map<string, Reel>();
         for (const r of cloudReels) {
-          if (!deletedReelIdsRef.current.has(r.id) && !isVideoContentExpired(r)) {
+          const prevMatch = prevMap.get(r.id);
+          const resolvedVideoUrl =
+            r.videoUrl && r.videoUrl.trim() ? r.videoUrl : prevMatch?.videoUrl || '';
+          const candidate: Reel = { ...r, videoUrl: resolvedVideoUrl };
+          if (!deletedReelIdsRef.current.has(r.id) && !isVideoContentExpired(candidate)) {
             const isLiked = currentUser?.id ? (r.likedBy || []).includes(currentUser.id) : false;
-            byId.set(r.id, { ...r, isLiked });
+            byId.set(r.id, { ...candidate, isLiked });
           }
         }
         for (const localR of prev) {
@@ -481,12 +491,17 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       cloudPostIdsSeenRef.current = nextCloudIds;
 
       setPosts((prev) => {
+        const prevMap = new Map(prev.map((p) => [p.id, p]));
         const byId = new Map<string, Post>();
         for (const p of cloudPosts) {
-          if (!deletedPostIdsRef.current.has(p.id) && !isVideoContentExpired(p)) {
+          const prevMatch = prevMap.get(p.id);
+          const resolvedMediaUrls =
+            p.mediaUrls && p.mediaUrls.length > 0 ? p.mediaUrls : prevMatch?.mediaUrls;
+          const candidate: Post = { ...p, ...(resolvedMediaUrls ? { mediaUrls: resolvedMediaUrls } : {}) };
+          if (!deletedPostIdsRef.current.has(p.id) && !isVideoContentExpired(candidate)) {
             const isLiked = currentUser?.id ? (p.likedBy || []).includes(currentUser.id) : false;
             const isSaved = savedPostIds.includes(p.id);
-            byId.set(p.id, { ...p, isLiked, isSaved });
+            byId.set(p.id, { ...candidate, isLiked, isSaved });
           }
         }
         for (const lp of prev) {

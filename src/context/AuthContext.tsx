@@ -8,6 +8,9 @@ import { UserProfile, GameId, MatchHistoryRecord, WalletTransaction } from '../t
 import { INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { getSupabaseClient } from '../lib/supabase';
 import {
+  authPersistenceReady,
+  subscribeToFirebaseAuthState,
+  signOutFirebaseAuth,
   testFirestoreConnection,
   lookupCloudProfileByPhone,
   loginCloudProfileByPhone,
@@ -73,6 +76,7 @@ export interface AwardGameParams {
 interface AuthContextType {
   currentUser: UserProfile | null;
   isAuthenticated: boolean;
+  isAuthLoading: boolean;
   registeredProfiles: UserProfile[];
   loginWithContact: (contactNumber: string) => Promise<{ success: boolean; error?: string; user?: UserProfile }>;
   registerUser: (
@@ -127,6 +131,32 @@ function appendLocalMatchHistory(rec: MatchHistoryRecord) {
   }
 }
 
+function readPersistedUser(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  if (localStorage.getItem(LS_LOGGED_OUT) === 'true') {
+    return null;
+  }
+  const saved = localStorage.getItem(LS_CURRENT_USER);
+  if (!saved) return null;
+  try {
+    const parsed = JSON.parse(saved);
+    if (parsed && parsed.id) {
+      if (
+        isProfileExpired(parsed) ||
+        parsed.status === 'deleted' ||
+        parsed.status === 'suspended'
+      ) {
+        localStorage.removeItem(LS_CURRENT_USER);
+        return null;
+      }
+      return parsed;
+    }
+  } catch (e) {
+    console.error('Failed to parse cached current user', e);
+  }
+  return null;
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [registeredProfiles, setRegisteredProfiles] = useState<UserProfile[]>(() => {
     if (typeof window !== 'undefined') {
@@ -146,31 +176,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return [INITIAL_USER, ...INITIAL_FRIENDS];
   });
 
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => {
-    if (typeof window !== 'undefined') {
-      const isExplicitlyLoggedOut = localStorage.getItem(LS_LOGGED_OUT) === 'true';
-      if (isExplicitlyLoggedOut) {
-        return null;
-      }
-      const saved = localStorage.getItem(LS_CURRENT_USER);
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (parsed && parsed.id) {
-            // If saved profile has exceeded 180 days or is suspended/deleted, auto-clear and log out
-            if (isProfileExpired(parsed) || parsed.status === 'deleted' || parsed.status === 'suspended') {
-              localStorage.removeItem(LS_CURRENT_USER);
-              return null;
-            }
-            return parsed;
-          }
-        } catch (e) {
-          console.error('Failed to parse cached current user', e);
-        }
-      }
-    }
-    return INITIAL_USER; // Default to demo user for instantaneous interactive exploration
-  });
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => readPersistedUser());
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
 
   const currentUserRef = useRef<UserProfile | null>(currentUser);
   currentUserRef.current = currentUser;
@@ -198,6 +205,123 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_PROFILES, JSON.stringify(activeProfiles));
     }
   }, [currentUser, registeredProfiles]);
+
+  // Root Firebase Auth Observer + LocalStorage Cross-Tab Persistence Check
+  useEffect(() => {
+    let mounted = true;
+    let unsubAuth: (() => void) | undefined;
+    let settled = false;
+
+    const markReady = () => {
+      if (!settled && mounted) {
+        settled = true;
+        setIsAuthLoading(false);
+      }
+    };
+
+    const safetyTimer = window.setTimeout(markReady, 1800);
+
+    authPersistenceReady.finally(() => {
+      if (!mounted) return;
+      unsubAuth = subscribeToFirebaseAuthState(async (firebaseUser) => {
+        if (!mounted) return;
+        try {
+          const explicitlyLoggedOut =
+            typeof window !== 'undefined' && localStorage.getItem(LS_LOGGED_OUT) === 'true';
+
+          if (firebaseUser && !explicitlyLoggedOut) {
+            const persisted = currentUserRef.current || readPersistedUser();
+            if (persisted) {
+              setCurrentUser((prev) => prev || persisted);
+            } else {
+              const matchedLocal = registeredProfilesRef.current.find(
+                (p) =>
+                  p.id === firebaseUser.uid ||
+                  (firebaseUser.phoneNumber &&
+                    isPhoneNumberMatch(p.contactNumber, firebaseUser.phoneNumber))
+              );
+              if (
+                matchedLocal &&
+                !isProfileExpired(matchedLocal) &&
+                matchedLocal.status !== 'deleted' &&
+                matchedLocal.status !== 'suspended'
+              ) {
+                setCurrentUser(matchedLocal);
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem(LS_CURRENT_USER, JSON.stringify(matchedLocal));
+                  localStorage.removeItem(LS_LOGGED_OUT);
+                }
+              } else if (firebaseUser.phoneNumber) {
+                const cloudLookup = await lookupCloudProfileByPhone(firebaseUser.phoneNumber).catch(
+                  () => null
+                );
+                if (
+                  cloudLookup?.found &&
+                  cloudLookup.profile &&
+                  cloudLookup.profile.status !== 'deleted' &&
+                  cloudLookup.profile.status !== 'suspended'
+                ) {
+                  setCurrentUser(cloudLookup.profile);
+                  if (typeof window !== 'undefined') {
+                    localStorage.setItem(LS_CURRENT_USER, JSON.stringify(cloudLookup.profile));
+                    localStorage.removeItem(LS_LOGGED_OUT);
+                  }
+                }
+              } else {
+                const nowIso = new Date().toISOString();
+                const restoredUser: UserProfile = {
+                  id: firebaseUser.uid,
+                  contactNumber:
+                    firebaseUser.phoneNumber || firebaseUser.email || firebaseUser.uid.slice(0, 12),
+                  fullName: firebaseUser.displayName || 'JIT Member',
+                  address: 'JIT Campus',
+                  bio: 'Proud member of JIT GROUP campus community.',
+                  avatarUrl: firebaseUser.photoURL || '/assets/aistudio/image_e64e54f2.png',
+                  joinedAt: nowIso,
+                  lastLoginAt: nowIso,
+                  lastLogin: nowIso,
+                  stats: {
+                    friendsCount: 0,
+                    followersCount: 0,
+                    followingCount: 0,
+                    postsCount: 0,
+                    reelsCount: 0,
+                    gamesPlayed: 0,
+                    gamesWon: 0,
+                    rewardPoints: 100,
+                    streakDays: 1,
+                  },
+                };
+                setCurrentUser(restoredUser);
+                if (typeof window !== 'undefined') {
+                  localStorage.setItem(LS_CURRENT_USER, JSON.stringify(restoredUser));
+                  localStorage.removeItem(LS_LOGGED_OUT);
+                }
+              }
+            }
+          }
+        } finally {
+          window.clearTimeout(safetyTimer);
+          markReady();
+        }
+      });
+    });
+
+    const handleStorageSync = (e: StorageEvent) => {
+      if (e.key === LS_CURRENT_USER || e.key === LS_LOGGED_OUT) {
+        const nextUser = readPersistedUser();
+        setCurrentUser(nextUser);
+      }
+    };
+    window.addEventListener('storage', handleStorageSync);
+
+    return () => {
+      mounted = false;
+      window.clearTimeout(safetyTimer);
+      unsubAuth?.();
+      window.removeEventListener('storage', handleStorageSync);
+    };
+  }, []);
 
   // Sync profiles with shared cloud Firestore & backend server on startup
   const syncServerProfiles = useCallback(async () => {
@@ -328,7 +452,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               }
             } else {
               setCurrentUser((prev) => {
-                if (!prev) return matchedServer;
+                if (!prev) return null;
                 const serverTs = new Date(matchedServer.lastLoginAt || matchedServer.joinedAt || 0).getTime();
                 const prevTs = new Date(prev.lastLoginAt || prev.joinedAt || 0).getTime();
                 const base = serverTs >= prevTs ? { ...prev, ...matchedServer } : { ...matchedServer, ...prev };
@@ -911,6 +1035,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.removeItem(LS_CURRENT_USER);
       localStorage.setItem(LS_LOGGED_OUT, 'true');
     }
+    signOutFirebaseAuth().catch(() => {});
   };
 
   const updateProfile = async (updates: Partial<UserProfile>) => {
@@ -1159,6 +1284,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         currentUser,
         isAuthenticated: !!currentUser,
+        isAuthLoading,
         registeredProfiles,
         loginWithContact,
         registerUser,

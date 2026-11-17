@@ -482,7 +482,11 @@ export async function purgeExpiredLocalMedia(): Promise<void> {
       const cursor = req.result;
       if (!cursor) return;
       const val = cursor.value as StoredMediaRecord;
-      if (typeof val?.expiresAt === 'number' && val.expiresAt <= now) {
+      const created = typeof val?.createdAt === 'number' && val.createdAt > 1_000_000_000_000 ? val.createdAt : 0;
+      const minFullExpiry = created ? created + VIDEO_EXPIRY_MS : 0;
+      const exp = typeof val?.expiresAt === 'number' && val.expiresAt > 1_000_000_000_000 ? val.expiresAt : 0;
+      const effectiveExpiry = minFullExpiry > 0 ? Math.max(exp, minFullExpiry) : exp;
+      if (effectiveExpiry > 0 && effectiveExpiry <= now) {
         cursor.delete();
       }
       cursor.continue();

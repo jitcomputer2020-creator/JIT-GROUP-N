@@ -283,7 +283,8 @@ service cloud.firestore {
           incoming().diff(existing()).affectedKeys().hasOnly(['gameStateJson', 'moveAction', 'currentTurn', 'status', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['messagesJson', 'updatedAt']) ||
           incoming().diff(existing()).affectedKeys().hasOnly(['reactionsJson', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['mutedVoiceIdsJson', 'mutedChatIdsJson', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['mutedVoiceIdsJson', 'mutedChatIdsJson', 'updatedAt']) ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt'])
         );
     }
 
@@ -664,13 +665,14 @@ service cloud.firestore {
     // 9. Real-Time 4-Digit Multiplayer Game Rooms (private rooms accessible by exact 4-digit code)
     match /gameRooms/{roomCode} {
       allow get: if isValidRoomCode(roomCode);
-      allow list: if existing().isPublicMatch == true && (
-        existing().status == 'waiting' ||
-        existing().isOpenGroup == true
-      );
+      allow list: if existing().isPublicMatch == true;
       allow create: if isValidRoomCode(roomCode) && isValidGameRoomCreate(incoming(), roomCode);
       allow update: if isValidRoomCode(roomCode) && isValidGameRoomUpdate(incoming(), existing(), roomCode);
-      allow delete: if isValidRoomCode(roomCode) && existing().playerCount <= 1;
+      allow delete: if isValidRoomCode(roomCode) && (
+        existing().playerCount <= 1 ||
+        existing().status == 'finished' ||
+        (existing().updatedAt is timestamp && request.time > existing().updatedAt + duration.value(20, 'm'))
+      );
 
       match /voice_peers/{peerId} {
         allow get: if isValidRoomCode(roomCode) && isValidId(peerId);

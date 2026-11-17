@@ -19,6 +19,7 @@ import {
   Sparkles,
   Bot,
   Clock,
+  RefreshCw,
 } from 'lucide-react';
 
 interface RoomLobbyModalProps {
@@ -29,6 +30,8 @@ interface RoomLobbyModalProps {
   onKickPlayer: (playerId: string) => void;
   onLeaveRoom: () => void;
   onFallbackToAI?: () => void;
+  onResetRoomCode?: () => void;
+  isResettingCode?: boolean;
   onClose: () => void;
 }
 
@@ -40,6 +43,8 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
   onKickPlayer,
   onLeaveRoom,
   onFallbackToAI,
+  onResetRoomCode,
+  isResettingCode = false,
   onClose,
 }) => {
   const [copied, setCopied] = useState(false);
@@ -167,7 +172,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
               Share this code with friends so they can join this match
             </p>
 
-            <div className="flex items-center justify-center gap-2 pt-2">
+            <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
               <button
                 type="button"
                 onClick={handleCopyCode}
@@ -184,6 +189,18 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
                 {shareSuccess ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Share2 className="w-3.5 h-3.5" />}
                 <span>{shareSuccess ? 'Shared!' : 'Share Invite'}</span>
               </button>
+              {isHost && onResetRoomCode && room.players.length <= 1 && (
+                <button
+                  type="button"
+                  disabled={isResettingCode}
+                  onClick={onResetRoomCode}
+                  className="px-3.5 py-2 bg-white/15 hover:bg-white/25 active:scale-95 disabled:opacity-60 text-white font-bold text-xs rounded-xl backdrop-blur-md flex items-center gap-1.5 transition-all"
+                  title="Recycle this room and generate a fresh 4-digit code"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isResettingCode ? 'animate-spin' : ''}`} />
+                  <span>{isResettingCode ? 'Resetting...' : 'New Code'}</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
