@@ -24,6 +24,7 @@ import {
   createFirestoreGameRoom,
   joinFirestoreGameRoom,
   quickMatchFirestoreRoom,
+  tryAtomicallyJoinWaitingRoom,
   findOtherWaitingQuickMatchRoom,
   subscribeToPublicMatchmakingQueue,
   touchMatchmakingRoomHeartbeat,
@@ -693,17 +694,32 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           const wasStatus = prevRoomStatusRef.current;
           prevRoomStatusRef.current = room.status;
 
-          if (room.status === 'in_game') {
+          const hasPlayer2 = Boolean(
+            (room.player2 && room.player2.trim().length > 0) ||
+              (room.player2Id && room.player2Id.trim().length > 0) ||
+              room.players.length >= 2
+          );
+          const isRoomActive =
+            room.status === 'active' ||
+            room.status === 'in_game' ||
+            (Boolean(room.isPublicMatch) && !room.isOpenGroup && hasPlayer2);
+
+          if (isRoomActive) {
             setIsLobbyOpen(false);
             setIsMatchmakingOpen(false);
           }
 
-          // Ensure all players start on a clean board on GAME_START or waiting->in_game transition
+          // Ensure all players start on a clean board on GAME_START or waiting->active/in_game transition
           const incomingStartId =
             typeof room.gameState?._startId === 'string' ? room.gameState._startId : null;
           const isFreshGameStart =
             (moveAction === 'GAME_START' && incomingStartId && incomingStartId !== lastStartIdRef.current) ||
-            (wasStatus === 'waiting' && room.status === 'in_game' && (!room.gameState || !room.gameState.moveId));
+            (wasStatus === 'waiting' && isRoomActive && (!room.gameState || !room.gameState.moveId));
+
+          if (wasStatus === 'waiting' && isRoomActive && room.isPublicMatch && !room.isOpenGroup) {
+            soundFx.playWin();
+            showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+          }
 
           if (isFreshGameStart) {
             if (incomingStartId) lastStartIdRef.current = incomingStartId;
@@ -757,6 +773,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       resetSnakeLadder,
       resetTruthDare,
       resetTtt,
+      showRewardToast,
       spawnFloatingReaction,
     ]
   );
@@ -781,7 +798,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       moveAction: string,
       newGameState: Record<string, any>,
       nextTurnId?: string,
-      status: 'in_game' | 'finished' = 'in_game'
+      status: 'active' | 'in_game' | 'finished' = 'in_game'
     ) => {
       const room = currentRoomRef.current;
       if (!room) return;
@@ -824,8 +841,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     const handleRoomUpdated = (data: { room: MultiplayerRoom }) => {
       setCurrentRoom(data.room);
       setJoinError(null);
-      if (data.room.status === 'in_game') {
+      if (data.room.status === 'active' || data.room.status === 'in_game') {
         setIsLobbyOpen(false);
+        setIsMatchmakingOpen(false);
       }
     };
 
@@ -954,6 +972,26 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     spawnFloatingReaction,
   ]);
 
+  // Reactive Guard: guarantee waiting overlay closes the instant player2 or active status syncs
+  useEffect(() => {
+    if (!isMatchmakingOpen || !currentRoom) return;
+    const hasJoinedP2 = Boolean(
+      (currentRoom.player2 && currentRoom.player2.trim().length > 0) ||
+        (currentRoom.player2Id && currentRoom.player2Id.trim().length > 0) ||
+        currentRoom.players.length >= 2
+    );
+    if (currentRoom.status === 'active' || currentRoom.status === 'in_game' || hasJoinedP2) {
+      setIsMatchmakingOpen(false);
+      setIsLobbyOpen(false);
+    }
+  }, [
+    isMatchmakingOpen,
+    currentRoom?.status,
+    currentRoom?.player2,
+    currentRoom?.player2Id,
+    currentRoom?.players.length,
+  ]);
+
   // Real-Time Single Shared Room Matchmaking Sync:
   // Keeps Player 1 subscribed to their single shared waiting room and deterministically converges if any older waiting room exists.
   useEffect(() => {
@@ -982,10 +1020,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       resetTruthDare();
       setSubView('play');
       setCurrentRoom(room);
-      attachFirestoreRoomSubscription(room.roomCode);
       setIsModeSelectOpen(false);
       setIsLobbyOpen(false);
       setIsMatchmakingOpen(false);
+      attachFirestoreRoomSubscription(room.roomCode);
       soundFx.playWin();
       showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
     };
@@ -999,8 +1037,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       joining = true;
       try {
         await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
-        const joined = await joinFirestoreGameRoom(candidate.roomCode, selectedGame, activePlayer);
-        if (!cancelled && !settled) {
+        const joined =
+          (await tryAtomicallyJoinWaitingRoom(candidate.roomCode, selectedGame, activePlayer)) ||
+          (await joinFirestoreGameRoom(candidate.roomCode, selectedGame, activePlayer));
+        if (!cancelled && !settled && joined) {
           // Detach old waiting room listener FIRST so deleting myCode doesn't fire onRoomDeleted -> gameMode('ai')
           if (roomUnsubRef.current) {
             roomUnsubRef.current();
@@ -1008,6 +1048,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           }
           await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
           enterMatchedRoom(joined);
+        } else {
+          joining = false;
         }
       } catch {
         joining = false;
@@ -1201,7 +1243,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setCurrentRoom(room);
       attachFirestoreRoomSubscription(room.roomCode);
       setIsModeSelectOpen(false);
-      if (room.status === 'in_game' || room.isOpenGroup) {
+      if (room.status === 'active' || room.status === 'in_game' || room.isOpenGroup) {
         setIsLobbyOpen(false);
         resetTtt(false);
         resetChess(false);
@@ -1254,24 +1296,32 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         maxP,
         activePlayer
       );
+      const isMatchedNow =
+        matchedExisting ||
+        room.status === 'active' ||
+        room.status === 'in_game' ||
+        Boolean(
+          (room.player2 && room.player2.trim().length > 0) ||
+            (room.player2Id && room.player2Id.trim().length > 0) ||
+            room.players.length >= 2
+        );
+
       setIsModeSelectOpen(false);
       setIsLobbyOpen(false);
       setSubView('play');
       setCurrentRoom(room);
+      setIsMatchmakingOpen(!isMatchedNow);
       attachFirestoreRoomSubscription(room.roomCode);
 
-      if (matchedExisting || room.status === 'in_game') {
+      if (isMatchedNow) {
         resetTtt(false);
         resetChess(false);
         resetLudo(false);
         resetQuiz();
         resetSnakeLadder(false);
         resetTruthDare();
-        setIsMatchmakingOpen(false);
         soundFx.playWin();
         showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
-      } else {
-        setIsMatchmakingOpen(true);
       }
     } catch (err: any) {
       setJoinError(err?.message || 'Quick matchmaking failed. Please try again.');

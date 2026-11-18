@@ -80,9 +80,10 @@ export interface MultiplayerRoom {
   roomCode: string;
   gameId: string;
   hostId: string;
+  player2?: string;
   player2Id?: string;
   createdAt: number;
-  status: 'waiting' | 'in_game' | 'finished';
+  status: 'waiting' | 'active' | 'in_game' | 'finished';
   maxPlayers: number;
   isPublicMatch?: boolean;
   isOpenGroup?: boolean;
