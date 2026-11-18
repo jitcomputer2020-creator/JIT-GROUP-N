@@ -84,8 +84,8 @@ export interface MultiplayerRoom {
   player1?: string;
   player1Id?: string;
   player1Name?: string;
-  player2?: string;
-  player2Id?: string;
+  player2?: string | null;
+  player2Id?: string | null;
   player2Name?: string;
   createdAt: number;
   status: 'waiting' | 'active' | 'in_game' | 'finished';

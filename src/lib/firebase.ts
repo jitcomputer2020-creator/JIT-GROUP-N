@@ -1678,8 +1678,8 @@ export async function createFirestoreGameRoom(
       player1: hostPlayer.id,
       player1Id: hostPlayer.id,
       player1Name: hostDisplayName,
-      player2: '',
-      player2Id: '',
+      player2: null,
+      player2Id: null,
       player2Name: '',
       status: initialStatus,
       maxPlayers: safeMax,
@@ -1720,8 +1720,8 @@ export async function createFirestoreGameRoom(
           player1: hostPlayer.id,
           player1Id: hostPlayer.id,
           player1Name: hostDisplayName,
-          player2: '',
-          player2Id: '',
+          player2: null,
+          player2Id: null,
           player2Name: '',
           createdAt: Date.now(),
           status: initialStatus,
@@ -1996,7 +1996,14 @@ function filterActiveWaitingRooms(
       continue;
     }
     if (parsed.roomCode === excludeRoomCode) continue;
-    if (parsed.players.some((p) => p.id === playerId)) continue;
+    if (
+      parsed.player1Id === playerId ||
+      parsed.player1 === playerId ||
+      parsed.hostId === playerId ||
+      parsed.players.some((p) => p.id === playerId)
+    ) {
+      continue;
+    }
     active.push(parsed);
   }
   return active.sort((a, b) =>
@@ -2491,6 +2498,9 @@ export async function tryAtomicallyJoinWaitingRoom(
       parsed.gameId !== gameId ||
       parsed.status !== 'waiting' ||
       !isPlayer2Unassigned(data, parsed) ||
+      parsed.player1Id === player.id ||
+      parsed.player1 === player.id ||
+      parsed.hostId === player.id ||
       parsed.players.some((p) => p.id === player.id)
     ) {
       return null;
@@ -2740,8 +2750,8 @@ export async function quickMatchFirestoreRoom(
           player1: player.id,
           player1Id: player.id,
           player1Name: cleanName,
-          player2: '',
-          player2Id: '',
+          player2: null,
+          player2Id: null,
           player2Name: '',
           status: 'waiting',
           maxPlayers: safeMax,
@@ -2800,8 +2810,8 @@ export async function quickMatchFirestoreRoom(
             player1: player.id,
             player1Id: player.id,
             player1Name: cleanName,
-            player2: '',
-            player2Id: '',
+            player2: null,
+            player2Id: null,
             player2Name: '',
             createdAt: nowMs,
             status: 'waiting',
@@ -3130,12 +3140,12 @@ export async function kickOrLeaveFirestoreRoom(
       player1: updatedActive[0]?.id || nextHostId,
       player1Id: updatedActive[0]?.id || nextHostId,
       player1Name: updatedActive[0]?.name || '',
-      player2: updatedActive[1]?.id || '',
-      player2Id: updatedActive[1]?.id || '',
+      player2: updatedActive[1]?.id || null,
+      player2Id: updatedActive[1]?.id || null,
       player2Name: updatedActive[1]?.name || '',
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
-      status: parsed.status,
+      status: updatedActive.length < 2 && parsed.status === 'active' ? 'waiting' : parsed.status,
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
