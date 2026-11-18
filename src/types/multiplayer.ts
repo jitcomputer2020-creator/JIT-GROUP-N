@@ -78,11 +78,15 @@ export interface InGameCallState {
 
 export interface MultiplayerRoom {
   roomCode: string;
+  roomId?: string;
   gameId: string;
   hostId: string;
   player1?: string;
+  player1Id?: string;
+  player1Name?: string;
   player2?: string;
   player2Id?: string;
+  player2Name?: string;
   createdAt: number;
   status: 'waiting' | 'active' | 'in_game' | 'finished';
   maxPlayers: number;

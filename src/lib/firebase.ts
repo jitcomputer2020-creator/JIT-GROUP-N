@@ -1359,16 +1359,23 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   const maxPlayers = Number(data.maxPlayers || 2);
   const activeSeatLimit = Number(data.activeSeatLimit || maxPlayers || 2);
 
-  const resolvedPlayer1 = String(data.player1 || data.hostId || players[0]?.id || '');
-  const resolvedPlayer2 = String(data.player2 || data.player2Id || players[1]?.id || '');
+  const resolvedRoomId = String(data.roomId || data.roomCode || '');
+  const resolvedPlayer1Id = String(data.player1Id || data.player1 || data.hostId || players[0]?.id || '');
+  const resolvedPlayer1Name = String(data.player1Name || players[0]?.name || '');
+  const resolvedPlayer2Id = String(data.player2Id || data.player2 || players[1]?.id || '');
+  const resolvedPlayer2Name = String(data.player2Name || players[1]?.name || '');
 
   return {
-    roomCode: String(data.roomCode || ''),
+    roomCode: String(data.roomCode || resolvedRoomId),
+    roomId: resolvedRoomId,
     gameId: String(data.gameId || 'tictactoe'),
     hostId: String(data.hostId || ''),
-    player1: resolvedPlayer1,
-    player2: resolvedPlayer2,
-    player2Id: resolvedPlayer2,
+    player1: resolvedPlayer1Id,
+    player1Id: resolvedPlayer1Id,
+    player1Name: resolvedPlayer1Name,
+    player2: resolvedPlayer2Id,
+    player2Id: resolvedPlayer2Id,
+    player2Name: resolvedPlayer2Name,
     createdAt: createdMs,
     status: (data.status as MultiplayerRoom['status']) || 'waiting',
     maxPlayers,
@@ -1662,13 +1669,18 @@ export async function createFirestoreGameRoom(
   let lastErr: any = null;
   for (let createAttempt = 0; createAttempt < 12; createAttempt++) {
     const chosenCode = await pickAvailableRoomCodeAndCleanStale(hostPlayer.id);
+    const hostDisplayName = (hostPlayer.name || 'JIT Player').slice(0, 80);
     const payload = {
       roomCode: chosenCode,
+      roomId: chosenCode,
       gameId,
       hostId: hostPlayer.id,
       player1: hostPlayer.id,
+      player1Id: hostPlayer.id,
+      player1Name: hostDisplayName,
       player2: '',
       player2Id: '',
+      player2Name: '',
       status: initialStatus,
       maxPlayers: safeMax,
       playerCount: 1,
@@ -1702,11 +1714,15 @@ export async function createFirestoreGameRoom(
         setStoredHostedRoomCode(hostPlayer.id, chosenCode);
         return {
           roomCode: chosenCode,
+          roomId: chosenCode,
           gameId,
           hostId: hostPlayer.id,
           player1: hostPlayer.id,
+          player1Id: hostPlayer.id,
+          player1Name: hostDisplayName,
           player2: '',
           player2Id: '',
+          player2Name: '',
           createdAt: Date.now(),
           status: initialStatus,
           maxPlayers: safeMax,
@@ -1804,8 +1820,11 @@ export async function joinFirestoreGameRoom(
           playersJson: JSON.stringify(nextPlayers),
           waitingPlayersJson: JSON.stringify(nextWaiting),
           player1: nextPlayers[0]?.id || parsed.hostId,
+          player1Id: nextPlayers[0]?.id || parsed.hostId,
+          player1Name: nextPlayers[0]?.name || parsed.player1Name || '',
           player2: nextPlayers[1]?.id || '',
           player2Id: nextPlayers[1]?.id || '',
+          player2Name: nextPlayers[1]?.name || '',
           playerCount: nextCount,
           hostId: parsed.hostId,
           status: 'in_game',
@@ -1814,9 +1833,13 @@ export async function joinFirestoreGameRoom(
 
         return {
           ...parsed,
+          roomId: parsed.roomCode,
           player1: nextPlayers[0]?.id || parsed.hostId,
+          player1Id: nextPlayers[0]?.id || parsed.hostId,
+          player1Name: nextPlayers[0]?.name || parsed.player1Name || '',
           player2: nextPlayers[1]?.id || '',
           player2Id: nextPlayers[1]?.id || '',
+          player2Name: nextPlayers[1]?.name || '',
           status: 'in_game' as const,
           players: nextPlayers,
           waitingPlayers: nextWaiting,
@@ -1854,11 +1877,19 @@ export async function joinFirestoreGameRoom(
           ? { ...(parsed.gameState || {}), _startId: startId, moveSeq: 0 }
           : parsed.gameState || {};
 
+      const p1Id = nextPlayers[0]?.id || parsed.hostId;
+      const p1Name = nextPlayers[0]?.name || parsed.player1Name || '';
+      const p2Id = nextPlayers[1]?.id || '';
+      const p2Name = nextPlayers[1]?.name || '';
+
       tx.update(roomRef, {
         playersJson: JSON.stringify(nextPlayers),
-        player1: nextPlayers[0]?.id || parsed.hostId,
-        player2: nextPlayers[1]?.id || '',
-        player2Id: nextPlayers[1]?.id || '',
+        player1: p1Id,
+        player1Id: p1Id,
+        player1Name: p1Name,
+        player2: p2Id,
+        player2Id: p2Id,
+        player2Name: p2Name,
         playerCount: nextPlayers.length,
         hostId: parsed.hostId,
         status: nextStatus,
@@ -1874,9 +1905,13 @@ export async function joinFirestoreGameRoom(
 
       return {
         ...parsed,
-        player1: nextPlayers[0]?.id || parsed.hostId,
-        player2: nextPlayers[1]?.id || '',
-        player2Id: nextPlayers[1]?.id || '',
+        roomId: parsed.roomCode,
+        player1: p1Id,
+        player1Id: p1Id,
+        player1Name: p1Name,
+        player2: p2Id,
+        player2Id: p2Id,
+        player2Name: p2Name,
         status: nextStatus,
         players: nextPlayers,
         ...(isStarting
@@ -2285,11 +2320,15 @@ export async function pairQueuePlayersIntoRoom(
 
         tx.set(roomRef, {
           roomCode,
+          roomId: roomCode,
           gameId,
           hostId: oppPlayer.id,
           player1: oppPlayer.id,
+          player1Id: oppPlayer.id,
+          player1Name: oppPlayer.name,
           player2: initPlayer.id,
           player2Id: initPlayer.id,
+          player2Name: initPlayer.name,
           status: 'active',
           maxPlayers: safeMax,
           playerCount: 2,
@@ -2327,11 +2366,15 @@ export async function pairQueuePlayersIntoRoom(
 
         const createdRoom: MultiplayerRoom = {
           roomCode,
+          roomId: roomCode,
           gameId,
           hostId: oppPlayer.id,
           player1: oppPlayer.id,
+          player1Id: oppPlayer.id,
+          player1Name: oppPlayer.name,
           player2: initPlayer.id,
           player2Id: initPlayer.id,
+          player2Name: initPlayer.name,
           createdAt: Date.now(),
           status: 'active',
           maxPlayers: safeMax,
@@ -2466,16 +2509,22 @@ export async function tryAtomicallyJoinWaitingRoom(
       },
     ];
     const joinedPlayer1Id = nextPlayers[0]?.id || parsed.hostId;
+    const joinedPlayer1Name = nextPlayers[0]?.name || parsed.player1Name || '';
     const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
+    const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
     const nextStatus: MultiplayerRoom['status'] = 'active';
     const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const nextGameState = { ...(parsed.gameState || {}), _startId: startId, moveSeq: 0 };
 
     tx.update(roomRef, {
+      roomId: cleanCode,
       playersJson: JSON.stringify(nextPlayers),
       player1: joinedPlayer1Id,
+      player1Id: joinedPlayer1Id,
+      player1Name: joinedPlayer1Name,
       player2: joinedPlayer2Id,
       player2Id: joinedPlayer2Id,
+      player2Name: joinedPlayer2Name,
       playerCount: nextPlayers.length,
       hostId: parsed.hostId,
       isPublicMatch: true,
@@ -2497,9 +2546,13 @@ export async function tryAtomicallyJoinWaitingRoom(
 
     return {
       ...parsed,
+      roomId: cleanCode,
       player1: joinedPlayer1Id,
+      player1Id: joinedPlayer1Id,
+      player1Name: joinedPlayer1Name,
       player2: joinedPlayer2Id,
       player2Id: joinedPlayer2Id,
+      player2Name: joinedPlayer2Name,
       isPublicMatch: true,
       status: nextStatus,
       players: nextPlayers,
@@ -2607,15 +2660,21 @@ export async function quickMatchFirestoreRoom(
                 },
               ];
               const joinedPlayer1Id = hostPlayer?.id || parsedWaiting.hostId;
+              const joinedPlayer1Name = hostPlayer?.name || parsedWaiting.player1Name || '';
               const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
+              const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
               const nextStatus: MultiplayerRoom['status'] = 'active';
               const updatedGameState = { ...(parsedWaiting.gameState || {}), _startId: startId, moveSeq: 0 };
 
               tx.update(waitingRoomRef, {
+                roomId: slotRoomCode,
                 playersJson: JSON.stringify(nextPlayers),
                 player1: joinedPlayer1Id,
+                player1Id: joinedPlayer1Id,
+                player1Name: joinedPlayer1Name,
                 player2: joinedPlayer2Id,
                 player2Id: joinedPlayer2Id,
+                player2Name: joinedPlayer2Name,
                 playerCount: nextPlayers.length,
                 hostId: parsedWaiting.hostId,
                 isPublicMatch: true,
@@ -2637,9 +2696,13 @@ export async function quickMatchFirestoreRoom(
                 matchedExisting: true,
                 room: {
                   ...parsedWaiting,
+                  roomId: slotRoomCode,
                   player1: joinedPlayer1Id,
+                  player1Id: joinedPlayer1Id,
+                  player1Name: joinedPlayer1Name,
                   player2: joinedPlayer2Id,
                   player2Id: joinedPlayer2Id,
+                  player2Name: joinedPlayer2Name,
                   isPublicMatch: true,
                   status: nextStatus,
                   players: nextPlayers,
@@ -2671,11 +2734,15 @@ export async function quickMatchFirestoreRoom(
 
         tx.set(candidateRoomRef, {
           roomCode: chosenCode,
+          roomId: chosenCode,
           gameId,
           hostId: player.id,
           player1: player.id,
+          player1Id: player.id,
+          player1Name: cleanName,
           player2: '',
           player2Id: '',
+          player2Name: '',
           status: 'waiting',
           maxPlayers: safeMax,
           playerCount: 1,
@@ -2727,11 +2794,15 @@ export async function quickMatchFirestoreRoom(
           matchedExisting: false,
           room: {
             roomCode: chosenCode,
+            roomId: chosenCode,
             gameId,
             hostId: player.id,
             player1: player.id,
+            player1Id: player.id,
+            player1Name: cleanName,
             player2: '',
             player2Id: '',
+            player2Name: '',
             createdAt: nowMs,
             status: 'waiting',
             maxPlayers: safeMax,
@@ -3057,8 +3128,11 @@ export async function kickOrLeaveFirestoreRoom(
       playersJson: JSON.stringify(updatedActive),
       waitingPlayersJson: JSON.stringify(updatedWaiting),
       player1: updatedActive[0]?.id || nextHostId,
+      player1Id: updatedActive[0]?.id || nextHostId,
+      player1Name: updatedActive[0]?.name || '',
       player2: updatedActive[1]?.id || '',
       player2Id: updatedActive[1]?.id || '',
+      player2Name: updatedActive[1]?.name || '',
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
       status: parsed.status,
