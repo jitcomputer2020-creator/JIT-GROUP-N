@@ -61,7 +61,7 @@ interface TruthAndDareGameProps {
   isHost: boolean;
   isSeatedActivePlayer: boolean;
   state: TruthAndDareState | null;
-  onUpdateState: (next: TruthAndDareState, status?: 'in_game' | 'finished') => void;
+  onUpdateState: (next: TruthAndDareState, status?: 'active' | 'in_game' | 'finished') => void;
   onRoundAward: (points: number, summary: string) => void;
   onOpenHostPanel?: () => void;
 }

@@ -23,6 +23,8 @@ import {
 import { APP_CONFIG } from '../constants/branding';
 import { multiplayerSocket } from '../services/multiplayerSocket';
 import {
+  auth,
+  subscribeToFirebaseAuthState,
   createFirestoreGameRoom,
   joinFirestoreGameRoom,
   quickMatchFirestoreRoom,
@@ -174,6 +176,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     isChatOpenRef.current = isChatOpen;
   }, [isChatOpen]);
 
+  const [fbAuthUid, setFbAuthUid] = useState<string | null>(() => auth.currentUser?.uid || null);
+  useEffect(() => {
+    const unsub = subscribeToFirebaseAuthState((fbUser) => {
+      setFbAuthUid(fbUser?.uid || null);
+    });
+    return () => unsub();
+  }, []);
+
   const guestPlayerId = useMemo(() => {
     if (typeof window === 'undefined') return 'usr_jit_guest_001';
     const existing = window.sessionStorage.getItem('jit_guest_player_id');
@@ -185,11 +195,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const activePlayer = useMemo(
     () => ({
-      id: currentUser?.id || guestPlayerId,
+      id: fbAuthUid || currentUser?.id || guestPlayerId,
       name: currentUser?.fullName || 'Campus Guest',
       avatar: currentUser?.avatarUrl || APP_CONFIG.logoUrl,
     }),
-    [currentUser?.id, currentUser?.fullName, currentUser?.avatarUrl, guestPlayerId]
+    [fbAuthUid, currentUser?.id, currentUser?.fullName, currentUser?.avatarUrl, guestPlayerId]
   );
 
   const activePlayerIdRef = useRef<string>(activePlayer.id);
@@ -612,7 +622,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               answersByQ: {},
               finished: false,
             };
-            broadcastRoomMove('QUIZ_MOVE', syncedQuiz, '', 'in_game', {
+            broadcastRoomMove('QUIZ_MOVE', syncedQuiz, '', 'active', {
               bypassTurnGuard: true,
             });
           }
@@ -1034,8 +1044,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               (!room.gameState || !room.gameState.moveId));
 
           if (!wasStartedBefore && isRoomActive && room.isPublicMatch && !room.isOpenGroup) {
+            const displayCode =
+              room.roomCode.length > 8 ? room.roomCode.slice(0, 6).toUpperCase() : room.roomCode;
             soundFx.playWin();
-            showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+            showRewardToast(`Match found! Connected to Room #${displayCode}`);
           }
 
           if (isFreshGameStart) {
@@ -1070,8 +1082,29 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             });
           }
 
-          if (room.gameState && moveAction && moveAction !== 'ROOM_CREATED' && moveAction !== 'GAME_START') {
-            applySyncedMoveState(moveAction, room.gameState);
+          const syncedBoardState = room.boardState || room.gameState;
+          const inferredAction =
+            room.gameId === 'ludo'
+              ? 'LUDO_MOVE'
+              : room.gameId === 'chess'
+              ? 'CHESS_MOVE'
+              : room.gameId === 'snake_ladder'
+              ? 'SL_MOVE'
+              : room.gameId === 'carrom'
+              ? 'CARROM_MOVE'
+              : room.gameId === 'quiz'
+              ? 'QUIZ_MOVE'
+              : room.gameId === 'truth_dare'
+              ? 'TD_MOVE'
+              : 'TTT_MOVE';
+          const effectiveMoveAction =
+            moveAction && moveAction !== 'ROOM_CREATED' && moveAction !== 'GAME_START'
+              ? moveAction
+              : syncedBoardState && (syncedBoardState.moveId || Number(syncedBoardState.moveSeq || 0) > 0)
+              ? inferredAction
+              : '';
+          if (syncedBoardState && effectiveMoveAction) {
+            applySyncedMoveState(effectiveMoveAction, syncedBoardState);
           }
         },
         () => {
@@ -1353,8 +1386,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       if (isNewSubscription) {
         attachFirestoreRoomSubscription(room.roomCode);
       }
+      const displayCode =
+        room.roomCode.length > 8 ? room.roomCode.slice(0, 6).toUpperCase() : room.roomCode;
       soundFx.playWin();
-      showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+      showRewardToast(`Match found! Connected to Room #${displayCode}`);
     };
 
     const tryMergeIntoWaitingRoom = async (candidate: MultiplayerRoom | null) => {
@@ -1405,7 +1440,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       activePlayer.id,
       (waitingRooms) => {
         if (waitingRooms.length > 0 && !cancelled && !settled && !joining) {
-          const sorted = [...waitingRooms].sort((a, b) => a.roomCode.localeCompare(b.roomCode));
+          const sorted = [...waitingRooms].sort((a, b) =>
+            a.roomCode < b.roomCode ? -1 : a.roomCode > b.roomCode ? 1 : 0
+          );
           void tryMergeIntoWaitingRoom(sorted[0]);
         }
       }
@@ -1580,7 +1617,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setJoinError(null);
     setChatMessages([]);
     try {
-      const cleanCode = code.trim().replace(/\D/g, '');
+      const cleanCode = code.trim().replace(/^#/, '').replace(/[^a-zA-Z0-9_\-]/g, '');
       if (currentRoomRef.current && currentRoomRef.current.roomCode !== cleanCode) {
         await cleanupActiveRoomBeforeSwitch();
       }
@@ -1679,8 +1716,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         resetSnakeLadder(false);
         resetCarromState(false);
         resetTruthDare();
+        const displayCode =
+          room.roomCode.length > 8 ? room.roomCode.slice(0, 6).toUpperCase() : room.roomCode;
         soundFx.playWin();
-        showRewardToast(`Match found! Connected to Room #${room.roomCode}`);
+        showRewardToast(`Match found! Connected to Room #${displayCode}`);
       }
     } catch (err: any) {
       setWaiting(false);
@@ -1995,7 +2034,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         'TTT_MOVE',
         { board: newBoard, isXNext: nextTurnBool, result: resStr, line },
         nextTurnId,
-        winner ? 'finished' : 'in_game'
+        winner ? 'finished' : 'active'
       );
     }
 
@@ -2353,7 +2392,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           winner: null,
         },
         getPlayerIdForLudoSeat(nextTurn),
-        'in_game'
+        'active'
       );
     }
 
@@ -2439,7 +2478,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               winner: null,
             },
             getPlayerIdForLudoSeat(nextTurn),
-            'in_game'
+            'active'
           );
         }
         if (gameModeRef.current === 'ai' && !currentRoomRef.current && nextTurn !== 0) {
@@ -2486,7 +2525,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               winner: null,
             },
             getPlayerIdForLudoSeat(nextTurn),
-            'in_game'
+            'active'
           );
         }
         if (gameModeRef.current === 'ai' && !currentRoomRef.current && nextTurn !== 0) {
@@ -2529,7 +2568,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               winner: null,
             },
             getPlayerIdForLudoSeat(cur.turn),
-            'in_game'
+            'active'
           );
         }
       }
@@ -2641,7 +2680,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               finished: nextFin,
             } satisfies QuizSyncedState,
             '',
-            nextFin ? 'finished' : 'in_game',
+            nextFin ? 'finished' : 'active',
             { bypassTurnGuard: true }
           );
         });
@@ -2844,7 +2883,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           winner: winnerResult,
         },
         nextTurnId,
-        winnerResult ? 'finished' : 'in_game'
+        winnerResult ? 'finished' : 'active'
       );
     }
 
@@ -3053,7 +3092,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               finished: false,
             },
             nextTurnId,
-            'in_game'
+            'active'
           );
         }
 
@@ -3410,7 +3449,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 <div className="flex items-center gap-2.5 text-blue-900 dark:text-blue-200">
                   <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
                   <span>
-                    <span className="font-bold">Room #{currentRoom.roomCode}</span> · Waiting for opponent to join...
+                    <span className="font-bold">
+                      Room #{currentRoom.roomCode.length > 8 ? currentRoom.roomCode.slice(0, 6).toUpperCase() : currentRoom.roomCode}
+                    </span>{' '}
+                    · Waiting for opponent to join...
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -3431,7 +3473,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               <div className="mb-4 p-3 bg-emerald-50/90 dark:bg-emerald-950/35 border border-emerald-200 dark:border-emerald-800 rounded-2xl flex flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex items-center gap-2 font-bold text-emerald-900 dark:text-emerald-200">
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                  <span>Room #{currentRoom.roomCode} · Live Match</span>
+                  <span>
+                    Room #{currentRoom.roomCode.length > 8 ? currentRoom.roomCode.slice(0, 6).toUpperCase() : currentRoom.roomCode} · Live Match
+                  </span>
                 </div>
                 <div className="flex items-center gap-2 text-slate-700 dark:text-slate-200 font-semibold">
                   <span className="px-2 py-0.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
@@ -4281,7 +4325,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 isHost={currentRoom ? isRoomHost : true}
                 isSeatedActivePlayer={isSeatedActivePlayer}
                 state={truthDareState}
-                onUpdateState={(next, status = 'in_game') => {
+                onUpdateState={(next, status = 'active') => {
                   setTruthDareState(next);
                   if (currentRoom) {
                     broadcastRoomMove('TD_MOVE', next, next.activePlayerId, status, {

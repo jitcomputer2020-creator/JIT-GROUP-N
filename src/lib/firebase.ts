@@ -1344,6 +1344,12 @@ function fromFirestoreSafeValue(val: any): any {
   return out;
 }
 
+export function normalizeRoomId(raw: string | undefined | null): string {
+  const trimmed = (raw || '').trim();
+  if (!trimmed || trimmed.length < 4 || trimmed.length > 160) return '';
+  return /^[a-zA-Z0-9_\-.@:]+$/.test(trimmed) ? trimmed : '';
+}
+
 export function buildUnifiedBoardAndMoveFields(
   stateObj: Record<string, any> | null | undefined,
   moveAction: string,
@@ -1440,6 +1446,12 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     data.createdAt && typeof data.createdAt.toMillis === 'function'
       ? data.createdAt.toMillis()
       : Date.now();
+  const lastUpdatedMs =
+    data.lastUpdated && typeof data.lastUpdated.toMillis === 'function'
+      ? data.lastUpdated.toMillis()
+      : data.updatedAt && typeof data.updatedAt.toMillis === 'function'
+      ? data.updatedAt.toMillis()
+      : createdMs;
 
   const isOpenGroup = Boolean(data.isOpenGroup);
   const maxPlayers = Number(data.maxPlayers || 2);
@@ -1475,16 +1487,17 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     roomId: resolvedRoomId,
     gameId: resolvedGameType,
     gameType: resolvedGameType,
-    hostId: String(data.hostId || ''),
+    hostId: String(data.hostId || resolvedPlayer1Id || ''),
     player1: resolvedPlayer1Id,
     player1Id: resolvedPlayer1Id,
     player1AuthUid: resolvedPlayer1AuthUid,
     player1Name: resolvedPlayer1Name,
-    player2: resolvedPlayer2Id,
-    player2Id: resolvedPlayer2Id,
+    player2: resolvedPlayer2Id || null,
+    player2Id: resolvedPlayer2Id || null,
     player2AuthUid: resolvedPlayer2AuthUid,
     player2Name: resolvedPlayer2Name,
     createdAt: createdMs,
+    lastUpdated: lastUpdatedMs,
     status: (data.status as MultiplayerRoom['status']) || 'waiting',
     maxPlayers,
     isPublicMatch: Boolean(data.isPublicMatch),
@@ -1497,7 +1510,7 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     mutedChatIds,
     boardState: gameState,
     gameState,
-    currentTurn: String(data.currentTurn || ''),
+    currentTurn: String(data.currentTurn || resolvedPlayer1Id || ''),
     diceRoll: resolvedDiceRoll,
     lastMove: resolvedLastMove,
     messages,
@@ -1570,7 +1583,8 @@ function getStoredHostedRoomCode(hostId: string): string | null {
   if (typeof window === 'undefined' || !hostId) return null;
   try {
     const val = window.localStorage.getItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`);
-    return val && /^\d{4}$/.test(val) ? val : null;
+    const clean = normalizeRoomId(val);
+    return clean || null;
   } catch {
     return null;
   }
@@ -1579,8 +1593,9 @@ function getStoredHostedRoomCode(hostId: string): string | null {
 function setStoredHostedRoomCode(hostId: string, roomCode: string | null): void {
   if (typeof window === 'undefined' || !hostId) return;
   try {
-    if (roomCode && /^\d{4}$/.test(roomCode)) {
-      window.localStorage.setItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`, roomCode);
+    const clean = normalizeRoomId(roomCode);
+    if (clean) {
+      window.localStorage.setItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`, clean);
     } else {
       window.localStorage.removeItem(`${HOSTED_ROOM_STORAGE_PREFIX}${hostId}`);
     }
@@ -1590,6 +1605,9 @@ function setStoredHostedRoomCode(hostId: string, roomCode: string | null): void 
 }
 
 function getRoomUpdatedMs(data: Record<string, any>): number {
+  if (data.lastUpdated && typeof data.lastUpdated.toMillis === 'function') {
+    return data.lastUpdated.toMillis();
+  }
   if (data.updatedAt && typeof data.updatedAt.toMillis === 'function') {
     return data.updatedAt.toMillis();
   }
@@ -1612,8 +1630,9 @@ async function cleanupSingleHostedRoomDoc(
   hostId: string,
   data?: Record<string, any>
 ): Promise<void> {
-  if (!/^\d{4}$/.test(code)) return;
-  const roomRef = doc(db, 'gameRooms', code);
+  const cleanId = normalizeRoomId(code);
+  if (!cleanId) return;
+  const roomRef = doc(db, 'gameRooms', cleanId);
   try {
     let roomData = data;
     if (!roomData) {
@@ -1638,6 +1657,7 @@ async function cleanupSingleHostedRoomDoc(
         gameStateJson: JSON.stringify(parsed.gameState || {}),
         currentTurn: '',
         moveAction: 'HOST_REPLACED',
+        lastUpdated: serverTimestamp(),
         updatedAt: serverTimestamp(),
       }).catch(() => {});
       await deleteDoc(roomRef).catch(() => {});
@@ -1648,7 +1668,7 @@ async function cleanupSingleHostedRoomDoc(
       parsed.players.some((p) => p.id === hostId) ||
       (parsed.waitingPlayers || []).some((p) => p.id === hostId)
     ) {
-      await kickOrLeaveFirestoreRoom(code, hostId);
+      await kickOrLeaveFirestoreRoom(cleanId, hostId);
     }
   } catch {
     // Best-effort cleanup of previous room
@@ -1660,12 +1680,13 @@ export async function releasePreviousHostedRoom(
   preserveRoomCode?: string
 ): Promise<void> {
   if (!hostId) return;
+  const cleanPreserve = normalizeRoomId(preserveRoomCode);
   const codesToClean = new Set<string>();
   const previousCode = getStoredHostedRoomCode(hostId);
-  if (previousCode && previousCode !== preserveRoomCode) {
+  if (previousCode && previousCode !== cleanPreserve) {
     codesToClean.add(previousCode);
   }
-  setStoredHostedRoomCode(hostId, preserveRoomCode || null);
+  setStoredHostedRoomCode(hostId, cleanPreserve || null);
 
   // Query Firestore directly across devices/tabs for ALL previously hosted rooms by this user
   const docsByCode = new Map<string, Record<string, any>>();
@@ -1677,8 +1698,8 @@ export async function releasePreviousHostedRoom(
     );
     const snap = await getDocsFromServer(q).catch(() => getDocs(q));
     snap.docs.forEach((d) => {
-      const code = d.id;
-      if (/^\d{4}$/.test(code) && code !== preserveRoomCode) {
+      const code = normalizeRoomId(d.id);
+      if (code && code !== cleanPreserve) {
         codesToClean.add(code);
         docsByCode.set(code, d.data());
       }
@@ -1776,7 +1797,7 @@ export async function createFirestoreGameRoom(
     },
   ];
 
-  const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'in_game' : 'waiting';
+  const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'active' : 'waiting';
 
   let lastErr: any = null;
   for (let createAttempt = 0; createAttempt < 12; createAttempt++) {
@@ -1817,6 +1838,7 @@ export async function createFirestoreGameRoom(
       currentTurn: hostPlayer.id,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
+      lastUpdated: serverTimestamp(),
     };
 
     try {
@@ -1846,6 +1868,7 @@ export async function createFirestoreGameRoom(
           player2AuthUid: null,
           player2Name: '',
           createdAt: Date.now(),
+          lastUpdated: Date.now(),
           status: initialStatus,
           maxPlayers: safeMax,
           isPublicMatch,
@@ -1889,8 +1912,8 @@ export async function joinFirestoreGameRoom(
   gameId: string | undefined,
   player: { id: string; name: string; avatar: string }
 ): Promise<MultiplayerRoom> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) {
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) {
     throw new Error('Please enter a valid 4-digit room code.');
   }
 
@@ -1947,12 +1970,13 @@ export async function joinFirestoreGameRoom(
           player1: nextPlayers[0]?.id || parsed.hostId,
           player1Id: nextPlayers[0]?.id || parsed.hostId,
           player1Name: nextPlayers[0]?.name || parsed.player1Name || '',
-          player2: nextPlayers[1]?.id || '',
-          player2Id: nextPlayers[1]?.id || '',
+          player2: nextPlayers[1]?.id || null,
+          player2Id: nextPlayers[1]?.id || null,
           player2Name: nextPlayers[1]?.name || '',
           playerCount: nextCount,
           hostId: parsed.hostId,
-          status: 'in_game',
+          status: 'active',
+          lastUpdated: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
 
@@ -1962,10 +1986,10 @@ export async function joinFirestoreGameRoom(
           player1: nextPlayers[0]?.id || parsed.hostId,
           player1Id: nextPlayers[0]?.id || parsed.hostId,
           player1Name: nextPlayers[0]?.name || parsed.player1Name || '',
-          player2: nextPlayers[1]?.id || '',
-          player2Id: nextPlayers[1]?.id || '',
+          player2: nextPlayers[1]?.id || null,
+          player2Id: nextPlayers[1]?.id || null,
           player2Name: nextPlayers[1]?.name || '',
-          status: 'in_game' as const,
+          status: 'active' as const,
           players: nextPlayers,
           waitingPlayers: nextWaiting,
         };
@@ -1991,11 +2015,7 @@ export async function joinFirestoreGameRoom(
 
       // Auto-start as soon as the room reaches capacity (e.g. 2/2 players)
       const nextStatus: MultiplayerRoom['status'] =
-        nextPlayers.length >= parsed.maxPlayers
-          ? parsed.isPublicMatch
-            ? 'active'
-            : 'in_game'
-          : parsed.status;
+        nextPlayers.length >= parsed.maxPlayers ? 'active' : parsed.status;
       const isStarting = nextStatus === 'active' || nextStatus === 'in_game';
       const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const nextGameState =
@@ -2021,8 +2041,8 @@ export async function joinFirestoreGameRoom(
         player1Id: p1Id,
         player1AuthUid: p1AuthUid,
         player1Name: p1Name,
-        player2: p2Id,
-        player2Id: p2Id,
+        player2: p2Id || null,
+        player2Id: p2Id || null,
         player2AuthUid: p2AuthUid,
         player2Name: p2Name,
         playerCount: nextPlayers.length,
@@ -2036,6 +2056,7 @@ export async function joinFirestoreGameRoom(
               currentTurn: parsed.players[0]?.id || parsed.hostId,
             }
           : {}),
+        lastUpdated: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
@@ -2110,7 +2131,7 @@ function isPlayer2Unassigned(data: Record<string, any>, parsed: MultiplayerRoom)
 }
 
 function filterActiveWaitingRooms(
-  docs: Array<{ data: () => Record<string, any> }>,
+  docs: Array<{ data: () => Record<string, any>; id?: string }>,
   gameId: string,
   excludeRoomCode: string,
   playerId: string
@@ -2118,13 +2139,17 @@ function filterActiveWaitingRooms(
   const active: MultiplayerRoom[] = [];
   for (const d of docs) {
     const data = d.data();
-    const parsed = parseRoomSnapshotData(data);
+    const parsed = parseRoomSnapshotData({
+      ...data,
+      roomId: data.roomId || data.roomCode || d.id || '',
+      roomCode: data.roomCode || data.roomId || d.id || '',
+    });
     // Match any open public waiting room for this game (never hijack private Friend rooms or Open Group rooms)
     if (
       data.isPublicMatch === false ||
       parsed.isOpenGroup ||
       parsed.status !== 'waiting' ||
-      parsed.gameId !== gameId
+      (parsed.gameType !== gameId && parsed.gameId !== gameId)
     ) {
       continue;
     }
@@ -2132,12 +2157,13 @@ function filterActiveWaitingRooms(
       continue;
     }
     if (isRoomDocStale(data, PUBLIC_QUEUE_STALE_MS)) {
-      if (parsed.players.length <= 1 && parsed.roomCode && /^\d{4}$/.test(parsed.roomCode)) {
-        deleteDoc(doc(db, 'gameRooms', parsed.roomCode)).catch(() => {});
+      const staleId = normalizeRoomId(parsed.roomId || parsed.roomCode || d.id);
+      if (parsed.players.length <= 1 && staleId) {
+        deleteDoc(doc(db, 'gameRooms', staleId)).catch(() => {});
       }
       continue;
     }
-    if (parsed.roomCode === excludeRoomCode) continue;
+    if (parsed.roomCode === excludeRoomCode || parsed.roomId === excludeRoomCode) continue;
     if (
       parsed.player1Id === playerId ||
       parsed.player1 === playerId ||
@@ -2161,14 +2187,27 @@ async function listWaitingQuickMatchRooms(
   playerId: string
 ): Promise<MultiplayerRoom[]> {
   try {
-    // Global query across gameRooms for any unstarted room with status == 'waiting'
-    const q = query(
-      collection(db, 'gameRooms'),
-      where('status', '==', 'waiting'),
-      limit(500)
-    );
-    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
-    return filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
+    // Prefer ordered query (status == 'waiting', orderBy createdAt asc); seamlessly fall back if composite index is absent
+    let docsList: Array<{ data: () => Record<string, any>; id?: string }> = [];
+    try {
+      const orderedQ = query(
+        collection(db, 'gameRooms'),
+        where('status', '==', 'waiting'),
+        orderBy('createdAt', 'asc'),
+        limit(50)
+      );
+      const orderedSnap = await getDocsFromServer(orderedQ).catch(() => getDocs(orderedQ));
+      docsList = orderedSnap.docs;
+    } catch {
+      const fallbackQ = query(
+        collection(db, 'gameRooms'),
+        where('status', '==', 'waiting'),
+        limit(200)
+      );
+      const fallbackSnap = await getDocsFromServer(fallbackQ).catch(() => getDocs(fallbackQ));
+      docsList = fallbackSnap.docs;
+    }
+    return filterActiveWaitingRooms(docsList, gameId, excludeRoomCode, playerId);
   } catch {
     return [];
   }
@@ -2261,8 +2300,8 @@ function filterActiveQueueTickets(
 }
 
 export async function fetchFirestoreGameRoomByCode(roomCode: string): Promise<MultiplayerRoom | null> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return null;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return null;
   try {
     const snap = await fetchDocServerFirst(['gameRooms', cleanCode]);
     if (!snap.exists()) return null;
@@ -2590,10 +2629,11 @@ export async function pairQueuePlayersIntoRoom(
 }
 
 export async function touchMatchmakingRoomHeartbeat(roomCode: string): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch {
@@ -2636,8 +2676,8 @@ export async function tryAtomicallyJoinWaitingRoom(
   gameId: string,
   player: { id: string; name: string; avatar: string }
 ): Promise<MultiplayerRoom | null> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return null;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return null;
 
   const roomRef = doc(db, 'gameRooms', cleanCode);
   const slotRef = doc(db, 'matchmakingQueue', `slot_${gameId}`);
@@ -2710,6 +2750,7 @@ export async function tryAtomicallyJoinWaitingRoom(
       ...unifiedJoin,
       moveAction: 'GAME_START',
       currentTurn: joinedPlayer1Id,
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
 
@@ -2724,6 +2765,7 @@ export async function tryAtomicallyJoinWaitingRoom(
 
     return {
       ...parsed,
+      roomCode: cleanCode,
       roomId: cleanCode,
       gameType: gameId,
       player1: joinedPlayer1Id,
@@ -2762,42 +2804,36 @@ export async function quickMatchFirestoreRoom(
   void syncServerClockWithTicket(player, gameId);
 
   let lastErr: any = null;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    // 1. OVERRIDE ROOM CREATION: Global atomic query across Firestore for ANY room where status == 'waiting' & player2 is unassigned
-    const waitingCandidates = await listWaitingQuickMatchRooms(gameId, '', player.id).catch(() => []);
-    for (const candidate of waitingCandidates) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    // 1. Query Firestore for oldest waiting room where status === 'waiting' & player2Id is empty/null & player1Id !== currentUserId
+    const earliestWaiting = await findOtherWaitingQuickMatchRoom(gameId, '', player.id).catch(() => null);
+    if (earliestWaiting) {
       try {
-        const joined = await tryAtomicallyJoinWaitingRoom(candidate.roomCode, gameId, player);
+        const joined = await tryAtomicallyJoinWaitingRoom(earliestWaiting.roomCode, gameId, player);
         if (joined) {
           await leaveMatchmakingQueue(player.id).catch(() => {});
           setStoredHostedRoomCode(player.id, null);
           return { room: joined, matchedExisting: true };
         }
       } catch {
-        // Claimed concurrently; check next waiting room or fall through to atomic slot transaction
+        // Claimed concurrently; retry transaction check below
       }
     }
 
-    // 2. Canonical atomic Firestore transaction prevents concurrent split-room creation
-    const chosenCode = await pickAvailableRoomCodeAndCleanStale(player.id);
-    const candidateRoomRef = doc(db, 'gameRooms', chosenCode);
+    // 2. Atomic Firestore creation with unique auto-generated room ID: doc(collection(db, 'gameRooms'))
+    const autoRoomRef = doc(collection(db, 'gameRooms'));
+    const generatedRoomId = autoRoomRef.id;
 
     try {
       const result = await runTransaction(db, async (tx) => {
         const slotSnap = await tx.get(slotRef);
         const slotData = slotSnap.exists() ? slotSnap.data() : null;
-        const slotRoomCode = slotData ? String(slotData.matchedRoomCode || '') : '';
+        const slotRoomId = normalizeRoomId(slotData ? String(slotData.matchedRoomCode || '') : '');
         const slotNotStale =
           Boolean(slotData) && !isRoomDocStale(slotData || {}, PUBLIC_QUEUE_STALE_MS);
 
-        if (
-          slotData &&
-          slotData.status === 'waiting' &&
-          slotData.gameId === gameId &&
-          /^\d{4}$/.test(slotRoomCode) &&
-          slotNotStale
-        ) {
-          const waitingRoomRef = doc(db, 'gameRooms', slotRoomCode);
+        if (slotData && slotData.status === 'waiting' && slotData.gameId === gameId && slotRoomId && slotNotStale) {
+          const waitingRoomRef = doc(db, 'gameRooms', slotRoomId);
           const waitingRoomSnap = await tx.get(waitingRoomRef);
           if (waitingRoomSnap.exists()) {
             const rawWaitingData = waitingRoomSnap.data();
@@ -2809,7 +2845,10 @@ export async function quickMatchFirestoreRoom(
               parsedWaiting.status === 'waiting' &&
               parsedWaiting.players.some((p) => p.id === player.id)
             ) {
-              tx.update(waitingRoomRef, { updatedAt: serverTimestamp() });
+              tx.update(waitingRoomRef, {
+                lastUpdated: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
               tx.update(slotRef, { updatedAt: serverTimestamp() });
               return {
                 matchedExisting: false,
@@ -2859,7 +2898,7 @@ export async function quickMatchFirestoreRoom(
               const unifiedForceJoin = buildUnifiedBoardAndMoveFields(updatedGameState, 'GAME_START', player.id);
 
               tx.update(waitingRoomRef, {
-                roomId: slotRoomCode,
+                roomId: slotRoomId,
                 gameType: gameId,
                 playersJson: JSON.stringify(nextPlayers),
                 player1: joinedPlayer1Id,
@@ -2878,12 +2917,13 @@ export async function quickMatchFirestoreRoom(
                 ...unifiedForceJoin,
                 moveAction: 'GAME_START',
                 currentTurn: joinedPlayer1Id,
+                lastUpdated: serverTimestamp(),
                 updatedAt: serverTimestamp(),
               });
 
               tx.update(slotRef, {
                 status: 'matched',
-                matchedRoomCode: slotRoomCode,
+                matchedRoomCode: slotRoomId,
                 matchedWithId: player.id,
                 updatedAt: serverTimestamp(),
               });
@@ -2892,7 +2932,8 @@ export async function quickMatchFirestoreRoom(
                 matchedExisting: true,
                 room: {
                   ...parsedWaiting,
-                  roomId: slotRoomCode,
+                  roomCode: slotRoomId,
+                  roomId: slotRoomId,
                   gameType: gameId,
                   player1: joinedPlayer1Id,
                   player1Id: joinedPlayer1Id,
@@ -2916,12 +2957,7 @@ export async function quickMatchFirestoreRoom(
           }
         }
 
-        // Only create a brand new waiting room if zero waiting rooms exist globally
-        const existingCandidateSnap = await tx.get(candidateRoomRef);
-        if (existingCandidateSnap.exists()) {
-          throw new Error('ROOM_CODE_COLLISION');
-        }
-
+        // Only create a brand new waiting room (auto-generated Firestore ID) if zero waiting rooms exist
         const nowMs = Date.now();
         const hostAuthUid = auth.currentUser?.uid || null;
         const hostEntry: RoomPlayer = {
@@ -2935,11 +2971,12 @@ export async function quickMatchFirestoreRoom(
           joinedAtMs: nowMs,
         };
         const initialPlayers = [hostEntry];
-        const unifiedWaitFields = buildUnifiedBoardAndMoveFields({}, 'ROOM_CREATED', player.id, null);
+        const initialWaitBoard = buildInitialGameStateForGame(gameId, `wait_${nowMs}`);
+        const unifiedWaitFields = buildUnifiedBoardAndMoveFields(initialWaitBoard, 'ROOM_CREATED', player.id, null);
 
-        tx.set(candidateRoomRef, {
-          roomCode: chosenCode,
-          roomId: chosenCode,
+        tx.set(autoRoomRef, {
+          roomCode: generatedRoomId,
+          roomId: generatedRoomId,
           gameId,
           gameType: gameId,
           hostId: player.id,
@@ -2962,13 +2999,14 @@ export async function quickMatchFirestoreRoom(
           reactionsJson: '[]',
           mutedVoiceIdsJson: '[]',
           mutedChatIdsJson: '[]',
-          gameStateJson: '{}',
+          gameStateJson: JSON.stringify(initialWaitBoard),
           ...unifiedWaitFields,
           messagesJson: '[]',
           moveAction: 'ROOM_CREATED',
           currentTurn: player.id,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
+          lastUpdated: serverTimestamp(),
         });
 
         if (slotSnap.exists()) {
@@ -2978,7 +3016,7 @@ export async function quickMatchFirestoreRoom(
             playerAvatar: cleanAvatar,
             gameId,
             status: 'waiting',
-            matchedRoomCode: chosenCode,
+            matchedRoomCode: generatedRoomId,
             matchedWithId: '',
             joinedAtMs: nowMs,
             updatedAt: serverTimestamp(),
@@ -2991,7 +3029,7 @@ export async function quickMatchFirestoreRoom(
             playerAvatar: cleanAvatar,
             gameId,
             status: 'waiting',
-            matchedRoomCode: chosenCode,
+            matchedRoomCode: generatedRoomId,
             matchedWithId: '',
             joinedAtMs: nowMs,
             createdAt: serverTimestamp(),
@@ -3002,8 +3040,8 @@ export async function quickMatchFirestoreRoom(
         return {
           matchedExisting: false,
           room: {
-            roomCode: chosenCode,
-            roomId: chosenCode,
+            roomCode: generatedRoomId,
+            roomId: generatedRoomId,
             gameId,
             gameType: gameId,
             hostId: player.id,
@@ -3016,6 +3054,7 @@ export async function quickMatchFirestoreRoom(
             player2AuthUid: null,
             player2Name: '',
             createdAt: nowMs,
+            lastUpdated: nowMs,
             status: 'waiting',
             maxPlayers: safeMax,
             isPublicMatch: true,
@@ -3026,8 +3065,8 @@ export async function quickMatchFirestoreRoom(
             reactions: [],
             mutedVoiceIds: [],
             mutedChatIds: [],
-            boardState: null,
-            gameState: null,
+            boardState: initialWaitBoard,
+            gameState: initialWaitBoard,
             currentTurn: player.id,
             diceRoll: null,
             lastMove: unifiedWaitFields.lastMove,
@@ -3041,16 +3080,12 @@ export async function quickMatchFirestoreRoom(
         setStoredHostedRoomCode(player.id, null);
         await leaveMatchmakingQueue(player.id).catch(() => {});
       } else {
-        setStoredHostedRoomCode(player.id, result.room.roomCode);
+        setStoredHostedRoomCode(player.id, result.room.roomId || result.room.roomCode);
       }
       return result;
     } catch (err: any) {
       lastErr = err;
-      if (err?.message === 'ROOM_CODE_COLLISION') {
-        await cleanupSingleHostedRoomDoc(chosenCode, player.id).catch(() => {});
-        continue;
-      }
-      if (err?.code === 'permission-denied' && attempt < 7) {
+      if (err?.code === 'permission-denied' && attempt < 5) {
         continue;
       }
       if (err?.code === 'permission-denied') {
@@ -3142,22 +3177,23 @@ export async function startFirestoreGameRoom(
   initialGameState: Record<string, any>,
   firstTurnId: string
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   try {
     const roomRef = doc(db, 'gameRooms', cleanCode);
     const snap = await getDoc(roomRef).catch(() => null);
-    const gameId = snap?.exists() ? String(snap.data().gameId || '') : '';
+    const gameId = snap?.exists() ? String(snap.data().gameType || snap.data().gameId || '') : '';
     const hydratedState = buildInitialGameStateForGame(gameId, startId, initialGameState);
     const unified = buildUnifiedBoardAndMoveFields(hydratedState, 'GAME_START', firstTurnId);
     await updateDoc(roomRef, {
-      status: 'in_game',
+      status: 'active',
       gameType: gameId || 'tictactoe',
       gameStateJson: JSON.stringify(hydratedState),
       ...unified,
       currentTurn: String(firstTurnId || '').slice(0, 64),
       moveAction: 'GAME_START',
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3173,12 +3209,13 @@ export async function pushFirestoreGameMove(
   moveAction: string,
   newGameState: Record<string, any>,
   nextTurnId?: string,
-  status: 'active' | 'in_game' | 'finished' = 'in_game',
+  status: 'active' | 'in_game' | 'finished' = 'active',
   options?: { diceRoll?: number | null; summary?: string }
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const actorId = String(newGameState?.byPlayerId || '');
+  const normalizedStatus: 'active' | 'finished' = status === 'finished' ? 'finished' : 'active';
   const unified = buildUnifiedBoardAndMoveFields(
     newGameState,
     moveAction,
@@ -3192,7 +3229,8 @@ export async function pushFirestoreGameMove(
       ...unified,
       moveAction: String(moveAction).slice(0, 40),
       currentTurn: String(nextTurnId || '').slice(0, 64),
-      status,
+      status: normalizedStatus,
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3216,8 +3254,8 @@ export async function pushFirestoreQuizAnswer(
     moveSeq: number;
   }
 ): Promise<any | null> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return null;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return null;
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     return await runTransaction(db, async (tx) => {
@@ -3254,7 +3292,7 @@ export async function pushFirestoreQuizAnswer(
       const isLastQ = currentIndex >= qList.length - 1;
       const nextIndex = allAnswered && !isLastQ && currentIndex === params.questionIndex ? currentIndex + 1 : currentIndex;
       const nextFinished = Boolean(existing.finished) || (allAnswered && isLastQ && currentIndex === params.questionIndex);
-      const status: 'in_game' | 'finished' = nextFinished ? 'finished' : 'in_game';
+      const status: 'active' | 'finished' = nextFinished ? 'finished' : 'active';
 
       const nextState = {
         questions: qList,
@@ -3275,6 +3313,7 @@ export async function pushFirestoreQuizAnswer(
         moveAction: 'QUIZ_MOVE',
         currentTurn: '',
         status,
+        lastUpdated: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
       return nextState;
@@ -3293,18 +3332,19 @@ export async function rematchFirestoreGameRoom(
   resetState: Record<string, any>,
   firstTurnId: string
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const moveId = `rematch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const stampedReset = { ...resetState, moveId, moveSeq: 0 };
   const unified = buildUnifiedBoardAndMoveFields(stampedReset, 'REMATCH', firstTurnId);
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
-      status: 'in_game',
+      status: 'active',
       gameStateJson: JSON.stringify(stampedReset),
       ...unified,
       moveAction: 'REMATCH',
       currentTurn: String(firstTurnId || '').slice(0, 64),
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3319,8 +3359,8 @@ export async function sendFirestoreRoomChat(
   roomCode: string,
   msg: Omit<InGameChatMessage, 'id' | 'roomCode' | 'timestamp'>
 ): Promise<{ sent: boolean; restricted?: boolean }> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return { sent: false };
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return { sent: false };
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     const snap = await getDoc(roomRef);
@@ -3342,6 +3382,7 @@ export async function sendFirestoreRoomChat(
     const nextMessages = [...parsed.messages, formatted].slice(-50);
     await updateDoc(roomRef, {
       messagesJson: JSON.stringify(nextMessages),
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
     return { sent: true };
@@ -3358,8 +3399,8 @@ export async function sendFirestoreRoomReaction(
   roomCode: string,
   reaction: Omit<RoomReaction, 'id' | 'createdAtMs'>
 ): Promise<RoomReaction | null> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return null;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return null;
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     const snap = await getDoc(roomRef);
@@ -3375,6 +3416,7 @@ export async function sendFirestoreRoomReaction(
     const nextReactions = [...(parsed.reactions || []), item].slice(-25);
     await updateDoc(roomRef, {
       reactionsJson: JSON.stringify(nextReactions),
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
     return item;
@@ -3391,8 +3433,8 @@ export async function hostUpdateRoomModeration(
   hostId: string,
   updates: { mutedVoiceIds?: string[]; mutedChatIds?: string[] }
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     const snap = await getDoc(roomRef);
@@ -3406,6 +3448,7 @@ export async function hostUpdateRoomModeration(
       mutedChatIdsJson: JSON.stringify(
         updates.mutedChatIds !== undefined ? updates.mutedChatIds : parsed.mutedChatIds || []
       ),
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3421,8 +3464,8 @@ export async function hostRotateRoomPlayers(
   nextActiveIds: string[],
   resetState?: Record<string, any>
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const roomRef = doc(db, 'gameRooms', cleanCode);
   try {
     const snap = await getDoc(roomRef);
@@ -3471,11 +3514,12 @@ export async function hostRotateRoomPlayers(
       player2Name: nextActive[1]?.name || '',
       playerCount: Math.min(500, nextActive.length + nextWaiting.length),
       hostId: parsed.hostId,
-      status: 'in_game',
+      status: 'active',
       gameStateJson: JSON.stringify(stampedRotate),
       ...unifiedRotate,
       moveAction: 'REMATCH',
       currentTurn: nextTurnId,
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3489,8 +3533,8 @@ export async function kickOrLeaveFirestoreRoom(
   roomCode: string,
   targetPlayerId: string
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   if (getStoredHostedRoomCode(targetPlayerId) === cleanCode) {
     setStoredHostedRoomCode(targetPlayerId, null);
   }
@@ -3544,6 +3588,7 @@ export async function kickOrLeaveFirestoreRoom(
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
       status: updatedActive.length < 2 && parsed.status === 'active' ? 'waiting' : parsed.status,
+      lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3559,8 +3604,8 @@ export function subscribeToGameRoom(
   onRoomUpdate: (room: MultiplayerRoom, moveAction: string) => void,
   onRoomDeleted?: () => void
 ): Unsubscribe {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) {
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) {
     return () => {};
   }
   return onSnapshot(
@@ -3611,8 +3656,8 @@ export async function upsertFirestoreVoicePeer(
   roomCode: string,
   peer: FirestoreVoicePeer
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const peerId = sanitizeVoiceId(peer.peerId);
   const peerRef = doc(db, 'gameRooms', cleanCode, 'voice_peers', peerId);
   const safeName = (peer.name || 'Player').trim().slice(0, 80) || 'Player';
@@ -3650,8 +3695,8 @@ export async function removeFirestoreVoicePeer(
   roomCode: string,
   rawPeerId: string
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const peerId = sanitizeVoiceId(rawPeerId);
   try {
     await deleteDoc(doc(db, 'gameRooms', cleanCode, 'voice_peers', peerId));
@@ -3664,8 +3709,8 @@ export function subscribeToFirestoreVoicePeers(
   roomCode: string,
   onPeers: (peers: FirestoreVoicePeer[]) => void
 ): Unsubscribe {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return () => {};
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return () => {};
   const q = query(
     collection(db, 'gameRooms', cleanCode, 'voice_peers'),
     where('micEnabled', 'in', [true, false])
@@ -3695,8 +3740,8 @@ export async function sendFirestoreVoiceSignal(
   roomCode: string,
   signal: Omit<FirestoreVoiceSignal, 'id'>
 ): Promise<void> {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return;
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return;
   const signalId = `sig_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const payload: Record<string, any> = {
     id: signalId,
@@ -3746,8 +3791,8 @@ export function subscribeToFirestoreVoiceSignals(
   myPeerId: string,
   onSignal: (signal: FirestoreVoiceSignal) => void
 ): Unsubscribe {
-  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
-  if (cleanCode.length !== 4) return () => {};
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode) return () => {};
   const targetId = sanitizeVoiceId(myPeerId);
   const q = query(
     collection(db, 'gameRooms', cleanCode, 'voice_signals'),

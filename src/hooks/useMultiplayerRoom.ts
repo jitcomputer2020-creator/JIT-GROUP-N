@@ -109,6 +109,9 @@ export function useMultiplayerRoom({
     if (!room.players.some((p) => p.id === myId)) {
       return false;
     }
+    if (room.status === 'finished') {
+      return false;
+    }
     if (room.status === 'waiting' && !room.isOpenGroup) {
       return false;
     }
@@ -132,6 +135,9 @@ export function useMultiplayerRoom({
         : undefined);
     const liveFbUid = auth.currentUser?.uid || firebaseAuthUidRef.current || null;
 
+    if (liveFbUid && room.currentTurn && room.currentTurn !== liveFbUid) {
+      return false;
+    }
     if (seatAuthUid && liveFbUid !== seatAuthUid) {
       return false;
     }
@@ -169,7 +175,7 @@ export function useMultiplayerRoom({
       moveAction: string,
       newGameState: Record<string, any>,
       nextTurnId?: string,
-      status: 'active' | 'in_game' | 'finished' = 'in_game',
+      status: 'active' | 'in_game' | 'finished' = 'active',
       options?: { bypassTurnGuard?: boolean }
     ): boolean => {
       const room = currentRoomRef.current;
@@ -206,6 +212,7 @@ export function useMultiplayerRoom({
         boardState: unified.boardState,
         diceRoll: unified.diceRoll,
         lastMove: unified.lastMove,
+        lastUpdated: Date.now(),
       };
 
       currentRoomRef.current = optimisticRoom;

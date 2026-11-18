@@ -34,7 +34,7 @@ interface CarromBoardProps {
   onSyncMove?: (
     state: CarromSyncedState,
     nextTurnId: string,
-    status: 'in_game' | 'finished'
+    status: 'active' | 'in_game' | 'finished'
   ) => void;
   onRequestRematch?: () => void;
   onMatchFinish: (outcome: 'win' | 'loss' | 'draw', summary: string, points: number) => void;
@@ -147,8 +147,12 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
   const isAuthorizedMultiplayerActor = (() => {
     if (!currentRoom || gameMode === 'ai') return turn === 'player';
     if (isWaitingSpectator || !activePlayerId) return false;
+    if (currentRoom.status === 'finished') return false;
     if (turn !== mySide) return false;
     const roomTurn = currentRoom.currentTurn || expectedTurnActorId || '';
+    if (firebaseAuthUid && currentRoom.currentTurn && currentRoom.currentTurn !== firebaseAuthUid) {
+      return false;
+    }
     if (roomTurn !== activePlayerId || expectedTurnActorId !== activePlayerId) return false;
     const seatPlayer = currentRoom.players.find((p) => p.id === roomTurn);
     if (firebaseAuthUid && seatPlayer?.authUid && seatPlayer.authUid !== firebaseAuthUid) {
@@ -566,7 +570,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
               finished: finishedRef.current,
             },
             nextTurnActorId,
-            finishedRef.current ? 'finished' : 'in_game'
+            finishedRef.current ? 'finished' : 'active'
           );
         }
 

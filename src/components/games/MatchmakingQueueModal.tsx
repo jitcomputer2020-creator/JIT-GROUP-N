@@ -97,7 +97,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
               <div className="px-3.5 py-2 rounded-2xl bg-blue-50 dark:bg-blue-950/50 border border-blue-200 dark:border-blue-800 flex items-center gap-1.5">
                 <Users className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
                 <span className="font-mono text-sm font-black text-blue-700 dark:text-blue-300">
-                  #{roomCode}
+                  #{roomCode.length > 6 ? roomCode.slice(0, 6).toUpperCase() : roomCode}
                 </span>
               </div>
             )}

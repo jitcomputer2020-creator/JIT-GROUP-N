@@ -107,7 +107,10 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
           <div className="flex items-center gap-1.5 bg-purple-50 dark:bg-purple-950/70 border border-purple-200 dark:border-purple-800 px-2.5 py-1 rounded-xl">
             <Shuffle className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
             <span className="text-xs font-bold text-purple-700 dark:text-purple-300 whitespace-nowrap">
-              Random Match{roomCode ? ` #${roomCode}` : ''}
+              Random Match
+              {roomCode
+                ? ` #${roomCode.length > 6 ? roomCode.slice(0, 6).toUpperCase() : roomCode}`
+                : ''}
             </span>
           </div>
         )}

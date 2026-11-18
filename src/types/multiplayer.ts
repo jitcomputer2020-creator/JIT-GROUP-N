@@ -143,6 +143,7 @@ export interface MultiplayerRoom {
   player2AuthUid?: string | null;
   player2Name?: string;
   createdAt: number;
+  lastUpdated?: number;
   status: 'waiting' | 'active' | 'in_game' | 'finished';
   maxPlayers: number;
   isPublicMatch?: boolean;
