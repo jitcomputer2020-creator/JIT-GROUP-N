@@ -8,6 +8,7 @@ export type AIDifficulty = 'easy' | 'medium' | 'hard';
 
 export interface RoomPlayer {
   id: string;
+  authUid?: string;
   name: string;
   avatar: string;
   isHost: boolean;
@@ -16,6 +17,47 @@ export interface RoomPlayer {
   score?: number;
   isMuted?: boolean;
   joinedAtMs?: number;
+}
+
+export interface CarromSyncedCoin {
+  id: string;
+  x: number;
+  y: number;
+  r: number;
+  type: 'white' | 'black' | 'queen' | 'striker';
+  pocketed: boolean;
+}
+
+export interface CarromSyncedState {
+  coins: CarromSyncedCoin[];
+  turn: 'player' | 'opponent';
+  scores: { player: number; opponent: number; queenHolder: string };
+  statusLog: string[];
+  winnerMsg: string | null;
+  finished: boolean;
+  moveId?: string;
+  moveSeq?: number;
+  byPlayerId?: string;
+}
+
+export interface QuizSyncedState {
+  questions: Array<{
+    q: string;
+    options: string[];
+    answer: number;
+    category: string;
+    domain: 'cs' | 'general';
+    explanation?: string;
+  }>;
+  source: 'ai' | 'curated-70-30';
+  index: number;
+  scores: Record<string, number>;
+  answersByQ: Record<number, Record<string, number | null>>;
+  finished: boolean;
+  winnerId?: string | null;
+  moveId?: string;
+  moveSeq?: number;
+  byPlayerId?: string;
 }
 
 export interface InGameChatMessage {

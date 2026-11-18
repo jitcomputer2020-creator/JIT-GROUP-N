@@ -8,24 +8,35 @@
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { GameMode, AIDifficulty } from '../../types/multiplayer';
+import {
+  GameMode,
+  AIDifficulty,
+  MultiplayerRoom,
+  CarromSyncedState,
+  CarromSyncedCoin,
+} from '../../types/multiplayer';
 import { soundFx } from '../../utils/soundFx';
 import { Target, RotateCcw, Sparkles } from 'lucide-react';
 
-interface Coin {
-  id: string;
-  x: number;
-  y: number;
+interface Coin extends CarromSyncedCoin {
   vx: number;
   vy: number;
-  r: number;
-  type: 'white' | 'black' | 'queen' | 'striker';
-  pocketed: boolean;
 }
 
 interface CarromBoardProps {
   gameMode: GameMode;
   aiDifficulty: AIDifficulty;
+  currentRoom?: MultiplayerRoom | null;
+  activePlayerId?: string;
+  firebaseAuthUid?: string | null;
+  isWaitingSpectator?: boolean;
+  syncedState?: CarromSyncedState | null;
+  onSyncMove?: (
+    state: CarromSyncedState,
+    nextTurnId: string,
+    status: 'in_game' | 'finished'
+  ) => void;
+  onRequestRematch?: () => void;
   onMatchFinish: (outcome: 'win' | 'loss' | 'draw', summary: string, points: number) => void;
 }
 
@@ -74,6 +85,13 @@ function createInitialCoins(): Coin[] {
 export const CarromBoard: React.FC<CarromBoardProps> = ({
   gameMode,
   aiDifficulty,
+  currentRoom,
+  activePlayerId,
+  firebaseAuthUid,
+  isWaitingSpectator = false,
+  syncedState,
+  onSyncMove,
+  onRequestRematch,
   onMatchFinish,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -89,7 +107,9 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     pocketed: false,
   });
   const animRef = useRef<number | null>(null);
+  const aiTimerRef = useRef<number | null>(null);
   const finishedRef = useRef(false);
+  const lastAppliedMoveIdRef = useRef<string | null>(null);
 
   const [strikerX, setStrikerX] = useState(SIZE / 2);
   const [aimAngle, setAimAngle] = useState(0); // -65 to +65 deg from straight forward
@@ -101,6 +121,41 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     'Position striker, set angle & power, or tap the board to aim!',
   ]);
   const [winnerMsg, setWinnerMsg] = useState<string | null>(null);
+
+  const scoresRef = useRef(scores);
+  scoresRef.current = scores;
+  const statusLogRef = useRef(statusLog);
+  statusLogRef.current = statusLog;
+  const gameModeRef = useRef(gameMode);
+  gameModeRef.current = gameMode;
+  const currentRoomRef = useRef(currentRoom);
+  currentRoomRef.current = currentRoom;
+
+  const mySide: 'player' | 'opponent' =
+    !currentRoom || gameMode === 'ai'
+      ? 'player'
+      : currentRoom.players[0]?.id === activePlayerId
+      ? 'player'
+      : 'opponent';
+
+  const expectedTurnActorId = !currentRoom
+    ? activePlayerId
+    : turn === 'player'
+    ? currentRoom.players[0]?.id
+    : currentRoom.players[1]?.id;
+
+  const isAuthorizedMultiplayerActor = (() => {
+    if (!currentRoom || gameMode === 'ai') return turn === 'player';
+    if (isWaitingSpectator || !activePlayerId) return false;
+    if (turn !== mySide) return false;
+    const roomTurn = currentRoom.currentTurn || expectedTurnActorId || '';
+    if (roomTurn !== activePlayerId || expectedTurnActorId !== activePlayerId) return false;
+    const seatPlayer = currentRoom.players.find((p) => p.id === roomTurn);
+    if (firebaseAuthUid && seatPlayer?.authUid && seatPlayer.authUid !== firebaseAuthUid) {
+      return false;
+    }
+    return true;
+  })();
 
   const drawBoard = useCallback(() => {
     const canvas = canvasRef.current;
@@ -219,12 +274,90 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
   useEffect(() => {
     return () => {
       if (animRef.current) cancelAnimationFrame(animRef.current);
+      if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
     };
   }, []);
 
+  // Clear AI timer if entering multiplayer room
+  useEffect(() => {
+    if (gameMode !== 'ai' || currentRoom) {
+      if (aiTimerRef.current) {
+        window.clearTimeout(aiTimerRef.current);
+        aiTimerRef.current = null;
+      }
+    }
+  }, [gameMode, currentRoom]);
+
+  // Hydrate board state from Firestore room snapshot
+  useEffect(() => {
+    if (!syncedState) return;
+    if (syncedState.moveId && lastAppliedMoveIdRef.current === syncedState.moveId) {
+      return;
+    }
+    if (syncedState.moveId) {
+      lastAppliedMoveIdRef.current = syncedState.moveId;
+    }
+    if (animRef.current) {
+      cancelAnimationFrame(animRef.current);
+      animRef.current = null;
+    }
+    setIsSimulating(false);
+
+    if (Array.isArray(syncedState.coins) && syncedState.coins.length > 0) {
+      coinsRef.current = syncedState.coins.map((c) => ({
+        ...c,
+        vx: 0,
+        vy: 0,
+      }));
+    } else {
+      coinsRef.current = createInitialCoins();
+    }
+
+    const syncedTurn = syncedState.turn === 'opponent' ? 'opponent' : 'player';
+    setTurn(syncedTurn);
+    if (syncedState.scores) {
+      setScores(syncedState.scores);
+    }
+    if (Array.isArray(syncedState.statusLog) && syncedState.statusLog.length > 0) {
+      setStatusLog(syncedState.statusLog);
+    }
+    finishedRef.current = Boolean(syncedState.finished);
+    setWinnerMsg(syncedState.winnerMsg ?? null);
+    strikerRef.current = {
+      id: 'striker',
+      x: SIZE / 2,
+      y: syncedTurn === 'player' ? BASELINE_Y_PLAYER : BASELINE_Y_AI,
+      vx: 0,
+      vy: 0,
+      r: 12,
+      type: 'striker',
+      pocketed: false,
+    };
+    setStrikerX(SIZE / 2);
+    drawBoard();
+  }, [syncedState, drawBoard]);
+
   const executeStrike = useCallback(
-    (strikeX: number, strikeAngleDeg: number, strikePower: number, activeSide: 'player' | 'opponent') => {
+    (
+      strikeX: number,
+      strikeAngleDeg: number,
+      strikePower: number,
+      activeSide: 'player' | 'opponent',
+      isAiShot = false
+    ) => {
       if (isSimulating || finishedRef.current) return;
+      const room = currentRoomRef.current;
+      const mode = gameModeRef.current;
+
+      if (room && mode !== 'ai' && !isAiShot) {
+        if (!isAuthorizedMultiplayerActor || activeSide !== mySide) {
+          soundFx.playError();
+          return;
+        }
+      } else if (mode === 'ai' && activeSide === 'player' && isAiShot) {
+        return;
+      }
+
       setIsSimulating(true);
       soundFx.playMove();
 
@@ -342,7 +475,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
           } else if (t === 'queen') {
             if (activeSide === 'player') playerGain += 30;
             else oppGain += 30;
-            queenMsg = activeSide === 'player' ? 'You' : 'Opponent';
+            queenMsg = activeSide === 'player' ? 'P1 (White)' : 'P2 (Black)';
             scoredOwnCoin = true;
           } else if (t === 'white') {
             playerGain += 10;
@@ -353,49 +486,94 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
           }
         });
 
-        setScores((prev) => {
-          const nextScores = {
-            player: Math.max(0, prev.player + playerGain - (foul && activeSide === 'player' ? 5 : 0)),
-            opponent: Math.max(0, prev.opponent + oppGain - (foul && activeSide === 'opponent' ? 5 : 0)),
-            queenHolder: queenMsg || prev.queenHolder,
-          };
+        const prevScores = scoresRef.current;
+        const nextScores = {
+          player: Math.max(0, prevScores.player + playerGain - (foul && activeSide === 'player' ? 5 : 0)),
+          opponent: Math.max(0, prevScores.opponent + oppGain - (foul && activeSide === 'opponent' ? 5 : 0)),
+          queenHolder: queenMsg || prevScores.queenHolder,
+        };
+        setScores(nextScores);
 
-          const remainingCoins = coinsRef.current.filter((c) => !c.pocketed);
-          const whitesLeft = remainingCoins.filter((c) => c.type === 'white').length;
-          const blacksLeft = remainingCoins.filter((c) => c.type === 'black').length;
+        const remainingCoins = coinsRef.current.filter((c) => !c.pocketed);
+        const whitesLeft = remainingCoins.filter((c) => c.type === 'white').length;
+        const blacksLeft = remainingCoins.filter((c) => c.type === 'black').length;
+        const matchEnded = whitesLeft === 0 || blacksLeft === 0 || remainingCoins.length === 0;
 
-          if ((whitesLeft === 0 || blacksLeft === 0 || remainingCoins.length === 0) && !finishedRef.current) {
-            finishedRef.current = true;
-            const playerWon = nextScores.player >= nextScores.opponent;
-            const summary = playerWon
-              ? `Victory ${nextScores.player}-${nextScores.opponent}`
-              : `Match ${nextScores.player}-${nextScores.opponent}`;
-            setWinnerMsg(
-              playerWon
-                ? `You won Carrom (${nextScores.player} vs ${nextScores.opponent})! +45 JIT Points`
-                : `Opponent won (${nextScores.opponent} vs ${nextScores.player}). +10 Participation Points`
-            );
-            soundFx.playWin();
-            onMatchFinish(playerWon ? 'win' : 'loss', summary, playerWon ? 45 : 10);
-          }
-          return nextScores;
-        });
+        let computedWinnerMsg: string | null = null;
+        if (matchEnded && !finishedRef.current) {
+          finishedRef.current = true;
+          const p1Won = nextScores.player >= nextScores.opponent;
+          const didMySideWin =
+            gameModeRef.current === 'ai' || !currentRoomRef.current
+              ? p1Won
+              : mySide === 'player'
+              ? p1Won
+              : !p1Won;
+          const summary = didMySideWin
+            ? `Victory ${nextScores.player}-${nextScores.opponent}`
+            : `Match ${nextScores.player}-${nextScores.opponent}`;
+          computedWinnerMsg = p1Won
+            ? `White (P1) won Carrom (${nextScores.player} vs ${nextScores.opponent})!`
+            : `Black (P2) won Carrom (${nextScores.opponent} vs ${nextScores.player})!`;
+          setWinnerMsg(computedWinnerMsg);
+          soundFx.playWin();
+          onMatchFinish(didMySideWin ? 'win' : 'loss', summary, didMySideWin ? 45 : 10);
+        }
 
-        const turnLabel = activeSide === 'player' ? 'You' : gameMode === 'ai' ? 'AI Bot' : 'Opponent';
+        const turnLabel =
+          gameModeRef.current === 'ai'
+            ? activeSide === 'player'
+              ? 'You'
+              : 'AI Bot'
+            : activeSide === 'player'
+            ? currentRoomRef.current?.players[0]?.name?.split(' ')[0] || 'Player 1'
+            : currentRoomRef.current?.players[1]?.name?.split(' ')[0] || 'Player 2';
+
         const logMsg = foul
           ? `${turnLabel} pocketed Striker (-5 foul)! Turn passes.`
           : pocketedThisTurn.length > 0
           ? `${turnLabel} pocketed ${pocketedThisTurn.join(', ')}!`
           : `${turnLabel} missed pockets.`;
-        setStatusLog((prev) => [logMsg, ...prev.slice(0, 3)]);
+        const nextLogs = [logMsg, ...statusLogRef.current.slice(0, 3)];
+        setStatusLog(nextLogs);
 
-        const nextSide: 'player' | 'opponent' = scoredOwnCoin && !foul ? activeSide : activeSide === 'player' ? 'opponent' : 'player';
+        const nextSide: 'player' | 'opponent' =
+          scoredOwnCoin && !foul ? activeSide : activeSide === 'player' ? 'opponent' : 'player';
         setTurn(nextSide);
 
-        // Trigger AI turn if needed
-        if (!finishedRef.current && gameMode === 'ai' && nextSide === 'opponent') {
-          setTimeout(() => {
-            if (finishedRef.current) return;
+        // Broadcast full Carrom board & turn state to Firestore room
+        const activeRoom = currentRoomRef.current;
+        if (activeRoom && gameModeRef.current !== 'ai' && onSyncMove) {
+          const nextTurnActorId =
+            nextSide === 'player'
+              ? activeRoom.players[0]?.id || activeRoom.hostId
+              : activeRoom.players[1]?.id || activeRoom.player2Id || '';
+          const serializedCoins: CarromSyncedCoin[] = coinsRef.current.map((c) => ({
+            id: c.id,
+            x: Math.round(c.x * 100) / 100,
+            y: Math.round(c.y * 100) / 100,
+            r: c.r,
+            type: c.type,
+            pocketed: c.pocketed,
+          }));
+          onSyncMove(
+            {
+              coins: serializedCoins,
+              turn: nextSide,
+              scores: nextScores,
+              statusLog: nextLogs,
+              winnerMsg: computedWinnerMsg,
+              finished: finishedRef.current,
+            },
+            nextTurnActorId,
+            finishedRef.current ? 'finished' : 'in_game'
+          );
+        }
+
+        // Trigger AI turn ONLY in AI mode with no active room
+        if (!finishedRef.current && gameModeRef.current === 'ai' && !currentRoomRef.current && nextSide === 'opponent') {
+          aiTimerRef.current = window.setTimeout(() => {
+            if (finishedRef.current || gameModeRef.current !== 'ai' || currentRoomRef.current) return;
             const targets = coinsRef.current.filter((c) => !c.pocketed && (c.type === 'black' || c.type === 'queen'));
             const chosen = targets[0] || coinsRef.current.find((c) => !c.pocketed);
             const sx = 95 + Math.random() * (SIZE - 190);
@@ -407,18 +585,20 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
               angleDeg = Math.max(-65, Math.min(65, rawDeg + (Math.random() - 0.5) * jitter));
             }
             const aiPow = aiDifficulty === 'hard' ? 84 : aiDifficulty === 'medium' ? 74 : 62;
-            executeStrike(sx, angleDeg, aiPow, 'opponent');
+            executeStrike(sx, angleDeg, aiPow, 'opponent', true);
           }, 750);
         }
       };
 
       animRef.current = requestAnimationFrame(step);
     },
-    [aiDifficulty, drawBoard, gameMode, isSimulating, onMatchFinish]
+    [aiDifficulty, drawBoard, isAuthorizedMultiplayerActor, isSimulating, mySide, onMatchFinish, onSyncMove]
   );
 
   const handleCanvasPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (isSimulating || finishedRef.current || (gameMode === 'ai' && turn === 'opponent')) return;
+    if (isSimulating || finishedRef.current) return;
+    if (gameMode === 'ai' && turn === 'opponent') return;
+    if (currentRoom && gameMode !== 'ai' && !isAuthorizedMultiplayerActor) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const clickX = ((e.clientX - rect.left) / rect.width) * SIZE;
     const clickY = ((e.clientY - rect.top) / rect.height) * SIZE;
@@ -430,8 +610,9 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     setAimAngle(clamped);
   };
 
-  const resetCarrom = () => {
+  const resetCarrom = (triggerRemote = true) => {
     if (animRef.current) cancelAnimationFrame(animRef.current);
+    if (aiTimerRef.current) window.clearTimeout(aiTimerRef.current);
     finishedRef.current = false;
     coinsRef.current = createInitialCoins();
     strikerRef.current = {
@@ -452,21 +633,29 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     setScores({ player: 0, opponent: 0, queenHolder: '' });
     setWinnerMsg(null);
     setStatusLog(['Board reset! Tap board to aim or use sliders below.']);
+    if (triggerRemote && currentRoom && onRequestRematch) {
+      onRequestRematch();
+    }
   };
 
-  const isPlayerBlocked = isSimulating || finishedRef.current || (gameMode === 'ai' && turn === 'opponent');
+  const isPlayerBlocked =
+    isSimulating ||
+    finishedRef.current ||
+    (gameMode === 'ai' ? turn === 'opponent' : Boolean(currentRoom) && !isAuthorizedMultiplayerActor);
 
   return (
     <div className="max-w-md mx-auto flex flex-col items-center">
       <div className="flex items-center justify-between w-full mb-3 text-xs font-bold px-2">
         <span className={turn === 'player' ? 'text-blue-600' : 'text-slate-500'}>
-          You (White): {scores.player} pts
+          {currentRoom ? `${currentRoom.players[0]?.name?.split(' ')[0] || 'P1'} (White)` : 'You (White)'}: {scores.player} pts
         </span>
         <span className="text-[11px] text-amber-600 font-semibold">
           {scores.queenHolder ? `Queen: ${scores.queenHolder}` : 'Queen: +30'}
         </span>
         <span className={turn === 'opponent' ? 'text-purple-600' : 'text-slate-500'}>
-          {gameMode === 'ai' ? 'AI (Black)' : 'P2 (Black)'}: {scores.opponent} pts
+          {gameMode === 'ai'
+            ? 'AI (Black)'
+            : `${currentRoom?.players[1]?.name?.split(' ')[0] || 'P2'} (Black)`}: {scores.opponent} pts
         </span>
       </div>
 
@@ -543,11 +732,19 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
             className="flex-1 py-2.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-md transition-colors flex items-center justify-center gap-2 min-h-[44px]"
           >
             <Target className="w-4 h-4" />
-            <span>{isSimulating ? 'Simulating Shot...' : turn === 'opponent' && gameMode === 'ai' ? 'AI Taking Shot...' : 'Strike Striker'}</span>
+            <span>
+              {isSimulating
+                ? 'Simulating Shot...'
+                : turn === 'opponent' && gameMode === 'ai'
+                ? 'AI Taking Shot...'
+                : currentRoom && !isAuthorizedMultiplayerActor
+                ? 'Waiting for Opponent Turn...'
+                : 'Strike Striker'}
+            </span>
           </button>
           <button
             type="button"
-            onClick={resetCarrom}
+            onClick={() => resetCarrom(true)}
             className="px-4 py-2.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-100 rounded-xl text-xs font-bold flex items-center gap-1.5 min-h-[44px]"
           >
             <RotateCcw className="w-3.5 h-3.5" />

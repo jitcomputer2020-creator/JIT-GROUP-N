@@ -1655,6 +1655,7 @@ export async function createFirestoreGameRoom(
   const players: RoomPlayer[] = [
     {
       id: hostPlayer.id,
+      ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
       name: (hostPlayer.name || 'JIT Player').slice(0, 80),
       avatar: sanitizeRoomAvatarUrl(hostPlayer.avatar),
       isHost: true,
@@ -1854,6 +1855,7 @@ export async function joinFirestoreGameRoom(
         ...parsed.players,
         {
           id: player.id,
+          ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
           name: (player.name || 'JIT Player').slice(0, 80),
           avatar: sanitizeRoomAvatarUrl(player.avatar),
           isHost: false,
@@ -1874,7 +1876,7 @@ export async function joinFirestoreGameRoom(
       const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const nextGameState =
         isStarting && !parsed.gameState?._startId
-          ? { ...(parsed.gameState || {}), _startId: startId, moveSeq: 0 }
+          ? buildInitialGameStateForGame(parsed.gameId, startId, parsed.gameState || {})
           : parsed.gameState || {};
 
       const p1Id = nextPlayers[0]?.id || parsed.hostId;
@@ -2316,6 +2318,7 @@ export async function pairQueuePlayersIntoRoom(
         };
         const initPlayer: RoomPlayer = {
           id: initiator.id,
+          ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
           name: initiator.name.slice(0, 80),
           avatar: sanitizeAvatarUrl(initiator.avatar),
           isHost: false,
@@ -2324,6 +2327,7 @@ export async function pairQueuePlayersIntoRoom(
           joinedAtMs: Date.now(),
         };
         const pairedPlayers = [oppPlayer, initPlayer];
+        const initialPairedGameState = buildInitialGameStateForGame(gameId, startId);
 
         tx.set(roomRef, {
           roomCode,
@@ -2347,7 +2351,7 @@ export async function pairQueuePlayersIntoRoom(
           reactionsJson: '[]',
           mutedVoiceIdsJson: '[]',
           mutedChatIdsJson: '[]',
-          gameStateJson: JSON.stringify({ _startId: startId, moveSeq: 0 }),
+          gameStateJson: JSON.stringify(initialPairedGameState),
           messagesJson: '[]',
           moveAction: 'GAME_START',
           currentTurn: oppPlayer.id,
@@ -2510,6 +2514,7 @@ export async function tryAtomicallyJoinWaitingRoom(
       ...parsed.players,
       {
         id: player.id,
+        ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
         name: cleanName,
         avatar: cleanAvatar,
         isHost: false,
@@ -2524,7 +2529,7 @@ export async function tryAtomicallyJoinWaitingRoom(
     const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
     const nextStatus: MultiplayerRoom['status'] = 'active';
     const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const nextGameState = { ...(parsed.gameState || {}), _startId: startId, moveSeq: 0 };
+    const nextGameState = buildInitialGameStateForGame(gameId, startId, parsed.gameState || {});
 
     tx.update(roomRef, {
       roomId: cleanCode,
@@ -2661,6 +2666,7 @@ export async function quickMatchFirestoreRoom(
                 ...parsedWaiting.players,
                 {
                   id: player.id,
+                  ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
                   name: cleanName,
                   avatar: cleanAvatar,
                   isHost: false,
@@ -2674,7 +2680,11 @@ export async function quickMatchFirestoreRoom(
               const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
               const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
               const nextStatus: MultiplayerRoom['status'] = 'active';
-              const updatedGameState = { ...(parsedWaiting.gameState || {}), _startId: startId, moveSeq: 0 };
+              const updatedGameState = buildInitialGameStateForGame(
+                gameId,
+                startId,
+                parsedWaiting.gameState || {}
+              );
 
               tx.update(waitingRoomRef, {
                 roomId: slotRoomCode,
@@ -2733,6 +2743,7 @@ export async function quickMatchFirestoreRoom(
         const nowMs = Date.now();
         const hostEntry: RoomPlayer = {
           id: player.id,
+          ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
           name: cleanName,
           avatar: cleanAvatar,
           isHost: true,
@@ -2858,6 +2869,80 @@ export async function quickMatchFirestoreRoom(
   throw lastErr || new Error('Could not enter quick matchmaking queue. Please try again.');
 }
 
+function buildInitialGameStateForGame(
+  gameId: string,
+  startId: string,
+  existing: Record<string, any> = {}
+): Record<string, any> {
+  if (gameId === 'ludo') {
+    return {
+      ...existing,
+      tokens: [
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+        [-1, -1, -1, -1],
+      ],
+      turn: 0,
+      dice: 6,
+      phase: 'roll',
+      legalTokens: [],
+      consecutiveSixes: 0,
+      winner: null,
+      log: ['Roll 6 to bring a Red token out of the yard!'],
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'tictactoe') {
+    return {
+      ...existing,
+      board: Array(9).fill(null),
+      isXNext: true,
+      result: null,
+      line: null,
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'chess') {
+    return {
+      ...existing,
+      turn: 'white',
+      status: 'active',
+      winner: null,
+      log: ['Match initialized. White to move first.'],
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'snake_ladder') {
+    return {
+      ...existing,
+      positions: { p1: 1, p2: 1 },
+      turn: 'p1',
+      dice: 1,
+      message: 'Player 1 (Blue 📍) turn to roll!',
+      finished: false,
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'carrom') {
+    return {
+      ...existing,
+      turn: 'player',
+      scores: { player: 0, opponent: 0, queenHolder: '' },
+      statusLog: ['Position striker, set angle & power, or tap the board to aim!'],
+      winnerMsg: null,
+      finished: false,
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  return { ...existing, _startId: startId, moveSeq: 0 };
+}
+
 export async function startFirestoreGameRoom(
   roomCode: string,
   initialGameState: Record<string, any>,
@@ -2867,10 +2952,14 @@ export async function startFirestoreGameRoom(
   if (cleanCode.length !== 4) return;
   const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   try {
-    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+    const roomRef = doc(db, 'gameRooms', cleanCode);
+    const snap = await getDoc(roomRef).catch(() => null);
+    const gameId = snap?.exists() ? String(snap.data().gameId || '') : '';
+    const hydratedState = buildInitialGameStateForGame(gameId, startId, initialGameState);
+    await updateDoc(roomRef, {
       status: 'in_game',
-      gameStateJson: JSON.stringify({ ...initialGameState, _startId: startId, moveSeq: 0 }),
-      currentTurn: firstTurnId,
+      gameStateJson: JSON.stringify(hydratedState),
+      currentTurn: String(firstTurnId || '').slice(0, 64),
       moveAction: 'GAME_START',
       updatedAt: serverTimestamp(),
     });
