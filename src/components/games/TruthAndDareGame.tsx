@@ -57,6 +57,7 @@ interface TruthAndDareGameProps {
   players: RoomPlayer[];
   waitingCount: number;
   currentUserId: string;
+  firebaseAuthUid?: string | null;
   isHost: boolean;
   isSeatedActivePlayer: boolean;
   state: TruthAndDareState | null;
@@ -69,6 +70,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
   players,
   waitingCount,
   currentUserId,
+  firebaseAuthUid,
   isHost,
   isSeatedActivePlayer,
   state,
@@ -79,13 +81,35 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
   const [customPromptDraft, setCustomPromptDraft] = useState('');
   const [pendingChoice, setPendingChoice] = useState<'truth' | 'dare'>('truth');
   const [isSpinningAnim, setIsSpinningAnim] = useState(false);
+  const spinTimerRef = React.useRef<number | null>(null);
+
+  React.useEffect(() => {
+    return () => {
+      if (spinTimerRef.current !== null) {
+        window.clearTimeout(spinTimerRef.current);
+      }
+    };
+  }, []);
 
   const activePlayers = players.length > 0 ? players : [];
   const currentRound = state?.round || 1;
   const phase = state?.phase || 'spinning';
   const myPlayer = activePlayers.find((p) => p.id === currentUserId);
-  const canOperateRound = isHost || isSeatedActivePlayer;
-  const isMyTurn = state ? state.activePlayerId === currentUserId || isHost : canOperateRound;
+  const isAuthIdentityValid = React.useCallback(
+    (player?: RoomPlayer | null): boolean => {
+      if (!player?.authUid || !firebaseAuthUid) return true;
+      return player.authUid === firebaseAuthUid;
+    },
+    [firebaseAuthUid]
+  );
+  const canOperateRound = (isHost || isSeatedActivePlayer) && isAuthIdentityValid(myPlayer);
+  const spotlightPlayer = state
+    ? activePlayers.find((p) => p.id === state.activePlayerId)
+    : undefined;
+  const isMyTurn = state
+    ? canOperateRound &&
+      ((state.activePlayerId === currentUserId && isAuthIdentityValid(spotlightPlayer)) || isHost)
+    : canOperateRound;
 
   const pickRandomPlayer = (): RoomPlayer | null => {
     if (activePlayers.length === 0) return null;
@@ -100,7 +124,11 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
     setIsSpinningAnim(true);
     const nextRoundNum = state && phase === 'round_complete' ? state.round + 1 : state?.round || 1;
 
-    window.setTimeout(() => {
+    if (spinTimerRef.current !== null) {
+      window.clearTimeout(spinTimerRef.current);
+    }
+    spinTimerRef.current = window.setTimeout(() => {
+      spinTimerRef.current = null;
       setIsSpinningAnim(false);
       const chosen = pickRandomPlayer() || activePlayers[0];
       onUpdateState({
@@ -148,7 +176,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
 
   const handleSubmitCustomPrompt = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!state || !customPromptDraft.trim()) return;
+    if (!state || !canOperateRound || !customPromptDraft.trim()) return;
     const finalChoice = state.choiceType || pendingChoice;
     onUpdateState({
       ...state,
@@ -163,7 +191,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
   };
 
   const handleCompleteRound = (roundStatus: 'completed' | 'skipped') => {
-    if (!state || !state.choiceType) return;
+    if (!state || !state.choiceType || !isMyTurn) return;
     const item: TruthAndDareHistoryItem = {
       id: `td_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       round: state.round,

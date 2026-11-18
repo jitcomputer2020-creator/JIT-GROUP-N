@@ -23,7 +23,6 @@ import {
 import { APP_CONFIG } from '../constants/branding';
 import { multiplayerSocket } from '../services/multiplayerSocket';
 import {
-  auth,
   createFirestoreGameRoom,
   joinFirestoreGameRoom,
   quickMatchFirestoreRoom,
@@ -36,14 +35,12 @@ import {
   touchMatchmakingQueueHeartbeat,
   releasePreviousHostedRoom,
   startFirestoreGameRoom,
-  pushFirestoreGameMove,
   rematchFirestoreGameRoom,
   sendFirestoreRoomChat,
   sendFirestoreRoomReaction,
   hostUpdateRoomModeration,
   hostRotateRoomPlayers,
   kickOrLeaveFirestoreRoom,
-  subscribeToGameRoom,
   fetchFirestoreGameRoomByCode,
 } from '../lib/firebase';
 import {
@@ -86,6 +83,7 @@ import { CarromBoard } from '../components/games/CarromBoard';
 import { SpinWheelGame } from '../components/games/SpinWheelGame';
 import { LeaderboardPanel } from '../components/games/LeaderboardPanel';
 import { useRoomVoiceChat } from '../hooks/useRoomVoiceChat';
+import { useMultiplayerRoom } from '../hooks/useMultiplayerRoom';
 
 import {
   Gamepad2,
@@ -159,9 +157,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const [waiting, setWaiting] = useState(false);
   const [gameStarted, setGameStarted] = useState(false);
   const currentRoomRef = useRef<MultiplayerRoom | null>(null);
-  const roomUnsubRef = useRef<(() => void) | null>(null);
-  const roomMoveCounterRef = useRef<number>(0);
-  const appliedMoveIdsRef = useRef<Set<string>>(new Set());
   const seenReactionIdsRef = useRef<Set<string>>(new Set());
   const lastStartIdRef = useRef<string | null>(null);
   const prevRoomStatusRef = useRef<string | null>(null);
@@ -242,35 +237,21 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     !currentRoom || currentRoom.players.some((p) => p.id === activePlayer.id)
   );
 
-  // Strict turn authorization verifying active seat, room currentTurn, and Firebase Auth UID binding
-  const isAuthorizedTurnActor = useCallback(
-    (expectedSeatPlayerId?: string): boolean => {
-      const room = currentRoomRef.current;
-      if (!room) return true;
-      const myId = activePlayerIdRef.current;
-      if ((room.waitingPlayers || []).some((p) => p.id === myId)) {
-        return false;
-      }
-      if (!room.players.some((p) => p.id === myId)) {
-        return false;
-      }
-      const turnOwnerId = room.currentTurn || expectedSeatPlayerId || room.players[0]?.id || '';
-      if (!turnOwnerId) return false;
-      if (expectedSeatPlayerId && turnOwnerId !== expectedSeatPlayerId) {
-        return false;
-      }
-      if (turnOwnerId !== myId) {
-        return false;
-      }
-      const fbUid = auth.currentUser?.uid;
-      const seatPlayer = room.players.find((p) => p.id === turnOwnerId);
-      if (fbUid && seatPlayer?.authUid && seatPlayer.authUid !== fbUid) {
-        return false;
-      }
-      return true;
-    },
-    []
-  );
+  const {
+    firebaseAuthUid,
+    isAuthorizedTurnActor,
+    attachRoomSubscription,
+    detachRoomSubscription,
+    resetMoveTracking,
+    markMoveIdApplied,
+    recordMoveSeq,
+    broadcastRoomMove,
+    submitQuizAnswer,
+  } = useMultiplayerRoom({
+    activePlayerId: activePlayer.id,
+    currentRoomRef,
+    setCurrentRoom,
+  });
   const isHostMutedMyVoice = Boolean(
     currentRoom && (currentRoom.mutedVoiceIds || []).includes(activePlayer.id)
   );
@@ -623,7 +604,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           setQuizTimer(15);
 
           if (currentRoomRef.current && gameModeRef.current !== 'ai') {
-            const room = currentRoomRef.current;
             const syncedQuiz: QuizSyncedState = {
               questions: res.questions,
               source: res.source,
@@ -632,20 +612,16 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               answersByQ: {},
               finished: false,
             };
-            pushFirestoreGameMove(
-              room.roomCode,
-              'QUIZ_MOVE',
-              { ...syncedQuiz, moveId: `quiz_init_${Date.now()}`, moveSeq: roomMoveCounterRef.current + 1 },
-              '',
-              'in_game'
-            ).catch(() => {});
+            broadcastRoomMove('QUIZ_MOVE', syncedQuiz, '', 'in_game', {
+              bypassTurnGuard: true,
+            });
           }
         }
       } finally {
         setQuizLoadingAi(false);
       }
     },
-    [aiDifficulty]
+    [aiDifficulty, broadcastRoomMove]
   );
 
   const resetQuiz = useCallback(
@@ -765,22 +741,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     (moveAction: string, gameState: any) => {
       if (!gameState || typeof gameState !== 'object') return;
       const moveId = typeof gameState.moveId === 'string' ? gameState.moveId : '';
-      if (moveId && appliedMoveIdsRef.current.has(moveId)) return;
-      if (moveId) {
-        appliedMoveIdsRef.current.add(moveId);
-        if (appliedMoveIdsRef.current.size > 150) {
-          const first = appliedMoveIdsRef.current.values().next().value;
-          if (first) appliedMoveIdsRef.current.delete(first);
-        }
-      }
+      if (moveId && !markMoveIdApplied(moveId)) return;
       const seq = Number(gameState.moveSeq || 0);
-      if (seq > roomMoveCounterRef.current) {
-        roomMoveCounterRef.current = seq;
+      if (seq > 0) {
+        recordMoveSeq(seq);
       }
 
       if (moveAction === 'REMATCH') {
         clearAiTimers();
-        roomMoveCounterRef.current = 0;
+        resetMoveTracking();
         resetTtt(false);
         resetChess(false);
         resetLudo(false);
@@ -969,9 +938,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     },
     [
       clearAiTimers,
+      markMoveIdApplied,
+      recordMoveSeq,
       resetCarromState,
       resetChess,
       resetLudo,
+      resetMoveTracking,
       resetQuiz,
       resetSnakeLadder,
       resetTruthDare,
@@ -982,19 +954,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const attachFirestoreRoomSubscription = useCallback(
     (roomCode: string) => {
-      if (roomUnsubRef.current) {
-        roomUnsubRef.current();
-        roomUnsubRef.current = null;
-      }
       clearAiTimers();
-      roomMoveCounterRef.current = 0;
-      appliedMoveIdsRef.current.clear();
       seenReactionIdsRef.current.clear();
       lastStartIdRef.current = null;
       prevRoomStatusRef.current = null;
       prevRoomStartedRef.current = false;
 
-      roomUnsubRef.current = subscribeToGameRoom(
+      attachRoomSubscription(
         roomCode,
         (room, moveAction) => {
           const stillMember =
@@ -1007,10 +973,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             room.player2Id === activePlayer.id;
 
           if (!stillMember) {
-            if (roomUnsubRef.current) {
-              roomUnsubRef.current();
-              roomUnsubRef.current = null;
-            }
+            detachRoomSubscription();
             setCurrentRoom(null);
             setWaiting(false);
             setGameStarted(false);
@@ -1078,8 +1041,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           if (isFreshGameStart) {
             if (incomingStartId) lastStartIdRef.current = incomingStartId;
             clearAiTimers();
-            roomMoveCounterRef.current = 0;
-            appliedMoveIdsRef.current.clear();
+            resetMoveTracking();
             resetTtt(false);
             resetChess(false);
             resetLudo(false);
@@ -1125,11 +1087,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     [
       activePlayer.id,
       applySyncedMoveState,
+      attachRoomSubscription,
       clearAiTimers,
+      detachRoomSubscription,
       isRoomMatchStarted,
       resetCarromState,
       resetChess,
       resetLudo,
+      resetMoveTracking,
       resetQuiz,
       resetSnakeLadder,
       resetTruthDare,
@@ -1147,50 +1112,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         currentRoomRef.current?.roomCode
       );
       void leaveMatchmakingQueue(activePlayerIdRef.current);
-      if (roomUnsubRef.current) {
-        roomUnsubRef.current();
-        roomUnsubRef.current = null;
-      }
+      detachRoomSubscription();
     };
-  }, []);
-
-  const broadcastRoomMove = useCallback(
-    (
-      moveAction: string,
-      newGameState: Record<string, any>,
-      nextTurnId?: string,
-      status: 'active' | 'in_game' | 'finished' = 'in_game'
-    ) => {
-      const room = currentRoomRef.current;
-      if (!room) return;
-      const nextSeq = roomMoveCounterRef.current + 1;
-      roomMoveCounterRef.current = nextSeq;
-      const moveId = `${activePlayer.id}_${nextSeq}_${Math.random().toString(36).slice(2, 6)}`;
-      appliedMoveIdsRef.current.add(moveId);
-
-      const stampedState = {
-        ...newGameState,
-        moveSeq: nextSeq,
-        moveId,
-        byPlayerId: activePlayer.id,
-      };
-      const resolvedNextTurn = String(nextTurnId || '');
-      currentRoomRef.current = {
-        ...room,
-        currentTurn: resolvedNextTurn,
-        status,
-        gameState: stampedState,
-      };
-      setCurrentRoom((prev) =>
-        prev && prev.roomCode === room.roomCode
-          ? { ...prev, currentTurn: resolvedNextTurn, status, gameState: stampedState }
-          : prev
-      );
-      multiplayerSocket.sendMove(room.roomCode, moveAction, stampedState, nextTurnId);
-      pushFirestoreGameMove(room.roomCode, moveAction, stampedState, nextTurnId, status).catch(() => {});
-    },
-    [activePlayer.id]
-  );
+  }, [detachRoomSubscription]);
 
   // --------------------------------------------------------------------------
   // WebSocket Lifecycle & Event Handlers (fast-path alongside Firestore)
@@ -1447,10 +1371,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           (await joinFirestoreGameRoom(candidate.roomCode, selectedGame, activePlayer));
         if (!cancelled && !settled && joined) {
           // Detach old waiting room listener FIRST so deleting myCode doesn't fire onRoomDeleted -> gameMode('ai')
-          if (roomUnsubRef.current) {
-            roomUnsubRef.current();
-            roomUnsubRef.current = null;
-          }
+          detachRoomSubscription();
           await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
           enterMatchedRoom(joined, true);
         } else {
@@ -1550,10 +1471,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     ).catch(() => {});
     await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
     if (existing) {
-      if (roomUnsubRef.current) {
-        roomUnsubRef.current();
-        roomUnsubRef.current = null;
-      }
+      detachRoomSubscription();
       multiplayerSocket.leaveRoom(existing.roomCode, activePlayer.id);
       await kickOrLeaveFirestoreRoom(existing.roomCode, activePlayer.id).catch(() => {});
       setCurrentRoom(null);
@@ -1598,10 +1516,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     const oldCode = currentRoom.roomCode;
     const maxP = currentRoom.maxPlayers || (selectedGame === 'ludo' ? 4 : 2);
     try {
-      if (roomUnsubRef.current) {
-        roomUnsubRef.current();
-        roomUnsubRef.current = null;
-      }
+      detachRoomSubscription();
       multiplayerSocket.leaveRoom(oldCode, activePlayer.id);
       const room = await createFirestoreGameRoom(selectedGame, maxP, activePlayer, {
         isPublicMatch: false,
@@ -1784,10 +1699,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       currentRoomRef.current?.roomCode
     );
     void leaveMatchmakingQueue(activePlayer.id);
-    if (roomUnsubRef.current) {
-      roomUnsubRef.current();
-      roomUnsubRef.current = null;
-    }
+    detachRoomSubscription();
     gameModeRef.current = 'ai';
     currentRoomRef.current = null;
     setGameMode('ai');
@@ -1840,10 +1752,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       currentRoomRef.current?.roomCode
     ).catch(() => {});
     await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
-    if (roomUnsubRef.current) {
-      roomUnsubRef.current();
-      roomUnsubRef.current = null;
-    }
+    detachRoomSubscription();
     if (currentRoom) {
       multiplayerSocket.leaveRoom(currentRoom.roomCode, activePlayer.id);
       await kickOrLeaveFirestoreRoom(currentRoom.roomCode, activePlayer.id);
@@ -1868,10 +1777,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       currentRoomRef.current?.roomCode
     ).catch(() => {});
     await leaveMatchmakingQueue(activePlayer.id).catch(() => {});
-    if (roomUnsubRef.current) {
-      roomUnsubRef.current();
-      roomUnsubRef.current = null;
-    }
+    detachRoomSubscription();
     if (currentRoom) {
       multiplayerSocket.leaveRoom(currentRoom.roomCode, activePlayer.id);
       await kickOrLeaveFirestoreRoom(currentRoom.roomCode, activePlayer.id);
@@ -2295,7 +2201,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     const room = currentRoomRef.current;
     if (!room) return undefined;
     if (room.players.length <= 2) {
-      return seat === 0 ? room.players[0]?.id : room.players[1]?.id;
+      return seat === 0 ? room.players[0]?.id : seat === 2 ? room.players[1]?.id : undefined;
     }
     return room.players[seat]?.id;
   }, []);
@@ -2652,7 +2558,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       }
       setQuizScore(nextPlayerScore);
 
-      // Multiplayer Firestore synchronization across room participants
+      // Multiplayer Firestore transactional synchronization so concurrent answers never overwrite each other
       if (currentRoomRef.current && gameModeRef.current !== 'ai') {
         const room = currentRoomRef.current;
         const myId = activePlayerIdRef.current;
@@ -2671,41 +2577,74 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         setQuizMultiplayerScores(nextScores);
         setQuizAnswersByQ(nextAnswers);
 
-        const activeParticipants = room.players.map((p) => p.id);
-        const allAnsweredThisQ =
-          activeParticipants.length <= 1 ||
-          activeParticipants.every((pid) => currentQAnswers[pid] !== undefined);
-
-        const isLastQ = quizIndex >= quizQuestions.length - 1;
-        const nextIndex = allAnsweredThisQ && !isLastQ ? quizIndex + 1 : quizIndex;
-        const nextFinished = allAnsweredThisQ && isLastQ;
-
-        broadcastRoomMove(
-          'QUIZ_MOVE',
-          {
-            questions: quizQuestions,
-            source: quizSource,
-            index: nextIndex,
-            scores: nextScores,
-            answersByQ: nextAnswers,
-            finished: nextFinished,
-          } satisfies QuizSyncedState,
-          '',
-          nextFinished ? 'finished' : 'in_game'
-        );
-
-        if (allAnsweredThisQ) {
-          registerAiTimer(() => {
-            if (!currentRoomRef.current) return;
-            if (!isLastQ) {
-              setQuizIndex(nextIndex);
-              setSelectedOption(null);
-              setQuizTimer(15);
-            } else {
-              setQuizFinished(true);
+        const qIdxAtSubmit = quizIndex;
+        void submitQuizAnswer({
+          questionIndex: qIdxAtSubmit,
+          optionIndex: optIdx,
+          nextScore: nextPlayerScore,
+          questions: quizQuestions,
+          source: quizSource,
+        }).then((txMerged) => {
+          if (!currentRoomRef.current || currentRoomRef.current.roomCode !== room.roomCode) return;
+          if (txMerged) {
+            multiplayerSocket.sendMove(room.roomCode, 'QUIZ_MOVE', txMerged, '');
+            if (txMerged.scores) setQuizMultiplayerScores(txMerged.scores);
+            if (txMerged.answersByQ) setQuizAnswersByQ(txMerged.answersByQ);
+            if (txMerged.finished || txMerged.index !== qIdxAtSubmit) {
+              registerAiTimer(() => {
+                if (!currentRoomRef.current || currentRoomRef.current.roomCode !== room.roomCode) return;
+                if (txMerged.finished) {
+                  setQuizFinished(true);
+                  const myFinal = Number(txMerged.scores?.[myId] ?? nextPlayerScore);
+                  const otherScores = Object.entries(txMerged.scores || {})
+                    .filter(([pid]) => pid !== myId)
+                    .map(([, val]) => Number(val || 0));
+                  const topOther = otherScores.length > 0 ? Math.max(...otherScores) : 0;
+                  const wonMatch = otherScores.length > 0 ? myFinal >= topOther : myFinal >= 300;
+                  const pts = wonMatch ? 55 : myFinal > 0 ? 25 : 10;
+                  triggerGameAward('quiz', {
+                    gameId: 'quiz',
+                    gameName: 'Quiz Battle',
+                    mode: gameModeRef.current,
+                    outcome: wonMatch ? 'win' : 'loss',
+                    pointsEarned: pts,
+                    scoreSummary:
+                      otherScores.length > 0
+                        ? `Scored ${myFinal} vs Opponent ${topOther}`
+                        : `Scored ${myFinal} pts`,
+                  });
+                } else if (typeof txMerged.index === 'number') {
+                  setQuizIndex(txMerged.index);
+                  setSelectedOption(null);
+                  setQuizTimer(15);
+                }
+              }, 650);
             }
-          }, 700);
-        }
+            return;
+          }
+          // Fallback if transaction returned null (e.g., transient offline state)
+          const activeParticipants = room.players.map((p) => p.id);
+          const allAnswered =
+            activeParticipants.length <= 1 ||
+            activeParticipants.every((pid) => currentQAnswers[pid] !== undefined);
+          const isLastQ = qIdxAtSubmit >= quizQuestions.length - 1;
+          const nextIdx = allAnswered && !isLastQ ? qIdxAtSubmit + 1 : qIdxAtSubmit;
+          const nextFin = allAnswered && isLastQ;
+          broadcastRoomMove(
+            'QUIZ_MOVE',
+            {
+              questions: quizQuestions,
+              source: quizSource,
+              index: nextIdx,
+              scores: nextScores,
+              answersByQ: nextAnswers,
+              finished: nextFin,
+            } satisfies QuizSyncedState,
+            '',
+            nextFin ? 'finished' : 'in_game',
+            { bypassTurnGuard: true }
+          );
+        });
         return;
       }
 
@@ -2755,6 +2694,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       quizTimer,
       registerAiTimer,
       selectedOption,
+      submitQuizAnswer,
       triggerGameAward,
     ]
   );
@@ -3968,7 +3908,24 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             {/* ----------------------------------------------------------- */}
             {/* GAME 4: CHESS (Legal Moves, Highlights, Check/Checkmate) */}
             {/* ----------------------------------------------------------- */}
-            {selectedGame === 'chess' && (
+            {selectedGame === 'chess' && (() => {
+              const myChessColor: 'white' | 'black' =
+                currentRoom && currentRoom.players[0]?.id !== activePlayer.id ? 'black' : 'white';
+              const isMyChessTurn =
+                chessStatus !== 'checkmate' &&
+                chessStatus !== 'stalemate' &&
+                !chessAiThinking &&
+                (gameMode === 'ai'
+                  ? chessTurn === 'white'
+                  : !currentRoom ||
+                    (myChessColor === chessTurn &&
+                      isAuthorizedTurnActor(
+                        chessTurn === 'white'
+                          ? currentRoom.players[0]?.id
+                          : currentRoom.players[1]?.id
+                      )));
+
+              return (
               <div className="max-w-md mx-auto flex flex-col items-center">
                 <div className="flex items-center justify-between w-full mb-3 text-xs font-bold px-2">
                   <span
@@ -3978,7 +3935,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         : 'text-slate-400'
                     }
                   >
-                    White (♔) {chessTurn === 'white' && chessStatus === 'check' ? '· IN CHECK!' : ''}
+                    White (♔){' '}
+                    {chessTurn === 'white' && chessStatus === 'check' ? '· IN CHECK!' : ''}
                   </span>
                   <button
                     type="button"
@@ -4000,6 +3958,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                       : `Black (♚)${chessTurn === 'black' && chessStatus === 'check' ? ' · CHECK!' : ''}`}
                   </span>
                 </div>
+
+                {gameMode !== 'ai' && currentRoom && !chessWinner && (
+                  <p className="mb-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                    {isMyChessTurn
+                      ? `Your Turn (${myChessColor === 'white' ? 'White ♔' : 'Black ♚'})`
+                      : `Waiting for ${chessTurn === 'white' ? 'White ♔' : 'Black ♚'} to move...`}
+                  </p>
+                )}
 
                 {chessStatus === 'check' && !chessWinner && (
                   <div className="mb-2 px-3 py-1 rounded-xl bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-xs font-bold">
@@ -4023,8 +3989,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         <button
                           key={`${r}-${c}`}
                           type="button"
+                          disabled={!isMyChessTurn}
                           onClick={() => handleChessSquareClick(r, c)}
-                          className={`relative w-full h-full flex items-center justify-center text-xl sm:text-2xl transition-colors select-none ${
+                          className={`relative w-full h-full flex items-center justify-center text-xl sm:text-2xl transition-colors select-none disabled:cursor-not-allowed ${
                             isSelected
                               ? 'bg-amber-300 ring-2 ring-inset ring-amber-600'
                               : isLegalCapture
@@ -4073,7 +4040,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   ))}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {/* ----------------------------------------------------------- */}
             {/* GAME 5: SNAKE & LADDER (True Boustrophedon + SVG Snk/Ladder) */}
@@ -4250,7 +4218,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 aiDifficulty={aiDifficulty}
                 currentRoom={currentRoom}
                 activePlayerId={activePlayer.id}
-                firebaseAuthUid={auth.currentUser?.uid || null}
+                firebaseAuthUid={firebaseAuthUid}
                 isWaitingSpectator={isWaitingSpectator}
                 syncedState={carromSyncedState}
                 onSyncMove={(nextState, nextTurnId, status) =>
@@ -4309,13 +4277,16 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 }
                 waitingCount={currentRoom?.waitingPlayers?.length || 0}
                 currentUserId={activePlayer.id}
+                firebaseAuthUid={firebaseAuthUid}
                 isHost={currentRoom ? isRoomHost : true}
                 isSeatedActivePlayer={isSeatedActivePlayer}
                 state={truthDareState}
                 onUpdateState={(next, status = 'in_game') => {
                   setTruthDareState(next);
                   if (currentRoom) {
-                    broadcastRoomMove('TD_MOVE', next, next.activePlayerId, status);
+                    broadcastRoomMove('TD_MOVE', next, next.activePlayerId, status, {
+                      bypassTurnGuard: true,
+                    });
                   }
                 }}
                 onRoundAward={(points, summary) => {

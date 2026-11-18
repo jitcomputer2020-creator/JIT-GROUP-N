@@ -118,16 +118,29 @@ export interface InGameCallState {
   cameraFacingMode: 'user' | 'environment';
 }
 
+export interface RoomLastMove {
+  action: string;
+  byPlayerId: string;
+  byAuthUid?: string | null;
+  moveSeq?: number;
+  moveId?: string;
+  summary?: string;
+  timestampMs: number;
+}
+
 export interface MultiplayerRoom {
   roomCode: string;
   roomId?: string;
   gameId: string;
+  gameType?: string;
   hostId: string;
   player1?: string;
   player1Id?: string;
+  player1AuthUid?: string | null;
   player1Name?: string;
   player2?: string | null;
   player2Id?: string | null;
+  player2AuthUid?: string | null;
   player2Name?: string;
   createdAt: number;
   status: 'waiting' | 'active' | 'in_game' | 'finished';
@@ -140,8 +153,11 @@ export interface MultiplayerRoom {
   reactions?: RoomReaction[];
   mutedVoiceIds?: string[];
   mutedChatIds?: string[];
+  boardState?: any;
   gameState: any;
   currentTurn: string;
+  diceRoll?: number | null;
+  lastMove?: RoomLastMove | null;
   messages: InGameChatMessage[];
   callState: InGameCallState | null;
 }

@@ -67,6 +67,7 @@ import {
 import {
   MultiplayerRoom,
   RoomPlayer,
+  RoomLastMove,
   InGameChatMessage,
   RoomReaction,
 } from '../types/multiplayer';
@@ -1305,6 +1306,80 @@ export async function searchCloudUsers(queryStr: string, maxResults = 30): Promi
 // REAL-TIME 4-DIGIT MULTIPLAYER GAME ROOMS (FIRESTORE + ONSNAPSHOT)
 // ============================================================================
 
+function toFirestoreSafeValue(val: any, insideArray = false): any {
+  if (val === undefined) return null;
+  if (val === null || typeof val === 'string' || typeof val === 'boolean') return val;
+  if (typeof val === 'number') return Number.isFinite(val) ? val : null;
+  if (Array.isArray(val)) {
+    // Firestore forbids direct nested arrays (e.g. Ludo tokens number[][], Chess board string[][])
+    if (insideArray) {
+      return { __row: val.map((item) => toFirestoreSafeValue(item, true)) };
+    }
+    return val.map((item) => toFirestoreSafeValue(item, true));
+  }
+  if (typeof val === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(val)) {
+      if (v !== undefined && typeof v !== 'function') {
+        out[k] = toFirestoreSafeValue(v, false);
+      }
+    }
+    return out;
+  }
+  return String(val);
+}
+
+function fromFirestoreSafeValue(val: any): any {
+  if (val === null || val === undefined || typeof val !== 'object') return val;
+  if (Array.isArray(val)) {
+    return val.map((item) => fromFirestoreSafeValue(item));
+  }
+  if (Array.isArray((val as any).__row)) {
+    return (val as any).__row.map((item: any) => fromFirestoreSafeValue(item));
+  }
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(val)) {
+    out[k] = fromFirestoreSafeValue(v);
+  }
+  return out;
+}
+
+export function buildUnifiedBoardAndMoveFields(
+  stateObj: Record<string, any> | null | undefined,
+  moveAction: string,
+  byPlayerId: string,
+  explicitDiceRoll?: number | null,
+  summary?: string
+) {
+  const safeObj = stateObj && typeof stateObj === 'object' ? stateObj : {};
+  const firestoreMap = toFirestoreSafeValue(safeObj, false);
+  const extractedDice =
+    explicitDiceRoll !== undefined
+      ? explicitDiceRoll
+      : typeof safeObj.dice === 'number'
+      ? safeObj.dice
+      : typeof safeObj.diceRoll === 'number'
+      ? safeObj.diceRoll
+      : null;
+
+  const lastMove: RoomLastMove = {
+    action: String(moveAction || 'STATE_SYNC').slice(0, 40),
+    byPlayerId: String(byPlayerId || safeObj.byPlayerId || '').slice(0, 64),
+    byAuthUid: auth.currentUser?.uid || null,
+    moveSeq: Number(safeObj.moveSeq || 0),
+    moveId: typeof safeObj.moveId === 'string' ? safeObj.moveId : '',
+    ...(summary ? { summary: summary.slice(0, 180) } : {}),
+    timestampMs: Date.now(),
+  };
+
+  return {
+    boardState: firestoreMap,
+    gameState: firestoreMap,
+    diceRoll: extractedDice,
+    lastMove,
+  };
+}
+
 function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   let players: RoomPlayer[] = [];
   let waitingPlayers: RoomPlayer[] = [];
@@ -1339,10 +1414,21 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     mutedChatIds = [];
   }
   try {
-    const parsedState = typeof data.gameStateJson === 'string' ? JSON.parse(data.gameStateJson) : null;
-    gameState = parsedState && Object.keys(parsedState).length > 0 ? parsedState : null;
+    const parsedJson = typeof data.gameStateJson === 'string' ? JSON.parse(data.gameStateJson) : null;
+    if (parsedJson && Object.keys(parsedJson).length > 0) {
+      gameState = parsedJson;
+    } else if (data.boardState && typeof data.boardState === 'object' && Object.keys(data.boardState).length > 0) {
+      gameState = fromFirestoreSafeValue(data.boardState);
+    } else if (data.gameState && typeof data.gameState === 'object' && Object.keys(data.gameState).length > 0) {
+      gameState = fromFirestoreSafeValue(data.gameState);
+    } else {
+      gameState = null;
+    }
   } catch {
-    gameState = null;
+    gameState =
+      data.boardState && typeof data.boardState === 'object'
+        ? fromFirestoreSafeValue(data.boardState)
+        : null;
   }
   try {
     messages = typeof data.messagesJson === 'string' ? JSON.parse(data.messagesJson) : [];
@@ -1360,21 +1446,43 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   const activeSeatLimit = Number(data.activeSeatLimit || maxPlayers || 2);
 
   const resolvedRoomId = String(data.roomId || data.roomCode || '');
+  const resolvedGameType = String(data.gameType || data.gameId || 'tictactoe');
   const resolvedPlayer1Id = String(data.player1Id || data.player1 || data.hostId || players[0]?.id || '');
   const resolvedPlayer1Name = String(data.player1Name || players[0]?.name || '');
+  const resolvedPlayer1AuthUid =
+    typeof data.player1AuthUid === 'string' && data.player1AuthUid
+      ? data.player1AuthUid
+      : players[0]?.authUid || null;
   const resolvedPlayer2Id = String(data.player2Id || data.player2 || players[1]?.id || '');
   const resolvedPlayer2Name = String(data.player2Name || players[1]?.name || '');
+  const resolvedPlayer2AuthUid =
+    typeof data.player2AuthUid === 'string' && data.player2AuthUid
+      ? data.player2AuthUid
+      : players[1]?.authUid || null;
+  const resolvedDiceRoll =
+    typeof data.diceRoll === 'number'
+      ? data.diceRoll
+      : typeof gameState?.dice === 'number'
+      ? gameState.dice
+      : null;
+  const resolvedLastMove: RoomLastMove | null =
+    data.lastMove && typeof data.lastMove === 'object'
+      ? (data.lastMove as RoomLastMove)
+      : null;
 
   return {
     roomCode: String(data.roomCode || resolvedRoomId),
     roomId: resolvedRoomId,
-    gameId: String(data.gameId || 'tictactoe'),
+    gameId: resolvedGameType,
+    gameType: resolvedGameType,
     hostId: String(data.hostId || ''),
     player1: resolvedPlayer1Id,
     player1Id: resolvedPlayer1Id,
+    player1AuthUid: resolvedPlayer1AuthUid,
     player1Name: resolvedPlayer1Name,
     player2: resolvedPlayer2Id,
     player2Id: resolvedPlayer2Id,
+    player2AuthUid: resolvedPlayer2AuthUid,
     player2Name: resolvedPlayer2Name,
     createdAt: createdMs,
     status: (data.status as MultiplayerRoom['status']) || 'waiting',
@@ -1387,8 +1495,11 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     reactions,
     mutedVoiceIds,
     mutedChatIds,
+    boardState: gameState,
     gameState,
     currentTurn: String(data.currentTurn || ''),
+    diceRoll: resolvedDiceRoll,
+    lastMove: resolvedLastMove,
     messages,
     callState: null,
   };
@@ -1671,16 +1782,22 @@ export async function createFirestoreGameRoom(
   for (let createAttempt = 0; createAttempt < 12; createAttempt++) {
     const chosenCode = await pickAvailableRoomCodeAndCleanStale(hostPlayer.id);
     const hostDisplayName = (hostPlayer.name || 'JIT Player').slice(0, 80);
+    const hostAuthUid = auth.currentUser?.uid || null;
+    const initState = isOpenGroup ? buildInitialGameStateForGame(gameId, `start_${Date.now()}`) : {};
+    const unifiedFields = buildUnifiedBoardAndMoveFields(initState, 'ROOM_CREATED', hostPlayer.id, null);
     const payload = {
       roomCode: chosenCode,
       roomId: chosenCode,
       gameId,
+      gameType: gameId,
       hostId: hostPlayer.id,
       player1: hostPlayer.id,
       player1Id: hostPlayer.id,
+      player1AuthUid: hostAuthUid,
       player1Name: hostDisplayName,
       player2: null,
       player2Id: null,
+      player2AuthUid: null,
       player2Name: '',
       status: initialStatus,
       maxPlayers: safeMax,
@@ -1693,7 +1810,8 @@ export async function createFirestoreGameRoom(
       reactionsJson: '[]',
       mutedVoiceIdsJson: '[]',
       mutedChatIdsJson: '[]',
-      gameStateJson: '{}',
+      gameStateJson: JSON.stringify(initState),
+      ...unifiedFields,
       messagesJson: '[]',
       moveAction: 'ROOM_CREATED',
       currentTurn: hostPlayer.id,
@@ -1717,12 +1835,15 @@ export async function createFirestoreGameRoom(
           roomCode: chosenCode,
           roomId: chosenCode,
           gameId,
+          gameType: gameId,
           hostId: hostPlayer.id,
           player1: hostPlayer.id,
           player1Id: hostPlayer.id,
+          player1AuthUid: hostAuthUid,
           player1Name: hostDisplayName,
           player2: null,
           player2Id: null,
+          player2AuthUid: null,
           player2Name: '',
           createdAt: Date.now(),
           status: initialStatus,
@@ -1735,8 +1856,11 @@ export async function createFirestoreGameRoom(
           reactions: [],
           mutedVoiceIds: [],
           mutedChatIds: [],
-          gameState: null,
+          boardState: isOpenGroup ? initState : null,
+          gameState: isOpenGroup ? initState : null,
           currentTurn: hostPlayer.id,
+          diceRoll: unifiedFields.diceRoll,
+          lastMove: unifiedFields.lastMove,
           messages: [],
           callState: null,
         };
@@ -1881,23 +2005,33 @@ export async function joinFirestoreGameRoom(
 
       const p1Id = nextPlayers[0]?.id || parsed.hostId;
       const p1Name = nextPlayers[0]?.name || parsed.player1Name || '';
+      const p1AuthUid = nextPlayers[0]?.authUid || parsed.player1AuthUid || null;
       const p2Id = nextPlayers[1]?.id || '';
       const p2Name = nextPlayers[1]?.name || '';
+      const p2AuthUid = nextPlayers[1]?.authUid || auth.currentUser?.uid || null;
+      const unifiedStartFields = isStarting
+        ? buildUnifiedBoardAndMoveFields(nextGameState, 'GAME_START', player.id)
+        : null;
 
       tx.update(roomRef, {
+        roomId: parsed.roomCode,
+        gameType: parsed.gameId,
         playersJson: JSON.stringify(nextPlayers),
         player1: p1Id,
         player1Id: p1Id,
+        player1AuthUid: p1AuthUid,
         player1Name: p1Name,
         player2: p2Id,
         player2Id: p2Id,
+        player2AuthUid: p2AuthUid,
         player2Name: p2Name,
         playerCount: nextPlayers.length,
         hostId: parsed.hostId,
         status: nextStatus,
-        ...(isStarting
+        ...(isStarting && unifiedStartFields
           ? {
               gameStateJson: JSON.stringify(nextGameState),
+              ...unifiedStartFields,
               moveAction: 'GAME_START',
               currentTurn: parsed.players[0]?.id || parsed.hostId,
             }
@@ -1908,17 +2042,23 @@ export async function joinFirestoreGameRoom(
       return {
         ...parsed,
         roomId: parsed.roomCode,
+        gameType: parsed.gameId,
         player1: p1Id,
         player1Id: p1Id,
+        player1AuthUid: p1AuthUid,
         player1Name: p1Name,
         player2: p2Id,
         player2Id: p2Id,
+        player2AuthUid: p2AuthUid,
         player2Name: p2Name,
         status: nextStatus,
         players: nextPlayers,
-        ...(isStarting
+        ...(isStarting && unifiedStartFields
           ? {
+              boardState: nextGameState,
               gameState: nextGameState,
+              diceRoll: unifiedStartFields.diceRoll,
+              lastMove: unifiedStartFields.lastMove,
               currentTurn: parsed.players[0]?.id || parsed.hostId,
             }
           : {}),
@@ -2328,17 +2468,26 @@ export async function pairQueuePlayersIntoRoom(
         };
         const pairedPlayers = [oppPlayer, initPlayer];
         const initialPairedGameState = buildInitialGameStateForGame(gameId, startId);
+        const unifiedPaired = buildUnifiedBoardAndMoveFields(initialPairedGameState, 'GAME_START', initiator.id);
+        const oppAuthUid = typeof oppData.playerAuthUid === 'string' ? oppData.playerAuthUid : null;
+        const initAuthUid = auth.currentUser?.uid || null;
+        if (oppAuthUid) {
+          oppPlayer.authUid = oppAuthUid;
+        }
 
         tx.set(roomRef, {
           roomCode,
           roomId: roomCode,
           gameId,
+          gameType: gameId,
           hostId: oppPlayer.id,
           player1: oppPlayer.id,
           player1Id: oppPlayer.id,
+          player1AuthUid: oppAuthUid,
           player1Name: oppPlayer.name,
           player2: initPlayer.id,
           player2Id: initPlayer.id,
+          player2AuthUid: initAuthUid,
           player2Name: initPlayer.name,
           status: 'active',
           maxPlayers: safeMax,
@@ -2352,6 +2501,7 @@ export async function pairQueuePlayersIntoRoom(
           mutedVoiceIdsJson: '[]',
           mutedChatIdsJson: '[]',
           gameStateJson: JSON.stringify(initialPairedGameState),
+          ...unifiedPaired,
           messagesJson: '[]',
           moveAction: 'GAME_START',
           currentTurn: oppPlayer.id,
@@ -2379,12 +2529,15 @@ export async function pairQueuePlayersIntoRoom(
           roomCode,
           roomId: roomCode,
           gameId,
+          gameType: gameId,
           hostId: oppPlayer.id,
           player1: oppPlayer.id,
           player1Id: oppPlayer.id,
+          player1AuthUid: oppAuthUid,
           player1Name: oppPlayer.name,
           player2: initPlayer.id,
           player2Id: initPlayer.id,
+          player2AuthUid: initAuthUid,
           player2Name: initPlayer.name,
           createdAt: Date.now(),
           status: 'active',
@@ -2397,8 +2550,11 @@ export async function pairQueuePlayersIntoRoom(
           reactions: [],
           mutedVoiceIds: [],
           mutedChatIds: [],
-          gameState: { _startId: startId, moveSeq: 0 },
+          boardState: initialPairedGameState,
+          gameState: initialPairedGameState,
           currentTurn: oppPlayer.id,
+          diceRoll: unifiedPaired.diceRoll,
+          lastMove: unifiedPaired.lastMove,
           messages: [],
           callState: null,
         };
@@ -2525,26 +2681,33 @@ export async function tryAtomicallyJoinWaitingRoom(
     ];
     const joinedPlayer1Id = nextPlayers[0]?.id || parsed.hostId;
     const joinedPlayer1Name = nextPlayers[0]?.name || parsed.player1Name || '';
+    const joinedPlayer1AuthUid = nextPlayers[0]?.authUid || parsed.player1AuthUid || null;
     const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
     const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
+    const joinedPlayer2AuthUid = nextPlayers[1]?.authUid || auth.currentUser?.uid || null;
     const nextStatus: MultiplayerRoom['status'] = 'active';
     const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const nextGameState = buildInitialGameStateForGame(gameId, startId, parsed.gameState || {});
+    const unifiedJoin = buildUnifiedBoardAndMoveFields(nextGameState, 'GAME_START', player.id);
 
     tx.update(roomRef, {
       roomId: cleanCode,
+      gameType: gameId,
       playersJson: JSON.stringify(nextPlayers),
       player1: joinedPlayer1Id,
       player1Id: joinedPlayer1Id,
+      player1AuthUid: joinedPlayer1AuthUid,
       player1Name: joinedPlayer1Name,
       player2: joinedPlayer2Id,
       player2Id: joinedPlayer2Id,
+      player2AuthUid: joinedPlayer2AuthUid,
       player2Name: joinedPlayer2Name,
       playerCount: nextPlayers.length,
       hostId: parsed.hostId,
       isPublicMatch: true,
       status: nextStatus,
       gameStateJson: JSON.stringify(nextGameState),
+      ...unifiedJoin,
       moveAction: 'GAME_START',
       currentTurn: joinedPlayer1Id,
       updatedAt: serverTimestamp(),
@@ -2562,16 +2725,22 @@ export async function tryAtomicallyJoinWaitingRoom(
     return {
       ...parsed,
       roomId: cleanCode,
+      gameType: gameId,
       player1: joinedPlayer1Id,
       player1Id: joinedPlayer1Id,
+      player1AuthUid: joinedPlayer1AuthUid,
       player1Name: joinedPlayer1Name,
       player2: joinedPlayer2Id,
       player2Id: joinedPlayer2Id,
+      player2AuthUid: joinedPlayer2AuthUid,
       player2Name: joinedPlayer2Name,
       isPublicMatch: true,
       status: nextStatus,
       players: nextPlayers,
+      boardState: nextGameState,
       gameState: nextGameState,
+      diceRoll: unifiedJoin.diceRoll,
+      lastMove: unifiedJoin.lastMove,
       currentTurn: joinedPlayer1Id,
     };
   });
@@ -2677,29 +2846,36 @@ export async function quickMatchFirestoreRoom(
               ];
               const joinedPlayer1Id = hostPlayer?.id || parsedWaiting.hostId;
               const joinedPlayer1Name = hostPlayer?.name || parsedWaiting.player1Name || '';
+              const joinedPlayer1AuthUid = hostPlayer?.authUid || parsedWaiting.player1AuthUid || null;
               const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
               const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
+              const joinedPlayer2AuthUid = nextPlayers[1]?.authUid || auth.currentUser?.uid || null;
               const nextStatus: MultiplayerRoom['status'] = 'active';
               const updatedGameState = buildInitialGameStateForGame(
                 gameId,
                 startId,
                 parsedWaiting.gameState || {}
               );
+              const unifiedForceJoin = buildUnifiedBoardAndMoveFields(updatedGameState, 'GAME_START', player.id);
 
               tx.update(waitingRoomRef, {
                 roomId: slotRoomCode,
+                gameType: gameId,
                 playersJson: JSON.stringify(nextPlayers),
                 player1: joinedPlayer1Id,
                 player1Id: joinedPlayer1Id,
+                player1AuthUid: joinedPlayer1AuthUid,
                 player1Name: joinedPlayer1Name,
                 player2: joinedPlayer2Id,
                 player2Id: joinedPlayer2Id,
+                player2AuthUid: joinedPlayer2AuthUid,
                 player2Name: joinedPlayer2Name,
                 playerCount: nextPlayers.length,
                 hostId: parsedWaiting.hostId,
                 isPublicMatch: true,
                 status: nextStatus,
                 gameStateJson: JSON.stringify(updatedGameState),
+                ...unifiedForceJoin,
                 moveAction: 'GAME_START',
                 currentTurn: joinedPlayer1Id,
                 updatedAt: serverTimestamp(),
@@ -2717,16 +2893,22 @@ export async function quickMatchFirestoreRoom(
                 room: {
                   ...parsedWaiting,
                   roomId: slotRoomCode,
+                  gameType: gameId,
                   player1: joinedPlayer1Id,
                   player1Id: joinedPlayer1Id,
+                  player1AuthUid: joinedPlayer1AuthUid,
                   player1Name: joinedPlayer1Name,
                   player2: joinedPlayer2Id,
                   player2Id: joinedPlayer2Id,
+                  player2AuthUid: joinedPlayer2AuthUid,
                   player2Name: joinedPlayer2Name,
                   isPublicMatch: true,
                   status: nextStatus,
                   players: nextPlayers,
+                  boardState: updatedGameState,
                   gameState: updatedGameState,
+                  diceRoll: unifiedForceJoin.diceRoll,
+                  lastMove: unifiedForceJoin.lastMove,
                   currentTurn: joinedPlayer1Id,
                 } as MultiplayerRoom,
               };
@@ -2741,9 +2923,10 @@ export async function quickMatchFirestoreRoom(
         }
 
         const nowMs = Date.now();
+        const hostAuthUid = auth.currentUser?.uid || null;
         const hostEntry: RoomPlayer = {
           id: player.id,
-          ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
+          ...(hostAuthUid ? { authUid: hostAuthUid } : {}),
           name: cleanName,
           avatar: cleanAvatar,
           isHost: true,
@@ -2752,17 +2935,21 @@ export async function quickMatchFirestoreRoom(
           joinedAtMs: nowMs,
         };
         const initialPlayers = [hostEntry];
+        const unifiedWaitFields = buildUnifiedBoardAndMoveFields({}, 'ROOM_CREATED', player.id, null);
 
         tx.set(candidateRoomRef, {
           roomCode: chosenCode,
           roomId: chosenCode,
           gameId,
+          gameType: gameId,
           hostId: player.id,
           player1: player.id,
           player1Id: player.id,
+          player1AuthUid: hostAuthUid,
           player1Name: cleanName,
           player2: null,
           player2Id: null,
+          player2AuthUid: null,
           player2Name: '',
           status: 'waiting',
           maxPlayers: safeMax,
@@ -2776,6 +2963,7 @@ export async function quickMatchFirestoreRoom(
           mutedVoiceIdsJson: '[]',
           mutedChatIdsJson: '[]',
           gameStateJson: '{}',
+          ...unifiedWaitFields,
           messagesJson: '[]',
           moveAction: 'ROOM_CREATED',
           currentTurn: player.id,
@@ -2817,12 +3005,15 @@ export async function quickMatchFirestoreRoom(
             roomCode: chosenCode,
             roomId: chosenCode,
             gameId,
+            gameType: gameId,
             hostId: player.id,
             player1: player.id,
             player1Id: player.id,
+            player1AuthUid: hostAuthUid,
             player1Name: cleanName,
             player2: null,
             player2Id: null,
+            player2AuthUid: null,
             player2Name: '',
             createdAt: nowMs,
             status: 'waiting',
@@ -2835,8 +3026,11 @@ export async function quickMatchFirestoreRoom(
             reactions: [],
             mutedVoiceIds: [],
             mutedChatIds: [],
+            boardState: null,
             gameState: null,
             currentTurn: player.id,
+            diceRoll: null,
+            lastMove: unifiedWaitFields.lastMove,
             messages: [],
             callState: null,
           } as MultiplayerRoom,
@@ -2956,9 +3150,12 @@ export async function startFirestoreGameRoom(
     const snap = await getDoc(roomRef).catch(() => null);
     const gameId = snap?.exists() ? String(snap.data().gameId || '') : '';
     const hydratedState = buildInitialGameStateForGame(gameId, startId, initialGameState);
+    const unified = buildUnifiedBoardAndMoveFields(hydratedState, 'GAME_START', firstTurnId);
     await updateDoc(roomRef, {
       status: 'in_game',
+      gameType: gameId || 'tictactoe',
       gameStateJson: JSON.stringify(hydratedState),
+      ...unified,
       currentTurn: String(firstTurnId || '').slice(0, 64),
       moveAction: 'GAME_START',
       updatedAt: serverTimestamp(),
@@ -2976,13 +3173,23 @@ export async function pushFirestoreGameMove(
   moveAction: string,
   newGameState: Record<string, any>,
   nextTurnId?: string,
-  status: 'active' | 'in_game' | 'finished' = 'in_game'
+  status: 'active' | 'in_game' | 'finished' = 'in_game',
+  options?: { diceRoll?: number | null; summary?: string }
 ): Promise<void> {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
   if (cleanCode.length !== 4) return;
+  const actorId = String(newGameState?.byPlayerId || '');
+  const unified = buildUnifiedBoardAndMoveFields(
+    newGameState,
+    moveAction,
+    actorId,
+    options?.diceRoll,
+    options?.summary
+  );
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
       gameStateJson: JSON.stringify(newGameState),
+      ...unified,
       moveAction: String(moveAction).slice(0, 40),
       currentTurn: String(nextTurnId || '').slice(0, 64),
       status,
@@ -2996,6 +3203,91 @@ export async function pushFirestoreGameMove(
   }
 }
 
+export async function pushFirestoreQuizAnswer(
+  roomCode: string,
+  params: {
+    actorId: string;
+    questionIndex: number;
+    selectedOption: number | null;
+    newPlayerScore: number;
+    questions: any[];
+    source: 'ai' | 'curated-70-30';
+    moveId: string;
+    moveSeq: number;
+  }
+): Promise<any | null> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return null;
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  try {
+    return await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) return null;
+      const parsed = parseRoomSnapshotData(snap.data());
+      const existing = parsed.gameState && typeof parsed.gameState === 'object' ? parsed.gameState : {};
+
+      const mergedScores: Record<string, number> = {
+        ...(existing.scores && typeof existing.scores === 'object' ? existing.scores : {}),
+        [params.actorId]: params.newPlayerScore,
+      };
+      const existingAnswersByQ: Record<number, Record<string, number | null>> =
+        existing.answersByQ && typeof existing.answersByQ === 'object' ? { ...existing.answersByQ } : {};
+      const currentQAnswers: Record<string, number | null> = {
+        ...(existingAnswersByQ[params.questionIndex] || {}),
+        [params.actorId]: params.selectedOption,
+      };
+      existingAnswersByQ[params.questionIndex] = currentQAnswers;
+
+      const activeParticipants = parsed.players.map((p) => p.id);
+      const allAnswered =
+        activeParticipants.length <= 1 ||
+        activeParticipants.every((pid) => currentQAnswers[pid] !== undefined);
+
+      const qList =
+        Array.isArray(existing.questions) && existing.questions.length > 0
+          ? existing.questions
+          : params.questions;
+      const currentIndex =
+        typeof existing.index === 'number' && existing.index > params.questionIndex
+          ? existing.index
+          : params.questionIndex;
+      const isLastQ = currentIndex >= qList.length - 1;
+      const nextIndex = allAnswered && !isLastQ && currentIndex === params.questionIndex ? currentIndex + 1 : currentIndex;
+      const nextFinished = Boolean(existing.finished) || (allAnswered && isLastQ && currentIndex === params.questionIndex);
+      const status: 'in_game' | 'finished' = nextFinished ? 'finished' : 'in_game';
+
+      const nextState = {
+        questions: qList,
+        source: existing.source || params.source,
+        index: nextIndex,
+        scores: mergedScores,
+        answersByQ: existingAnswersByQ,
+        finished: nextFinished,
+        moveId: params.moveId,
+        moveSeq: Math.max(Number(existing.moveSeq || 0) + 1, params.moveSeq),
+        byPlayerId: params.actorId,
+      };
+      const unified = buildUnifiedBoardAndMoveFields(nextState, 'QUIZ_MOVE', params.actorId, null);
+
+      tx.update(roomRef, {
+        gameStateJson: JSON.stringify(nextState),
+        ...unified,
+        moveAction: 'QUIZ_MOVE',
+        currentTurn: '',
+        status,
+        updatedAt: serverTimestamp(),
+      });
+      return nextState;
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    console.warn('Firestore pushQuizAnswer notice:', err);
+    return null;
+  }
+}
+
 export async function rematchFirestoreGameRoom(
   roomCode: string,
   resetState: Record<string, any>,
@@ -3004,10 +3296,13 @@ export async function rematchFirestoreGameRoom(
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
   if (cleanCode.length !== 4) return;
   const moveId = `rematch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const stampedReset = { ...resetState, moveId, moveSeq: 0 };
+  const unified = buildUnifiedBoardAndMoveFields(stampedReset, 'REMATCH', firstTurnId);
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
       status: 'in_game',
-      gameStateJson: JSON.stringify({ ...resetState, moveId, moveSeq: 0 }),
+      gameStateJson: JSON.stringify(stampedReset),
+      ...unified,
       moveAction: 'REMATCH',
       currentTurn: String(firstTurnId || '').slice(0, 64),
       updatedAt: serverTimestamp(),
@@ -3160,15 +3455,27 @@ export async function hostRotateRoomPlayers(
       .map((p) => ({ ...p, isHost: p.id === parsed.hostId }));
 
     const moveId = `rotate_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const nextTurnId = String(nextActive[0]?.id || parsed.hostId).slice(0, 64);
+    const stampedRotate = { ...(resetState || {}), moveId, moveSeq: 0 };
+    const unifiedRotate = buildUnifiedBoardAndMoveFields(stampedRotate, 'REMATCH', hostId);
     await updateDoc(roomRef, {
       playersJson: JSON.stringify(nextActive),
       waitingPlayersJson: JSON.stringify(nextWaiting),
+      player1: nextActive[0]?.id || parsed.hostId,
+      player1Id: nextActive[0]?.id || parsed.hostId,
+      player1AuthUid: nextActive[0]?.authUid || null,
+      player1Name: nextActive[0]?.name || '',
+      player2: nextActive[1]?.id || null,
+      player2Id: nextActive[1]?.id || null,
+      player2AuthUid: nextActive[1]?.authUid || null,
+      player2Name: nextActive[1]?.name || '',
       playerCount: Math.min(500, nextActive.length + nextWaiting.length),
       hostId: parsed.hostId,
       status: 'in_game',
-      gameStateJson: JSON.stringify({ ...(resetState || {}), moveId, moveSeq: 0 }),
+      gameStateJson: JSON.stringify(stampedRotate),
+      ...unifiedRotate,
       moveAction: 'REMATCH',
-      currentTurn: String(nextActive[0]?.id || parsed.hostId).slice(0, 64),
+      currentTurn: nextTurnId,
       updatedAt: serverTimestamp(),
     });
   } catch (err: any) {
@@ -3228,9 +3535,11 @@ export async function kickOrLeaveFirestoreRoom(
       waitingPlayersJson: JSON.stringify(updatedWaiting),
       player1: updatedActive[0]?.id || nextHostId,
       player1Id: updatedActive[0]?.id || nextHostId,
+      player1AuthUid: updatedActive[0]?.authUid || null,
       player1Name: updatedActive[0]?.name || '',
       player2: updatedActive[1]?.id || null,
       player2Id: updatedActive[1]?.id || null,
+      player2AuthUid: updatedActive[1]?.authUid || null,
       player2Name: updatedActive[1]?.name || '',
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
