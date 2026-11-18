@@ -27,30 +27,106 @@ export async function sendJitAiChat(params: {
   userName?: string;
   mode?: 'studies' | 'tech' | 'general';
 }): Promise<JitAiChatResult> {
-  const res = await safeFetchJson<{ reply?: string; model?: string; createdAtMs?: number; error?: string }>('/api/ai/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
+  try {
+    const res = await safeFetchJson<{
+      reply?: string;
+      model?: string;
+      createdAtMs?: number;
+      error?: string;
+      code?: string;
+    }>('/api/ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
 
-  if (!res.ok || !res.data) {
+    if (!res.ok || !res.data || !res.data.reply) {
+      const serverMsg =
+        res.data?.error ||
+        (!res.isJson && res.status === 200
+          ? 'AI chat API returned HTML instead of JSON. Ensure /api/ai/chat is deployed and GEMINI_API_KEY is configured.'
+          : 'JIT AI Assistant is currently unavailable. Please verify GEMINI_API_KEY in server/Vercel secrets.');
+      throw new Error(serverMsg);
+    }
+
+    return {
+      reply: String(res.data.reply || ''),
+      model: String(res.data.model || 'gemini-4-hydrogen'),
+      createdAtMs: Number(res.data.createdAtMs || Date.now()),
+    };
+  } catch (err: any) {
     throw new Error(
-      res.data?.error ||
-        'JIT AI Assistant requires the full-stack server API and is unavailable on static serverless deployments.'
+      err?.message ||
+        'Unable to reach JIT AI Assistant right now. Please verify server connectivity and GEMINI_API_KEY.'
     );
   }
-
-  return {
-    reply: String(res.data.reply || ''),
-    model: String(res.data.model || 'gemini-4-hydrogen'),
-    createdAtMs: Number(res.data.createdAtMs || Date.now()),
-  };
 }
 
 export interface SmartCaptionResult {
   captions: string[];
   hashtags: string[];
   source: 'ai' | 'template';
+  notice?: string;
+}
+
+function buildStarterCaptionTemplates(params: {
+  topic?: string;
+  contentType: 'post' | 'reel';
+  tone?: string;
+}): { captions: string[]; hashtags: string[] } {
+  const topicClean = (params.topic || '').trim();
+  const isReel = params.contentType === 'reel';
+  const tone = (params.tone || 'engaging').toLowerCase();
+
+  if (tone === 'study') {
+    return {
+      captions: [
+        topicClean
+          ? `Deep-dive session on ${topicClean} with the JIT study crew. Sharing notes & key takeaways!`
+          : `Another productive study sprint at JIT Campus—building strong CS fundamentals step by step.`,
+        `Late-night debugging, clean code, and campus focus mode activated.`,
+        `Who else is prepping algorithms and system design this week? Let's collaborate!`,
+      ],
+      hashtags: ['#JITCampus', '#CSStudent', '#CodingLife', '#TechNotes', '#StudyGrind', '#JITGROUP', '#CodeAndBuild'],
+    };
+  }
+
+  if (tone === 'gaming') {
+    return {
+      captions: [
+        topicClean
+          ? `${topicClean} — ready to challenge anyone in the JIT Gaming Lobby! Drop your room code.`
+          : `Match point energy in the JIT Arena! Who is joining the next 4-digit room?`,
+        `GGs all around! Hosting another live multiplayer session right now on JIT GROUP.`,
+        `Climbing the campus leaderboard one win at a time. Let's squad up!`,
+      ],
+      hashtags: ['#JITGaming', '#CampusArena', '#GGWP', '#Multiplayer', '#Leaderboard', '#JITGROUP', '#GameOn'],
+    };
+  }
+
+  if (tone === 'campus') {
+    return {
+      captions: [
+        topicClean
+          ? `${topicClean} — catching great campus vibes today with the JIT GROUP community!`
+          : `Good vibes around JIT Campus today! Sharing this ${isReel ? 'reel' : 'moment'} with everyone.`,
+        `Campus memories, friends, and endless creativity right here at JIT.`,
+        `Tag someone from your batch who needs to see this ${isReel ? 'clip' : 'update'}!`,
+      ],
+      hashtags: ['#JITCampus', '#CampusLife', '#JITFriends', '#CollegeVibes', '#Community', '#JITGROUP', '#DailyUpdate'],
+    };
+  }
+
+  return {
+    captions: [
+      topicClean
+        ? `Sharing a fresh ${isReel ? 'reel' : 'update'}: ${topicClean}. Excited to hear your thoughts!`
+        : `Fresh ${isReel ? 'highlight reel' : 'update'} live on JIT GROUP! Drop a like and join the conversation.`,
+      `New moment from campus—connecting, creating, and competing together on JIT GROUP.`,
+      `Quick update for the JIT community! What are you working on today?`,
+    ],
+    hashtags: ['#JITGROUP', '#JITCampus', '#JITCommunity', '#CampusLife', '#CodeAndPlay', '#TrendingNow', '#ShareYourStory'],
+  };
 }
 
 export async function generateAiCaptions(params: {
@@ -59,21 +135,50 @@ export async function generateAiCaptions(params: {
   contentType: 'post' | 'reel';
   tone?: string;
 }): Promise<SmartCaptionResult> {
-  const res = await safeFetchJson<{ captions?: string[]; hashtags?: string[]; error?: string }>('/api/ai/captions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
+  try {
+    const res = await safeFetchJson<{
+      captions?: string[];
+      hashtags?: string[];
+      error?: string;
+      code?: string;
+    }>('/api/ai/captions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
 
-  if (!res.ok || !res.data) {
-    throw new Error(res.data?.error || 'Could not generate AI captions right now.');
+    if (res.ok && res.data && Array.isArray(res.data.captions) && res.data.captions.length > 0) {
+      return {
+        captions: res.data.captions,
+        hashtags: Array.isArray(res.data.hashtags) ? res.data.hashtags : [],
+        source: 'ai',
+      };
+    }
+
+    const starter = buildStarterCaptionTemplates(params);
+    const reason =
+      res.data?.error ||
+      (!res.isJson && res.status === 200
+        ? 'AI endpoint unavailable on static host (showing starter templates instead).'
+        : 'AI caption service unavailable (check GEMINI_API_KEY). Showing starter templates instead.');
+
+    return {
+      captions: starter.captions,
+      hashtags: starter.hashtags,
+      source: 'template',
+      notice: reason,
+    };
+  } catch (err: any) {
+    const starter = buildStarterCaptionTemplates(params);
+    return {
+      captions: starter.captions,
+      hashtags: starter.hashtags,
+      source: 'template',
+      notice:
+        err?.message ||
+        'AI caption service unreachable right now. Showing local starter templates so you can keep posting.',
+    };
   }
-
-  return {
-    captions: Array.isArray(res.data.captions) ? res.data.captions : [],
-    hashtags: Array.isArray(res.data.hashtags) ? res.data.hashtags : [],
-    source: 'ai',
-  };
 }
 
 export interface QuizRoundResult {

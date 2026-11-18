@@ -241,6 +241,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
       addComment(postId, clean, replyingToCommentId || undefined);
       setCommentText('');
       setReplyingToCommentId(null);
+    } catch {
+      addComment(postId, clean, replyingToCommentId || undefined);
+      setCommentText('');
+      setReplyingToCommentId(null);
     } finally {
       setIsModeratingComment(false);
     }

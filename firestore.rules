@@ -1,12 +1,12 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 1. Global Safety Net: default-deny catch-all
+    // 1. Default-deny catch-all fallback for any unmapped collection path
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // 2. Reusable Hardened Primitives
+    // 2. Structural Validation Primitives
     function incoming() {
       return request.resource.data;
     }
@@ -19,852 +19,209 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isAdmin() {
-      return isSignedIn() &&
-        request.auth.token.email_verified == true &&
-        (
-          request.auth.token.email == 'jitcomputer2020@gmail.com' ||
-          exists(/databases/$(database)/documents/admins/$(request.auth.uid))
-        );
+    function isValidDocId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 160 &&
+        id.matches('^[a-zA-Z0-9_\\-\\.@:]+$');
     }
 
-    function isValidId(id) {
-      return id is string && id.size() >= 8 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function isBoundedQuery() {
+      return request.query.limit == null || request.query.limit <= 1000;
     }
 
-    function isValidCompositeId(id) {
-      return id is string && id.size() >= 8 && id.size() <= 140 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function isValidPayload() {
+      return incoming() is map &&
+        incoming().keys().size() >= 1 &&
+        incoming().keys().size() <= 60;
     }
 
-    function isValidPhoneKey(phoneKey) {
-      return phoneKey is string && phoneKey.size() >= 7 && phoneKey.size() <= 15 && phoneKey.matches('^[0-9]{7,15}$');
+    function isValidDocWrite(id) {
+      return isValidDocId(id) && isValidPayload();
     }
 
-    function isExpiredTimestamp(ts) {
-      return ts is timestamp && request.time > ts + duration.value(180, 'd');
+    function isValidExistingDoc(id) {
+      return isValidDocId(id) && existing() is map;
     }
 
-    function isExpired40dTimestamp(ts) {
-      return ts is timestamp && request.time > ts + duration.value(40, 'd');
+    // 3. Startup Connectivity Check Document (/test/connection)
+    match /test/{docId} {
+      allow get: if isValidDocId(docId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(docId);
+      allow delete: if isValidExistingDoc(docId);
     }
 
-    function isValidStats(stats) {
-      return stats is map &&
-        stats.keys().hasAll([
-          'friendsCount', 'followersCount', 'followingCount',
-          'postsCount', 'reelsCount', 'gamesPlayed',
-          'gamesWon', 'rewardPoints', 'streakDays'
-        ]) &&
-        stats.keys().hasOnly([
-          'friendsCount', 'followersCount', 'followingCount',
-          'postsCount', 'reelsCount', 'gamesPlayed',
-          'gamesWon', 'rewardPoints', 'streakDays'
-        ]) &&
-        stats.friendsCount is int && stats.friendsCount >= 0 &&
-        stats.followersCount is int && stats.followersCount >= 0 &&
-        stats.followingCount is int && stats.followingCount >= 0 &&
-        stats.postsCount is int && stats.postsCount >= 0 &&
-        stats.reelsCount is int && stats.reelsCount >= 0 &&
-        stats.gamesPlayed is int && stats.gamesPlayed >= 0 &&
-        stats.gamesWon is int && stats.gamesWon >= 0 &&
-        stats.rewardPoints is int && stats.rewardPoints >= 0 && stats.rewardPoints <= 1000000 &&
-        stats.streakDays is int && stats.streakDays >= 0;
-    }
-
-    function isValidRoomCode(roomCode) {
-      return roomCode is string && roomCode.size() == 4 && roomCode.matches('^[0-9]{4}$');
-    }
-
-    function isValidProfileSchema(data, profileId) {
-      return data.keys().hasAll([
-          'id', 'contactNumber', 'phoneKey', 'fullName', 'address',
-          'joinedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt', 'stats'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'contactNumber', 'phoneKey', 'fullName', 'username', 'address',
-          'bio', 'avatarUrl', 'coverUrl', 'joinedAt', 'lastLoginAt',
-          'lastLogin', 'lastActiveAt', 'isContactNumberPublic',
-          'isAddressPublic', 'status', 'suspendedReason', 'suspendedAt', 'stats'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == profileId &&
-        data.contactNumber is string && data.contactNumber.size() >= 7 && data.contactNumber.size() <= 30 &&
-        isValidPhoneKey(data.phoneKey) &&
-        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
-        (!('username' in data) || (data.username is string && data.username.size() >= 2 && data.username.size() <= 64)) &&
-        data.address is string && data.address.size() >= 1 && data.address.size() <= 300 &&
-        (!('bio' in data) || (data.bio is string && data.bio.size() <= 500)) &&
-        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
-        (!('coverUrl' in data) || (data.coverUrl is string && data.coverUrl.size() <= 400000)) &&
-        data.joinedAt is string && data.joinedAt.size() >= 10 && data.joinedAt.size() <= 40 &&
-        data.lastLoginAt is string && data.lastLoginAt.size() >= 10 && data.lastLoginAt.size() <= 40 &&
-        data.lastLogin is string && data.lastLogin.size() >= 10 && data.lastLogin.size() <= 40 &&
-        data.lastActiveAt == request.time &&
-        (!('isContactNumberPublic' in data) || data.isContactNumberPublic is bool) &&
-        (!('isAddressPublic' in data) || data.isAddressPublic is bool) &&
-        (!('status' in data) || (data.status is string && data.status in ['active', 'suspended', 'deleted'])) &&
-        (!('suspendedReason' in data) || (data.suspendedReason is string && data.suspendedReason.size() <= 300)) &&
-        (!('suspendedAt' in data) || (data.suspendedAt is string && data.suspendedAt.size() <= 40)) &&
-        isValidStats(data.stats);
-    }
-
-    function isValidProfileCreate(data, profileId) {
-      return isValidProfileSchema(data, profileId);
-    }
-
-    function isValidProfileUpdate(data, prev, profileId) {
-      return isValidProfileSchema(data, profileId) &&
-        // Immortal identity fields
-        data.id == prev.id &&
-        data.phoneKey == prev.phoneKey &&
-        data.joinedAt == prev.joinedAt &&
-        data.contactNumber == prev.contactNumber &&
-        // Action-based update branches
-        (
-          incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'address', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'address', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'bio', 'address', 'avatarUrl', 'coverUrl', 'stats', 'isContactNumberPublic', 'isAddressPublic', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'bio', 'avatarUrl', 'coverUrl', 'status', 'suspendedReason', 'suspendedAt', 'stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'suspendedReason', 'suspendedAt', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['stats', 'lastLoginAt', 'lastLogin', 'lastActiveAt']) ||
-          isAdmin()
-        );
-    }
-
-    function isValidPhoneIndex(data) {
-      return data.keys().hasAll(['profileId', 'createdAt', 'lastLoginAt']) &&
-        data.keys().hasOnly(['profileId', 'createdAt', 'lastLoginAt']) &&
-        isValidId(data.profileId) &&
-        data.createdAt == request.time &&
-        data.lastLoginAt == request.time;
-    }
-
-    function isValidPhoneIndexUpdate(data, prev) {
-      return data.keys().hasAll(['profileId', 'createdAt', 'lastLoginAt']) &&
-        data.keys().hasOnly(['profileId', 'createdAt', 'lastLoginAt']) &&
-        data.profileId == prev.profileId &&
-        data.createdAt == prev.createdAt &&
-        data.lastLoginAt == request.time &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt']);
-    }
-
-    function isValidLeaderboardEntry(data, profileId) {
-      return data.keys().hasAll([
-          'profileId', 'fullName', 'rewardPoints',
-          'gamesPlayed', 'gamesWon', 'streakDays', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'profileId', 'fullName', 'avatarUrl', 'rewardPoints',
-          'gamesPlayed', 'gamesWon', 'streakDays', 'lastGameId', 'updatedAt'
-        ]) &&
-        isValidId(data.profileId) &&
-        data.profileId == profileId &&
-        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
-        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
-        data.rewardPoints is int && data.rewardPoints >= 0 && data.rewardPoints <= 1000000 &&
-        data.gamesPlayed is int && data.gamesPlayed >= 0 &&
-        data.gamesWon is int && data.gamesWon >= 0 &&
-        data.streakDays is int && data.streakDays >= 0 &&
-        (!('lastGameId' in data) || (data.lastGameId is string && data.lastGameId.size() <= 32)) &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidLeaderboardUpdate(data, prev, profileId) {
-      return isValidLeaderboardEntry(data, profileId) &&
-        data.profileId == prev.profileId &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'fullName', 'avatarUrl', 'rewardPoints',
-          'gamesPlayed', 'gamesWon', 'streakDays', 'lastGameId', 'updatedAt'
-        ]);
-    }
-
-    function isValidMatchRecord(data, matchId) {
-      return data.keys().hasAll([
-          'id', 'profileId', 'playerName', 'gameId', 'gameName',
-          'mode', 'outcome', 'pointsEarned', 'scoreSummary', 'createdAt', 'createdAtTs'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'profileId', 'playerName', 'gameId', 'gameName',
-          'mode', 'outcome', 'pointsEarned', 'scoreSummary', 'createdAt', 'createdAtTs'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == matchId &&
-        isValidId(data.profileId) &&
-        data.playerName is string && data.playerName.size() >= 1 && data.playerName.size() <= 120 &&
-        data.gameId is string && data.gameId.size() >= 2 && data.gameId.size() <= 32 &&
-        data.gameName is string && data.gameName.size() >= 2 && data.gameName.size() <= 64 &&
-        data.mode in ['ai', 'friend', 'random', 'solo'] &&
-        data.outcome in ['win', 'loss', 'draw', 'spin'] &&
-        data.pointsEarned is int && data.pointsEarned >= 0 && data.pointsEarned <= 500 &&
-        data.scoreSummary is string && data.scoreSummary.size() >= 1 && data.scoreSummary.size() <= 180 &&
-        data.createdAt is string && data.createdAt.size() >= 10 && data.createdAt.size() <= 40 &&
-        data.createdAtTs == request.time;
-    }
-
-    function isValidUserDirectoryEntry(data, profileId) {
-      return data.keys().hasAll([
-          'profileId', 'fullName', 'fullNameLower', 'username', 'usernameLower',
-          'rewardPoints', 'gamesWon', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'profileId', 'fullName', 'fullNameLower', 'username', 'usernameLower',
-          'avatarUrl', 'bio', 'address', 'phoneLast4', 'rewardPoints', 'gamesWon', 'updatedAt'
-        ]) &&
-        isValidId(data.profileId) &&
-        data.profileId == profileId &&
-        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
-        data.fullNameLower is string && data.fullNameLower.size() >= 1 && data.fullNameLower.size() <= 120 &&
-        data.username is string && data.username.size() >= 2 && data.username.size() <= 64 &&
-        data.usernameLower is string && data.usernameLower.size() >= 2 && data.usernameLower.size() <= 64 &&
-        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
-        (!('bio' in data) || (data.bio is string && data.bio.size() <= 500)) &&
-        (!('address' in data) || (data.address is string && data.address.size() <= 300)) &&
-        (!('phoneLast4' in data) || (data.phoneLast4 is string && data.phoneLast4.size() <= 4)) &&
-        data.rewardPoints is int && data.rewardPoints >= 0 && data.rewardPoints <= 1000000 &&
-        data.gamesWon is int && data.gamesWon >= 0 &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidGameRoomSchema(data, roomCode) {
-      return data.keys().hasAll([
-          'roomCode', 'gameId', 'hostId', 'status', 'maxPlayers', 'playerCount',
-          'isPublicMatch', 'playersJson', 'gameStateJson', 'messagesJson',
-          'currentTurn', 'createdAt', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'roomCode', 'gameId', 'hostId', 'status', 'maxPlayers', 'playerCount',
-          'isPublicMatch', 'isOpenGroup', 'activeSeatLimit', 'playersJson',
-          'waitingPlayersJson', 'reactionsJson', 'mutedVoiceIdsJson', 'mutedChatIdsJson',
-          'gameStateJson', 'messagesJson', 'moveAction', 'currentTurn', 'createdAt', 'updatedAt'
-        ]) &&
-        isValidRoomCode(data.roomCode) &&
-        data.roomCode == roomCode &&
-        data.gameId is string && data.gameId in ['ludo', 'tictactoe', 'quiz', 'chess', 'snake_ladder', 'carrom', 'truth_dare'] &&
-        isValidId(data.hostId) &&
-        data.status in ['waiting', 'in_game', 'finished'] &&
-        data.maxPlayers is int && data.maxPlayers >= 2 && data.maxPlayers <= 999 &&
-        data.playerCount is int && data.playerCount >= 1 && data.playerCount <= 500 &&
-        data.isPublicMatch is bool &&
-        (!('isOpenGroup' in data) || data.isOpenGroup is bool) &&
-        (!('activeSeatLimit' in data) || (data.activeSeatLimit is int && data.activeSeatLimit >= 2 && data.activeSeatLimit <= 12)) &&
-        data.playersJson is string && data.playersJson.size() >= 2 && data.playersJson.size() <= 100000 &&
-        (!('waitingPlayersJson' in data) || (data.waitingPlayersJson is string && data.waitingPlayersJson.size() <= 100000)) &&
-        (!('reactionsJson' in data) || (data.reactionsJson is string && data.reactionsJson.size() <= 15000)) &&
-        (!('mutedVoiceIdsJson' in data) || (data.mutedVoiceIdsJson is string && data.mutedVoiceIdsJson.size() <= 10000)) &&
-        (!('mutedChatIdsJson' in data) || (data.mutedChatIdsJson is string && data.mutedChatIdsJson.size() <= 10000)) &&
-        data.gameStateJson is string && data.gameStateJson.size() >= 2 && data.gameStateJson.size() <= 100000 &&
-        data.messagesJson is string && data.messagesJson.size() >= 2 && data.messagesJson.size() <= 100000 &&
-        (!('moveAction' in data) || (data.moveAction is string && data.moveAction.size() <= 40)) &&
-        data.currentTurn is string && data.currentTurn.size() <= 64 &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidGameRoomCreate(data, roomCode) {
-      return isValidGameRoomSchema(data, roomCode) &&
-        (
-          (data.status == 'waiting' && data.playerCount == 1) ||
-          (data.get('isOpenGroup', false) == true && data.status == 'in_game' && data.playerCount == 1) ||
-          (data.isPublicMatch == true && data.status == 'in_game' && data.playerCount == 2)
-        ) &&
-        data.createdAt == request.time;
-    }
-
-    function isValidGameRoomUpdate(data, prev, roomCode) {
-      return isValidGameRoomSchema(data, roomCode) &&
-        data.roomCode == prev.roomCode &&
-        data.gameId == prev.gameId &&
-        data.createdAt == prev.createdAt &&
-        data.maxPlayers == prev.maxPlayers &&
-        data.isPublicMatch == prev.isPublicMatch &&
-        (
-          incoming().diff(existing()).affectedKeys().hasOnly(['playersJson', 'waitingPlayersJson', 'playerCount', 'hostId', 'status', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['playersJson', 'waitingPlayersJson', 'playerCount', 'hostId', 'status', 'gameStateJson', 'moveAction', 'currentTurn', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'gameStateJson', 'currentTurn', 'moveAction', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['gameStateJson', 'moveAction', 'currentTurn', 'status', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['messagesJson', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['reactionsJson', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['mutedVoiceIdsJson', 'mutedChatIdsJson', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt'])
-        );
-    }
-
-    function isValidMatchmakingQueueSchema(data, ticketId) {
-      return data.keys().hasAll([
-          'id', 'playerId', 'playerName', 'gameId',
-          'status', 'joinedAtMs', 'createdAt', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'playerId', 'playerName', 'playerAvatar', 'gameId',
-          'status', 'matchedRoomCode', 'matchedWithId', 'joinedAtMs', 'createdAt', 'updatedAt'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == ticketId &&
-        isValidId(data.playerId) &&
-        data.playerName is string && data.playerName.size() >= 1 && data.playerName.size() <= 120 &&
-        (!('playerAvatar' in data) || (data.playerAvatar is string && data.playerAvatar.size() <= 400000)) &&
-        data.gameId is string && data.gameId in ['ludo', 'tictactoe', 'quiz', 'chess', 'snake_ladder', 'carrom', 'truth_dare'] &&
-        data.status in ['waiting', 'matched'] &&
-        (!('matchedRoomCode' in data) || (data.matchedRoomCode is string && (data.matchedRoomCode.size() == 0 || isValidRoomCode(data.matchedRoomCode)))) &&
-        (!('matchedWithId' in data) || (data.matchedWithId is string && data.matchedWithId.size() <= 64)) &&
-        data.joinedAtMs is int && data.joinedAtMs >= 0 &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidVoicePeer(data, peerId) {
-      return data.keys().hasAll(['peerId', 'name', 'micEnabled', 'joinedAt', 'updatedAt']) &&
-        data.keys().hasOnly(['peerId', 'name', 'avatar', 'micEnabled', 'joinedAt', 'updatedAt']) &&
-        isValidId(data.peerId) &&
-        data.peerId == peerId &&
-        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
-        (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 400000)) &&
-        data.micEnabled is bool &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidVoiceSignal(data, signalId) {
-      return data.keys().hasAll(['id', 'fromId', 'toId', 'signalType', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'fromId', 'toId', 'signalType', 'sdp', 'candidate', 'sdpMid', 'sdpMLineIndex', 'createdAt']) &&
-        isValidId(data.id) &&
-        data.id == signalId &&
-        isValidId(data.fromId) &&
-        isValidId(data.toId) &&
-        data.signalType in ['offer', 'answer', 'candidate', 'hangup'] &&
-        (!('sdp' in data) || (data.sdp is string && data.sdp.size() <= 20000)) &&
-        (!('candidate' in data) || (data.candidate is string && data.candidate.size() <= 2000)) &&
-        (!('sdpMid' in data) || (data.sdpMid is string && data.sdpMid.size() <= 64)) &&
-        (!('sdpMLineIndex' in data) || (data.sdpMLineIndex is int && data.sdpMLineIndex >= 0 && data.sdpMLineIndex <= 16)) &&
-        data.createdAt == request.time;
-    }
-
-    function isValidFriendRequestSchema(data, requestId) {
-      return data.keys().hasAll([
-          'id', 'fromUserId', 'fromUserName', 'toUserId', 'toUserName',
-          'status', 'createdAt', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'fromUserId', 'fromUserName', 'fromUserAvatar',
-          'toUserId', 'toUserName', 'toUserAvatar', 'status', 'createdAt', 'updatedAt'
-        ]) &&
-        isValidCompositeId(data.id) &&
-        data.id == requestId &&
-        isValidId(data.fromUserId) &&
-        isValidId(data.toUserId) &&
-        data.fromUserId != data.toUserId &&
-        data.fromUserName is string && data.fromUserName.size() >= 1 && data.fromUserName.size() <= 120 &&
-        data.toUserName is string && data.toUserName.size() >= 1 && data.toUserName.size() <= 120 &&
-        (!('fromUserAvatar' in data) || (data.fromUserAvatar is string && data.fromUserAvatar.size() <= 400000)) &&
-        (!('toUserAvatar' in data) || (data.toUserAvatar is string && data.toUserAvatar.size() <= 400000)) &&
-        data.status in ['pending', 'accepted', 'declined'] &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidFriendRequestCreate(data, requestId) {
-      return isValidFriendRequestSchema(data, requestId) &&
-        data.status == 'pending' &&
-        data.createdAt == request.time;
-    }
-
-    function isValidFriendRequestUpdate(data, prev, requestId) {
-      return isValidFriendRequestSchema(data, requestId) &&
-        data.id == prev.id &&
-        data.fromUserId == prev.fromUserId &&
-        data.toUserId == prev.toUserId &&
-        data.createdAt == prev.createdAt &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'fromUserName', 'fromUserAvatar', 'toUserName', 'toUserAvatar', 'updatedAt']);
-    }
-
-    function isValidNotificationSchema(data, notificationId) {
-      return data.keys().hasAll([
-          'id', 'userId', 'type', 'title', 'message',
-          'isRead', 'createdAtIso', 'createdAtMs', 'createdAt', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'userId', 'fromUserId', 'fromUserName', 'fromUserAvatar',
-          'type', 'title', 'message', 'isRead', 'createdAtIso', 'createdAtMs',
-          'createdAt', 'updatedAt'
-        ]) &&
-        isValidCompositeId(data.id) &&
-        data.id == notificationId &&
-        isValidId(data.userId) &&
-        (!('fromUserId' in data) || (data.fromUserId is string && data.fromUserId.size() <= 64)) &&
-        (!('fromUserName' in data) || (data.fromUserName is string && data.fromUserName.size() <= 120)) &&
-        (!('fromUserAvatar' in data) || (data.fromUserAvatar is string && data.fromUserAvatar.size() <= 400000)) &&
-        data.type in ['friend_request', 'friend_accept', 'like', 'comment', 'message', 'call', 'game_invite', 'tournament', 'reward', 'achievement'] &&
-        data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
-        data.message is string && data.message.size() >= 1 && data.message.size() <= 400 &&
-        data.isRead is bool &&
-        data.createdAtIso is string && data.createdAtIso.size() >= 10 && data.createdAtIso.size() <= 40 &&
-        data.createdAtMs is int && data.createdAtMs >= 0 &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidNotificationCreate(data, notificationId) {
-      return isValidNotificationSchema(data, notificationId) &&
-        data.createdAt == request.time;
-    }
-
-    function isValidNotificationUpdate(data, prev, notificationId) {
-      return isValidNotificationSchema(data, notificationId) &&
-        data.id == prev.id &&
-        data.userId == prev.userId &&
-        data.type == prev.type &&
-        data.createdAt == prev.createdAt &&
-        incoming().diff(existing()).affectedKeys().hasOnly(['isRead', 'updatedAt']);
-    }
-
-    function isValidConversationSchema(data, conversationId) {
-      return data.keys().hasAll([
-          'id', 'type', 'name', 'participantIds', 'participantsJson',
-          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt',
-          'updatedAtMs', 'createdAt', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'type', 'name', 'avatarUrl', 'participantIds', 'participantsJson',
-          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt',
-          'updatedAtMs', 'createdAt', 'updatedAt'
-        ]) &&
-        isValidCompositeId(data.id) &&
-        data.id == conversationId &&
-        data.type in ['direct', 'group'] &&
-        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
-        (!('avatarUrl' in data) || (data.avatarUrl is string && data.avatarUrl.size() <= 400000)) &&
-        data.participantIds is list && data.participantIds.size() >= 2 && data.participantIds.size() <= 50 &&
-        data.participantIds[0] is string &&
-        data.participantsJson is string && data.participantsJson.size() >= 2 && data.participantsJson.size() <= 30000 &&
-        data.lastMessageText is string && data.lastMessageText.size() <= 500 &&
-        data.lastMessageSenderId is string && data.lastMessageSenderId.size() <= 64 &&
-        data.lastMessageAt is string && data.lastMessageAt.size() <= 40 &&
-        data.updatedAtMs is int && data.updatedAtMs >= 0 &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidConversationCreate(data, conversationId) {
-      return isValidConversationSchema(data, conversationId) &&
-        data.createdAt == request.time;
-    }
-
-    function isValidConversationUpdate(data, prev, conversationId) {
-      return isValidConversationSchema(data, conversationId) &&
-        data.id == prev.id &&
-        data.type == prev.type &&
-        data.createdAt == prev.createdAt &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'name', 'avatarUrl', 'participantIds', 'participantsJson',
-          'lastMessageText', 'lastMessageSenderId', 'lastMessageAt',
-          'updatedAtMs', 'updatedAt'
-        ]);
-    }
-
-    function isValidChatMessage(data, conversationId, messageId) {
-      return data.keys().hasAll([
-          'id', 'conversationId', 'senderId', 'senderName',
-          'content', 'status', 'createdAt', 'createdAtMs', 'createdAtTs'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'conversationId', 'senderId', 'receiverId', 'senderName', 'senderAvatar',
-          'content', 'mediaUrl', 'mediaType', 'status',
-          'createdAt', 'createdAtMs', 'createdAtTs'
-        ]) &&
-        isValidCompositeId(data.id) &&
-        data.id == messageId &&
-        data.conversationId == conversationId &&
-        isValidId(data.senderId) &&
-        (!('receiverId' in data) || (data.receiverId is string && data.receiverId.size() <= 64)) &&
-        data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120 &&
-        (!('senderAvatar' in data) || (data.senderAvatar is string && data.senderAvatar.size() <= 400000)) &&
-        data.content is string && data.content.size() <= 4000 &&
-        (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 400000)) &&
-        (!('mediaType' in data) || data.mediaType in ['image', 'video', 'file']) &&
-        data.status in ['sent', 'delivered', 'read'] &&
-        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
-        data.createdAtMs is int && data.createdAtMs >= 0 &&
-        data.createdAtTs == request.time;
-    }
-
-    function isValidReelSchema(data, reelId) {
-      return data.keys().hasAll([
-          'id', 'creatorId', 'creatorName', 'videoUrl', 'caption',
-          'likesCount', 'commentsCount', 'sharesCount', 'viewsCount',
-          'likedBy', 'createdAt', 'createdAtMs', 'expiresAt', 'createdAtTs', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'creatorId', 'creatorName', 'creatorAvatar', 'videoUrl', 'thumbnailUrl',
-          'caption', 'musicTitle', 'likesCount', 'commentsCount', 'sharesCount',
-          'viewsCount', 'likedBy', 'commentsJson', 'createdAt', 'createdAtMs',
-          'expiresAt', 'createdAtTs', 'updatedAt'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == reelId &&
-        isValidId(data.creatorId) &&
-        data.creatorName is string && data.creatorName.size() >= 1 && data.creatorName.size() <= 120 &&
-        (!('creatorAvatar' in data) || (data.creatorAvatar is string && data.creatorAvatar.size() <= 400000)) &&
-        data.videoUrl is string && data.videoUrl.size() >= 1 && data.videoUrl.size() <= 750000 &&
-        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 180000)) &&
-        data.caption is string && data.caption.size() >= 1 && data.caption.size() <= 1000 &&
-        (!('musicTitle' in data) || (data.musicTitle is string && data.musicTitle.size() <= 120)) &&
-        data.likesCount is int && data.likesCount >= 0 &&
-        data.commentsCount is int && data.commentsCount >= 0 &&
-        data.sharesCount is int && data.sharesCount >= 0 &&
-        data.viewsCount is int && data.viewsCount >= 0 &&
-        data.likedBy is list && data.likedBy.size() <= 500 &&
-        (data.likedBy.size() == 0 || data.likedBy[0] is string) &&
-        (!('commentsJson' in data) || (data.commentsJson is string && data.commentsJson.size() <= 100000)) &&
-        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
-        data.createdAtMs is int && data.createdAtMs >= 0 &&
-        data.expiresAt is int && data.expiresAt >= data.createdAtMs &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidReelCreate(data, reelId) {
-      return isValidReelSchema(data, reelId) &&
-        data.createdAtTs == request.time;
-    }
-
-    function isValidReelUpdate(data, prev, reelId) {
-      return isValidReelSchema(data, reelId) &&
-        data.id == prev.id &&
-        data.creatorId == prev.creatorId &&
-        data.createdAtMs == prev.createdAtMs &&
-        data.createdAtTs == prev.createdAtTs &&
-        data.expiresAt == prev.expiresAt &&
-        (
-          incoming().diff(existing()).affectedKeys().hasOnly(['likedBy', 'likesCount', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['commentsJson', 'commentsCount', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['viewsCount', 'sharesCount', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['creatorName', 'creatorAvatar', 'updatedAt'])
-        );
-    }
-
-    function isValidPostSchema(data, postId) {
-      return data.keys().hasAll([
-          'id', 'authorId', 'authorName', 'content', 'mediaType', 'category',
-          'likesCount', 'commentsCount', 'sharesCount', 'likedBy',
-          'createdAt', 'createdAtMs', 'createdAtTs', 'updatedAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'authorId', 'authorName', 'authorAvatar', 'authorHandle',
-          'content', 'mediaUrls', 'mediaType', 'thumbnailUrl', 'category',
-          'likesCount', 'commentsCount', 'sharesCount', 'likedBy', 'commentsJson',
-          'createdAt', 'createdAtMs', 'expiresAt', 'createdAtTs', 'updatedAt'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == postId &&
-        isValidId(data.authorId) &&
-        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120 &&
-        (!('authorAvatar' in data) || (data.authorAvatar is string && data.authorAvatar.size() <= 400000)) &&
-        (!('authorHandle' in data) || (data.authorHandle is string && data.authorHandle.size() <= 80)) &&
-        data.content is string && data.content.size() <= 5000 &&
-        (!('mediaUrls' in data) || (data.mediaUrls is list && data.mediaUrls.size() <= 4 && (data.mediaUrls.size() == 0 || (data.mediaUrls[0] is string && data.mediaUrls[0].size() <= 750000)))) &&
-        data.mediaType in ['image', 'video', 'none'] &&
-        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 180000)) &&
-        data.category in ['all', 'friends', 'following', 'popular'] &&
-        data.likesCount is int && data.likesCount >= 0 &&
-        data.commentsCount is int && data.commentsCount >= 0 &&
-        data.sharesCount is int && data.sharesCount >= 0 &&
-        data.likedBy is list && data.likedBy.size() <= 500 &&
-        (data.likedBy.size() == 0 || data.likedBy[0] is string) &&
-        (!('commentsJson' in data) || (data.commentsJson is string && data.commentsJson.size() <= 100000)) &&
-        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
-        data.createdAtMs is int && data.createdAtMs >= 0 &&
-        (!('expiresAt' in data) || (data.expiresAt is int && data.expiresAt >= data.createdAtMs)) &&
-        data.updatedAt == request.time;
-    }
-
-    function isValidPostCreate(data, postId) {
-      return isValidPostSchema(data, postId) &&
-        data.createdAtTs == request.time;
-    }
-
-    function isValidPostUpdate(data, prev, postId) {
-      return isValidPostSchema(data, postId) &&
-        data.id == prev.id &&
-        data.authorId == prev.authorId &&
-        data.createdAtMs == prev.createdAtMs &&
-        data.createdAtTs == prev.createdAtTs &&
-        (
-          incoming().diff(existing()).affectedKeys().hasOnly(['likedBy', 'likesCount', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['commentsJson', 'commentsCount', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['content', 'mediaUrls', 'mediaType', 'thumbnailUrl', 'expiresAt', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['authorName', 'authorAvatar', 'updatedAt'])
-        );
-    }
-
-    function isValidAnnouncementCreate(data, announcementId) {
-      return data.keys().hasAll([
-          'id', 'title', 'message', 'priority', 'authorName',
-          'createdAt', 'createdAtMs', 'createdAtTs'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'title', 'message', 'priority', 'authorName',
-          'mediaUrl', 'mediaType', 'thumbnailUrl',
-          'createdAt', 'createdAtMs', 'expiresAt', 'createdAtTs'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == announcementId &&
-        data.title is string && data.title.size() >= 1 && data.title.size() <= 140 &&
-        data.message is string && data.message.size() >= 1 && data.message.size() <= 1000 &&
-        data.priority in ['info', 'important', 'event'] &&
-        data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120 &&
-        (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 750000)) &&
-        (!('mediaType' in data) || data.mediaType in ['image', 'video', 'none']) &&
-        (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 180000)) &&
-        data.createdAt is string && data.createdAt.size() >= 1 && data.createdAt.size() <= 40 &&
-        data.createdAtMs is int && data.createdAtMs >= 0 &&
-        (!('expiresAt' in data) || (data.expiresAt is int && data.expiresAt >= data.createdAtMs)) &&
-        data.createdAtTs == request.time;
-    }
-
-    function isValidVideoMedia(data, mediaId) {
-      return data.keys().hasAll([
-          'id', 'creatorId', 'mimeType', 'totalChunks',
-          'totalBytes', 'createdAtMs', 'expiresAt', 'createdAt'
-        ]) &&
-        data.keys().hasOnly([
-          'id', 'creatorId', 'mimeType', 'totalChunks',
-          'totalBytes', 'createdAtMs', 'expiresAt', 'createdAt'
-        ]) &&
-        isValidId(data.id) &&
-        data.id == mediaId &&
-        isValidId(data.creatorId) &&
-        data.mimeType is string && data.mimeType.size() >= 6 && data.mimeType.size() <= 64 &&
-        data.totalChunks is int && data.totalChunks >= 1 && data.totalChunks <= 60 &&
-        data.totalBytes is int && data.totalBytes >= 1 && data.totalBytes <= 30000000 &&
-        data.createdAtMs is int && data.createdAtMs >= 0 &&
-        data.expiresAt is int && data.expiresAt >= data.createdAtMs &&
-        data.createdAt == request.time;
-    }
-
-    function isValidVideoMediaChunk(data, mediaId, chunkId) {
-      return data.keys().hasAll(['id', 'mediaId', 'index', 'data', 'createdAt']) &&
-        data.keys().hasOnly(['id', 'mediaId', 'index', 'data', 'createdAt']) &&
-        isValidId(data.id) &&
-        data.id == chunkId &&
-        isValidId(data.mediaId) &&
-        data.mediaId == mediaId &&
-        data.index is int && data.index >= 0 && data.index < 60 &&
-        data.data is string && data.data.size() >= 1 && data.data.size() <= 700000 &&
-        data.createdAt == request.time;
-    }
-
-    // 3. Profiles Collection: single-doc get by opaque profileId; listing restricted strictly to verified Admin
+    // 4. Profiles & Users Collections (supports Firebase Auth, phone login, and guest sessions)
     match /profiles/{profileId} {
-      allow get: if isValidId(profileId);
-      allow list: if isAdmin();
-      allow create: if isValidId(profileId) && isValidProfileCreate(incoming(), profileId);
-      allow update: if isValidId(profileId) && isValidProfileUpdate(incoming(), existing(), profileId);
-      allow delete: if isValidId(profileId) && (isExpiredTimestamp(existing().lastActiveAt) || isAdmin());
+      allow get: if isValidDocId(profileId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(profileId);
+      allow delete: if isValidExistingDoc(profileId);
     }
 
-    // 4. Phone Lookup Index: exact phoneKey lookup only; enumeration strictly forbidden
+    match /users/{userId} {
+      allow get: if isValidDocId(userId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(userId);
+      allow delete: if isValidExistingDoc(userId);
+    }
+
+    // 5. Phone Lookup Index
     match /phone_index/{phoneKey} {
-      allow get: if isValidPhoneKey(phoneKey);
-      allow list: if false;
-      allow create: if isValidPhoneKey(phoneKey) &&
-        isValidPhoneIndex(incoming()) &&
-        existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId));
-      allow update: if isValidPhoneKey(phoneKey) &&
-        isValidPhoneIndexUpdate(incoming(), existing());
-      allow delete: if isValidPhoneKey(phoneKey) &&
-        (isExpiredTimestamp(existing().lastLoginAt) || isAdmin());
+      allow get: if isValidDocId(phoneKey);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(phoneKey);
+      allow delete: if isValidExistingDoc(phoneKey);
     }
 
-    // 5. Public Campus Gaming Leaderboard (non-PII rankings only)
+    // 6. Public Campus Gaming Leaderboard
     match /leaderboard/{profileId} {
-      allow get: if isValidId(profileId);
-      allow list: if existing().rewardPoints >= 0;
-      allow create: if isValidId(profileId) &&
-        isValidLeaderboardEntry(incoming(), profileId) &&
-        existsAfter(/databases/$(database)/documents/profiles/$(profileId));
-      allow update: if isValidId(profileId) &&
-        isValidLeaderboardUpdate(incoming(), existing(), profileId);
-      allow delete: if isValidId(profileId) && (
-        isAdmin() ||
-        (exists(/databases/$(database)/documents/profiles/$(profileId)) &&
-         get(/databases/$(database)/documents/profiles/$(profileId)).data.status == 'deleted')
-      );
+      allow get: if isValidDocId(profileId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(profileId);
+      allow delete: if isValidExistingDoc(profileId);
     }
 
-    // 6. Immutable Match History & Reward Ledger (non-PII game results)
+    // 7. Match History & Reward Ledger
     match /match_history/{matchId} {
-      allow get: if isValidId(matchId);
-      allow list: if existing().pointsEarned >= 0;
-      allow create: if isValidId(matchId) &&
-        isValidMatchRecord(incoming(), matchId) &&
-        existsAfter(/databases/$(database)/documents/profiles/$(incoming().profileId));
-      allow update: if false;
-      allow delete: if isValidId(matchId);
+      allow get: if isValidDocId(matchId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(matchId);
+      allow delete: if isValidExistingDoc(matchId);
     }
 
-    // 7. Authorized Administrator Registry (read own role doc only)
+    // 8. Authorized Administrator Registry (read-only lookup for signed-in admins)
     match /admins/{adminId} {
-      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow get: if isSignedIn() && isValidDocId(adminId);
       allow list: if false;
       allow create, update, delete: if false;
     }
 
-    // 8. Public Non-PII User Search Directory
+    // 9. Public Non-PII User Search Directory
     match /user_directory/{profileId} {
-      allow get: if isValidId(profileId);
-      allow list: if existing().rewardPoints >= 0;
-      allow create, update: if isValidId(profileId) &&
-        isValidUserDirectoryEntry(incoming(), profileId) &&
-        existsAfter(/databases/$(database)/documents/profiles/$(profileId));
-      allow delete: if isValidId(profileId) && (
-        isAdmin() ||
-        (exists(/databases/$(database)/documents/profiles/$(profileId)) &&
-         get(/databases/$(database)/documents/profiles/$(profileId)).data.status == 'deleted')
-      );
+      allow get: if isValidDocId(profileId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(profileId);
+      allow delete: if isValidExistingDoc(profileId);
     }
 
-    // 9. Real-Time 4-Digit Multiplayer Game Rooms (private rooms accessible by exact 4-digit code)
+    // 10. Real-Time Multiplayer Game Rooms (/gameRooms and /rooms alias)
     match /gameRooms/{roomCode} {
-      allow get: if isValidRoomCode(roomCode);
-      allow list: if existing().isPublicMatch == true;
-      allow create: if isValidRoomCode(roomCode) && isValidGameRoomCreate(incoming(), roomCode);
-      allow update: if isValidRoomCode(roomCode) && isValidGameRoomUpdate(incoming(), existing(), roomCode);
-      allow delete: if isValidRoomCode(roomCode) && (
-        existing().playerCount <= 1 ||
-        existing().status == 'finished' ||
-        (existing().updatedAt is timestamp && request.time > existing().updatedAt + duration.value(20, 'm'))
-      );
+      allow get: if isValidDocId(roomCode);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(roomCode);
+      allow delete: if isValidExistingDoc(roomCode);
 
       match /voice_peers/{peerId} {
-        allow get: if isValidRoomCode(roomCode) && isValidId(peerId);
-        allow list: if isValidRoomCode(roomCode) && existing().micEnabled in [true, false];
-        allow create: if isValidRoomCode(roomCode) && isValidId(peerId) &&
-          exists(/databases/$(database)/documents/gameRooms/$(roomCode)) &&
-          isValidVoicePeer(incoming(), peerId) &&
-          incoming().joinedAt == request.time;
-        allow update: if isValidRoomCode(roomCode) && isValidId(peerId) &&
-          exists(/databases/$(database)/documents/gameRooms/$(roomCode)) &&
-          isValidVoicePeer(incoming(), peerId) &&
-          incoming().joinedAt == existing().joinedAt &&
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'avatar', 'micEnabled', 'updatedAt']);
-        allow delete: if isValidRoomCode(roomCode) && isValidId(peerId);
+        allow get: if isValidDocId(roomCode) && isValidDocId(peerId);
+        allow list: if isValidDocId(roomCode) && isBoundedQuery();
+        allow create, update: if isValidDocId(roomCode) && isValidDocWrite(peerId);
+        allow delete: if isValidDocId(roomCode) && isValidExistingDoc(peerId);
       }
 
       match /voice_signals/{signalId} {
-        allow get: if isValidRoomCode(roomCode) && isValidId(signalId);
-        allow list: if isValidRoomCode(roomCode) && existing().toId.size() >= 3;
-        allow create: if isValidRoomCode(roomCode) && isValidId(signalId) &&
-          exists(/databases/$(database)/documents/gameRooms/$(roomCode)) &&
-          isValidVoiceSignal(incoming(), signalId);
-        allow update: if false;
-        allow delete: if isValidRoomCode(roomCode) && isValidId(signalId);
+        allow get: if isValidDocId(roomCode) && isValidDocId(signalId);
+        allow list: if isValidDocId(roomCode) && isBoundedQuery();
+        allow create, update: if isValidDocId(roomCode) && isValidDocWrite(signalId);
+        allow delete: if isValidDocId(roomCode) && isValidExistingDoc(signalId);
       }
     }
 
-    // 10. Real-Time Friend Requests
+    match /rooms/{roomId} {
+      allow get: if isValidDocId(roomId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(roomId);
+      allow delete: if isValidExistingDoc(roomId);
+    }
+
+    // 11. Real-Time Random Matchmaking Queue (/matchmakingQueue and /matchmaking alias)
+    match /matchmakingQueue/{ticketId} {
+      allow get: if isValidDocId(ticketId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(ticketId);
+      allow delete: if isValidExistingDoc(ticketId);
+    }
+
+    match /matchmaking/{ticketId} {
+      allow get: if isValidDocId(ticketId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(ticketId);
+      allow delete: if isValidExistingDoc(ticketId);
+    }
+
+    // 12. Real-Time Friend Requests
     match /friendRequests/{requestId} {
-      allow get: if isValidCompositeId(requestId);
-      allow list: if existing().toUserId >= '' || existing().fromUserId >= '';
-      allow create: if isValidCompositeId(requestId) &&
-        isValidFriendRequestCreate(incoming(), requestId) &&
-        existsAfter(/databases/$(database)/documents/profiles/$(incoming().toUserId));
-      allow update: if isValidCompositeId(requestId) && isValidFriendRequestUpdate(incoming(), existing(), requestId);
-      allow delete: if isValidCompositeId(requestId) && (existing().status in ['pending', 'accepted', 'declined']);
+      allow get: if isValidDocId(requestId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(requestId);
+      allow delete: if isValidExistingDoc(requestId);
     }
 
-    // 11. Real-Time User Notifications
+    // 13. Real-Time User Notifications
     match /notifications/{notificationId} {
-      allow get: if isValidCompositeId(notificationId);
-      allow list: if existing().userId >= '';
-      allow create: if isValidCompositeId(notificationId) && isValidNotificationCreate(incoming(), notificationId);
-      allow update: if isValidCompositeId(notificationId) && isValidNotificationUpdate(incoming(), existing(), notificationId);
-      allow delete: if isValidCompositeId(notificationId) && (existing().isRead == true || isExpiredTimestamp(existing().createdAt) || isAdmin());
+      allow get: if isValidDocId(notificationId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(notificationId);
+      allow delete: if isValidExistingDoc(notificationId);
     }
 
-    // 12. Personal Direct Messages & Group Conversations
+    // 14. Personal Direct Messages & Group Conversations
     match /conversations/{conversationId} {
-      allow get: if isValidCompositeId(conversationId);
-      allow list: if (request.query.limit != null && request.query.limit <= 100) || existing().updatedAtMs >= 0;
-      allow create: if isValidCompositeId(conversationId) && isValidConversationCreate(incoming(), conversationId);
-      allow update: if isValidCompositeId(conversationId) && isValidConversationUpdate(incoming(), existing(), conversationId);
-      allow delete: if isAdmin();
+      allow get: if isValidDocId(conversationId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(conversationId);
+      allow delete: if isValidExistingDoc(conversationId);
 
       match /messages/{messageId} {
-        allow get: if isValidCompositeId(conversationId) && isValidCompositeId(messageId);
-        allow list: if isValidCompositeId(conversationId) && existing().createdAtMs >= 0;
-        allow create: if isValidCompositeId(conversationId) && isValidCompositeId(messageId) &&
-          exists(/databases/$(database)/documents/conversations/$(conversationId)) &&
-          isValidChatMessage(incoming(), conversationId, messageId);
-        allow update: if false;
-        allow delete: if isAdmin();
+        allow get: if isValidDocId(conversationId) && isValidDocId(messageId);
+        allow list: if isValidDocId(conversationId) && isBoundedQuery();
+        allow create, update: if isValidDocId(conversationId) && isValidDocWrite(messageId);
+        allow delete: if isValidDocId(conversationId) && isValidExistingDoc(messageId);
       }
     }
 
-    // CollectionGroup query support for Admin DM inspection across senderId / receiverId
+    // CollectionGroup query support for DM inspection across senderId / receiverId
     match /{path=**}/messages/{messageId} {
-      allow list: if existing().senderId >= '' || existing().receiverId >= '';
+      allow list: if isBoundedQuery();
     }
 
-    // 13. Video Reels (40-day automatic expiry)
+    // 15. Video Reels
     match /reels/{reelId} {
-      allow get: if isValidId(reelId);
-      allow list: if existing().createdAtMs >= 0 || existing().expiresAt >= 0;
-      allow create: if isValidId(reelId) && isValidReelCreate(incoming(), reelId);
-      allow update: if isValidId(reelId) && isValidReelUpdate(incoming(), existing(), reelId);
-      allow delete: if isValidId(reelId);
+      allow get: if isValidDocId(reelId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(reelId);
+      allow delete: if isValidExistingDoc(reelId);
     }
 
-    // 14. Public Feed Posts (40-day automatic expiry for video posts)
+    // 16. Public Feed Posts
     match /posts/{postId} {
-      allow get: if isValidId(postId);
-      allow list: if existing().createdAtMs >= 0 || existing().expiresAt >= 0;
-      allow create: if isValidId(postId) && isValidPostCreate(incoming(), postId);
-      allow update: if isValidId(postId) && isValidPostUpdate(incoming(), existing(), postId);
-      allow delete: if isValidId(postId);
+      allow get: if isValidDocId(postId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(postId);
+      allow delete: if isValidExistingDoc(postId);
     }
 
-    // 15. Site-Wide Global Announcements (with optional photo/video attachments)
+    // 17. Site-Wide Global Announcements
     match /announcements/{announcementId} {
-      allow get: if isValidId(announcementId);
-      allow list: if existing().createdAtMs >= 0;
-      allow create: if isValidId(announcementId) && isValidAnnouncementCreate(incoming(), announcementId);
-      allow update: if false;
-      allow delete: if isValidId(announcementId);
+      allow get: if isValidDocId(announcementId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(announcementId);
+      allow delete: if isValidExistingDoc(announcementId);
     }
 
-    // 16. Real-Time Random Matchmaking Queue
-    match /matchmakingQueue/{ticketId} {
-      allow get: if isValidId(ticketId);
-      allow list: if existing().status == 'waiting';
-      allow create: if isValidId(ticketId) &&
-        isValidMatchmakingQueueSchema(incoming(), ticketId) &&
-        incoming().status == 'waiting' &&
-        incoming().createdAt == request.time;
-      allow update: if isValidId(ticketId) &&
-        isValidMatchmakingQueueSchema(incoming(), ticketId) &&
-        incoming().id == existing().id &&
-        (ticketId.matches('^slot_.*') || incoming().playerId == existing().playerId) &&
-        incoming().createdAt == existing().createdAt &&
-        (
-          incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'matchedRoomCode', 'matchedWithId', 'updatedAt']) ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['playerId', 'gameId', 'playerName', 'playerAvatar', 'status', 'matchedRoomCode', 'matchedWithId', 'joinedAtMs', 'updatedAt'])
-        );
-      allow delete: if isValidId(ticketId);
-    }
-
-    // 17. Cross-Device Chunked Cloud Video Storage (for global playback without Storage bucket auth errors)
+    // 18. Cross-Device Chunked Cloud Video Storage
     match /video_media/{mediaId} {
-      allow get: if isValidId(mediaId);
-      allow list: if existing().expiresAt >= 0;
-      allow create: if isValidId(mediaId) && isValidVideoMedia(incoming(), mediaId);
-      allow update: if false;
-      allow delete: if isValidId(mediaId);
+      allow get: if isValidDocId(mediaId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(mediaId);
+      allow delete: if isValidExistingDoc(mediaId);
 
       match /chunks/{chunkId} {
-        allow get: if isValidId(mediaId) && isValidId(chunkId);
-        allow list: if isValidId(mediaId) && existing().index >= 0;
-        allow create: if isValidId(mediaId) && isValidId(chunkId) &&
-          exists(/databases/$(database)/documents/video_media/$(mediaId)) &&
-          isValidVideoMediaChunk(incoming(), mediaId, chunkId);
-        allow update: if false;
-        allow delete: if isValidId(mediaId) && isValidId(chunkId);
+        allow get: if isValidDocId(mediaId) && isValidDocId(chunkId);
+        allow list: if isValidDocId(mediaId) && isBoundedQuery();
+        allow create, update: if isValidDocId(mediaId) && isValidDocWrite(chunkId);
+        allow delete: if isValidDocId(mediaId) && isValidExistingDoc(chunkId);
       }
     }
   }

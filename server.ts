@@ -21,6 +21,7 @@ import {
   generateAiQuizRound,
   moderatePublicText,
   runFastHeuristicModeration,
+  classifyGeminiHttpError,
 } from './src/server/geminiService.ts';
 import {
   testFirestoreConnection,
@@ -130,7 +131,9 @@ setInterval(cleanupStaleServerRooms, 2 * 60 * 1000);
 function releaseSoloHostedServerRooms(playerId: string) {
   if (!playerId) return;
   for (const [code, room] of rooms.entries()) {
-    if (room.hostId === playerId && room.players.length <= 1 && (room.waitingPlayers?.length || 0) === 0) {
+    const isSolo = room.players.length <= 1 && (room.waitingPlayers?.length || 0) === 0;
+    const isFinished = room.status === 'finished';
+    if (room.hostId === playerId && (isSolo || isFinished)) {
       rooms.delete(code);
     }
   }
@@ -2382,10 +2385,9 @@ app.post('/api/ai/chat', async (req, res) => {
       createdAtMs: Date.now(),
     });
   } catch (err: any) {
-    const msg = err?.message || 'AI chat generation failed.';
-    const status = msg.includes('not configured') ? 503 : 502;
-    console.warn('[/api/ai/chat] error:', msg);
-    return res.status(status).json({ error: msg, code: status === 503 ? 'GEMINI_UNAVAILABLE' : 'AI_ERROR' });
+    const info = classifyGeminiHttpError(err);
+    console.warn('[/api/ai/chat] error:', info.code, info.message);
+    return res.status(info.status).json({ error: info.message, code: info.code });
   }
 });
 
@@ -2400,10 +2402,9 @@ app.post('/api/ai/captions', async (req, res) => {
     const result = await generateSmartCaptions({ topic, existingText, contentType, tone });
     return res.json(result);
   } catch (err: any) {
-    const msg = err?.message || 'Smart caption generation failed.';
-    const status = msg.includes('not configured') ? 503 : 502;
-    console.warn('[/api/ai/captions] error:', msg);
-    return res.status(status).json({ error: msg, code: status === 503 ? 'GEMINI_UNAVAILABLE' : 'AI_ERROR' });
+    const info = classifyGeminiHttpError(err);
+    console.warn('[/api/ai/captions] error:', info.code, info.message);
+    return res.status(info.status).json({ error: info.message, code: info.code });
   }
 });
 
@@ -2426,10 +2427,9 @@ app.post('/api/ai/quiz', async (req, res) => {
     });
     return res.json(result);
   } catch (err: any) {
-    const msg = err?.message || 'AI quiz generation failed.';
-    const status = msg.includes('not configured') ? 503 : 502;
-    console.warn('[/api/ai/quiz] error:', msg);
-    return res.status(status).json({ error: msg, code: status === 503 ? 'GEMINI_UNAVAILABLE' : 'AI_ERROR' });
+    const info = classifyGeminiHttpError(err);
+    console.warn('[/api/ai/quiz] error:', info.code, info.message);
+    return res.status(info.status).json({ error: info.message, code: info.code });
   }
 });
 

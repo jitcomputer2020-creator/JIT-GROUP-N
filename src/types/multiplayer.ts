@@ -80,6 +80,7 @@ export interface MultiplayerRoom {
   roomCode: string;
   gameId: string;
   hostId: string;
+  player2Id?: string;
   createdAt: number;
   status: 'waiting' | 'in_game' | 'finished';
   maxPlayers: number;

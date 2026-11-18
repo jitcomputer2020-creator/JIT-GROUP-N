@@ -10,9 +10,21 @@ import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
 export const GEMINI_MODEL = 'gemini-4-hydrogen';
 
+export function safeGetGeminiApiKey(): string {
+  try {
+    if (typeof process === 'undefined' || !process.env) return '';
+    const raw = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+    const clean = String(raw).trim();
+    if (!clean || clean === 'MY_GEMINI_API_KEY') return '';
+    return clean;
+  } catch {
+    return '';
+  }
+}
+
 export function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+  const apiKey = safeGetGeminiApiKey();
+  if (!apiKey) {
     return null;
   }
   return new GoogleGenAI({
@@ -23,6 +35,82 @@ export function getGeminiClient(): GoogleGenAI | null {
       },
     },
   });
+}
+
+export function classifyGeminiHttpError(err: unknown): {
+  status: number;
+  code: string;
+  message: string;
+} {
+  const msg = err instanceof Error ? err.message : String(err || 'AI request failed.');
+  const upper = msg.toUpperCase();
+  const rawStatus =
+    typeof (err as any)?.status === 'number'
+      ? (err as any).status
+      : typeof (err as any)?.statusCode === 'number'
+      ? (err as any).statusCode
+      : 0;
+
+  if (msg.includes('not configured')) {
+    return {
+      status: 503,
+      code: 'GEMINI_UNAVAILABLE',
+      message: 'GEMINI_API_KEY is not configured in server environment secrets.',
+    };
+  }
+  if (rawStatus === 400 || upper.includes('API_KEY_INVALID') || upper.includes('INVALID_ARGUMENT')) {
+    return {
+      status: 400,
+      code: 'API_KEY_INVALID',
+      message: 'Invalid GEMINI_API_KEY. Please check Settings > Secrets or Vercel Environment Variables.',
+    };
+  }
+  if (rawStatus === 403 || upper.includes('PERMISSION_DENIED')) {
+    return {
+      status: 403,
+      code: 'PERMISSION_DENIED',
+      message: 'Gemini API access denied. Please verify your GEMINI_API_KEY in Secrets.',
+    };
+  }
+  if (rawStatus === 404 || upper.includes('NOT_FOUND')) {
+    return {
+      status: 404,
+      code: 'MODEL_NOT_FOUND',
+      message: `Requested Gemini model (${GEMINI_MODEL}) was not found.`,
+    };
+  }
+  if (rawStatus === 429 || upper.includes('RESOURCE_EXHAUSTED') || upper.includes('QUOTA')) {
+    return {
+      status: 429,
+      code: 'RESOURCE_EXHAUSTED',
+      message: 'Gemini API rate limit or quota exceeded. Please try again shortly.',
+    };
+  }
+  return {
+    status: 502,
+    code: 'AI_ERROR',
+    message: msg || 'AI generation failed.',
+  };
+}
+
+async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      const info = classifyGeminiHttpError(err);
+      // Do not retry non-transient auth/config/model errors
+      if (info.status === 400 || info.status === 403 || info.status === 404 || info.status === 503) {
+        throw err;
+      }
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, 400 * Math.pow(2, attempt)));
+      }
+    }
+  }
+  throw lastError;
 }
 
 export interface ChatTurnInput {
@@ -70,9 +158,11 @@ Keep responses clear, well-structured, concise (under 250 words unless asked for
     history: validHistory,
   });
 
-  const response = await chat.sendMessage({
-    message: params.message.trim().slice(0, 2000),
-  });
+  const response = await withGeminiRetry(() =>
+    chat.sendMessage({
+      message: params.message.trim().slice(0, 2000),
+    })
+  );
 
   const reply = (response.text || '').trim();
   if (!reply) {
@@ -103,28 +193,30 @@ Rules:
 - Each caption must be 1 to 2 sentences, crisp, natural, and tailored to students/gamers.
 - Hashtags must be single words starting with # (e.g. #JITCampus, #CodeAndPlay).`;
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: prompt,
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          captions: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
+  const response = await withGeminiRetry(() =>
+    ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            captions: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
+            hashtags: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING },
+            },
           },
-          hashtags: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
+          required: ['captions', 'hashtags'],
         },
-        required: ['captions', 'hashtags'],
       },
-    },
-  });
+    })
+  );
 
   const parsed = JSON.parse(response.text || '{}') as {
     captions?: string[];
@@ -342,35 +434,37 @@ Every question must have:
 - domain: strictly "cs" or "general"
 - explanation: 1 concise sentence explaining why the answer is right`;
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: prompt,
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          questions: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                q: { type: Type.STRING },
-                options: { type: Type.ARRAY, items: { type: Type.STRING } },
-                answer: { type: Type.INTEGER },
-                category: { type: Type.STRING },
-                domain: { type: Type.STRING, enum: ['cs', 'general'] },
-                explanation: { type: Type.STRING },
+  const response = await withGeminiRetry(() =>
+    ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: prompt,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  q: { type: Type.STRING },
+                  options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                  answer: { type: Type.INTEGER },
+                  category: { type: Type.STRING },
+                  domain: { type: Type.STRING, enum: ['cs', 'general'] },
+                  explanation: { type: Type.STRING },
+                },
+                required: ['q', 'options', 'answer', 'category', 'domain', 'explanation'],
               },
-              required: ['q', 'options', 'answer', 'category', 'domain', 'explanation'],
             },
           },
+          required: ['questions'],
         },
-        required: ['questions'],
       },
-    },
-  });
+    })
+  );
 
   const parsed = JSON.parse(response.text || '{}') as { questions?: any[] };
   const rawList = Array.isArray(parsed.questions) ? parsed.questions : [];
@@ -503,29 +597,31 @@ export async function moderatePublicText(params: {
       ? 'public campus feed post'
       : 'public post/reel comment';
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: `Analyze this ${ctxLabel} message on a college social & gaming platform for abusive language, harassment, slurs, threats, NSFW toxicity, or spam/scams.
+  const response = await withGeminiRetry(() =>
+    ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: `Analyze this ${ctxLabel} message on a college social & gaming platform for abusive language, harassment, slurs, threats, NSFW toxicity, or spam/scams.
 Allow normal playful gaming banter (e.g. "gg", "nice move!", "checkmate soon haha"), campus discussion, Hindi/English casual greetings, and constructive criticism.
 Block or warn ONLY genuine abuse, insults, slurs, harassment, or spam.
 
 Message: """${params.text.trim().slice(0, 1000)}"""`,
-    config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          allowed: { type: Type.BOOLEAN },
-          flagged: { type: Type.BOOLEAN },
-          severity: { type: Type.STRING, enum: ['none', 'warning', 'block'] },
-          category: { type: Type.STRING },
-          reason: { type: Type.STRING },
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            allowed: { type: Type.BOOLEAN },
+            flagged: { type: Type.BOOLEAN },
+            severity: { type: Type.STRING, enum: ['none', 'warning', 'block'] },
+            category: { type: Type.STRING },
+            reason: { type: Type.STRING },
+          },
+          required: ['allowed', 'flagged', 'severity', 'category', 'reason'],
         },
-        required: ['allowed', 'flagged', 'severity', 'category', 'reason'],
       },
-    },
-  });
+    })
+  );
 
   const parsed = JSON.parse(response.text || '{}') as Partial<ModerationVerdict>;
   const severity =

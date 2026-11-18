@@ -1001,6 +1001,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
         const joined = await joinFirestoreGameRoom(candidate.roomCode, selectedGame, activePlayer);
         if (!cancelled && !settled) {
+          // Detach old waiting room listener FIRST so deleting myCode doesn't fire onRoomDeleted -> gameMode('ai')
+          if (roomUnsubRef.current) {
+            roomUnsubRef.current();
+            roomUnsubRef.current = null;
+          }
           await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
           enterMatchedRoom(joined);
         }

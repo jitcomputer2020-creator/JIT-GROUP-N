@@ -200,6 +200,13 @@ function sanitizeAvatarUrl(url?: string): string {
   return url;
 }
 
+function sanitizeRoomAvatarUrl(url?: string): string {
+  if (!url) return '/assets/aistudio/image_e64e54f2.png';
+  // Keep per-player avatar compact so gameRooms playersJson stays well below Firestore's 100KB cap
+  if (url.length > 18000) return '/assets/aistudio/image_e64e54f2.png';
+  return url;
+}
+
 export function deriveUsername(
   fullName: string,
   contactNumber?: string,
@@ -1356,6 +1363,7 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     roomCode: String(data.roomCode || ''),
     gameId: String(data.gameId || 'tictactoe'),
     hostId: String(data.hostId || ''),
+    player2Id: String(data.player2Id || players[1]?.id || ''),
     createdAt: createdMs,
     status: (data.status as MultiplayerRoom['status']) || 'waiting',
     maxPlayers,
@@ -1376,7 +1384,7 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
 
 const HOSTED_ROOM_STORAGE_PREFIX = 'jit_hosted_room_';
 const PUBLIC_QUEUE_STALE_MS = 4 * 60 * 1000;
-const PRIVATE_ROOM_STALE_MS = 20 * 60 * 1000;
+const PRIVATE_ROOM_STALE_MS = 5 * 60 * 1000;
 
 let cachedServerTimeOffsetMs = 0;
 
@@ -1392,7 +1400,7 @@ async function syncServerClockWithTicket(
   try {
     const ticketRef = doc(db, 'matchmakingQueue', player.id);
     const cleanName = (player.name || 'JIT Player').slice(0, 80);
-    const cleanAvatar = sanitizeAvatarUrl(player.avatar);
+    const cleanAvatar = sanitizeRoomAvatarUrl(player.avatar);
     const nowMs = Date.now();
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(ticketRef);
@@ -1471,41 +1479,100 @@ function isRoomDocStale(data: Record<string, any>, thresholdMs: number): boolean
   return getServerSyncedNowMs() - updatedMs > thresholdMs;
 }
 
-export async function releasePreviousHostedRoom(
+async function cleanupSingleHostedRoomDoc(
+  code: string,
   hostId: string,
-  preserveRoomCode?: string
+  data?: Record<string, any>
 ): Promise<void> {
-  if (!hostId) return;
-  const previousCode = getStoredHostedRoomCode(hostId);
-  if (!previousCode || previousCode === preserveRoomCode) {
-    return;
-  }
-  setStoredHostedRoomCode(hostId, null);
+  if (!/^\d{4}$/.test(code)) return;
+  const roomRef = doc(db, 'gameRooms', code);
   try {
-    const prevRef = doc(db, 'gameRooms', previousCode);
-    const snap = await getDoc(prevRef);
-    if (!snap.exists()) return;
-    const parsed = parseRoomSnapshotData(snap.data());
+    let roomData = data;
+    if (!roomData) {
+      const snap = await getDocFromServer(roomRef).catch(() => getDoc(roomRef));
+      if (!snap.exists()) return;
+      roomData = snap.data();
+    }
+    const parsed = parseRoomSnapshotData(roomData);
     const totalMembers = parsed.players.length + (parsed.waitingPlayers?.length || 0);
-    if (parsed.hostId === hostId && totalMembers <= 1) {
-      await deleteDoc(prevRef);
-    } else if (
+    const isFinished = parsed.status === 'finished';
+    const isStale = isRoomDocStale(roomData, PRIVATE_ROOM_STALE_MS);
+
+    if (totalMembers <= 1 || isFinished || isStale) {
+      await deleteDoc(roomRef);
+      return;
+    }
+
+    // If a previous hosted room still had another member, gracefully expire/leave it
+    if (parsed.hostId === hostId) {
+      await updateDoc(roomRef, {
+        status: 'finished',
+        gameStateJson: JSON.stringify(parsed.gameState || {}),
+        currentTurn: '',
+        moveAction: 'HOST_REPLACED',
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+      await deleteDoc(roomRef).catch(() => {});
+      return;
+    }
+
+    if (
       parsed.players.some((p) => p.id === hostId) ||
       (parsed.waitingPlayers || []).some((p) => p.id === hostId)
     ) {
-      await kickOrLeaveFirestoreRoom(previousCode, hostId);
+      await kickOrLeaveFirestoreRoom(code, hostId);
     }
   } catch {
     // Best-effort cleanup of previous room
   }
 }
 
+export async function releasePreviousHostedRoom(
+  hostId: string,
+  preserveRoomCode?: string
+): Promise<void> {
+  if (!hostId) return;
+  const codesToClean = new Set<string>();
+  const previousCode = getStoredHostedRoomCode(hostId);
+  if (previousCode && previousCode !== preserveRoomCode) {
+    codesToClean.add(previousCode);
+  }
+  setStoredHostedRoomCode(hostId, preserveRoomCode || null);
+
+  // Query Firestore directly across devices/tabs for ALL previously hosted rooms by this user
+  const docsByCode = new Map<string, Record<string, any>>();
+  try {
+    const q = query(
+      collection(db, 'gameRooms'),
+      where('hostId', '==', hostId),
+      limit(50)
+    );
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    snap.docs.forEach((d) => {
+      const code = d.id;
+      if (/^\d{4}$/.test(code) && code !== preserveRoomCode) {
+        codesToClean.add(code);
+        docsByCode.set(code, d.data());
+      }
+    });
+  } catch {
+    // Fallback to local stored code cleanup
+  }
+
+  if (codesToClean.size === 0) return;
+  await Promise.allSettled(
+    Array.from(codesToClean).map((code) =>
+      cleanupSingleHostedRoomDoc(code, hostId, docsByCode.get(code))
+    )
+  );
+}
+
 async function pickAvailableRoomCodeAndCleanStale(hostId: string): Promise<string> {
-  for (let attempt = 0; attempt < 40; attempt++) {
+  for (let attempt = 0; attempt < 60; attempt++) {
     const candidate = Math.floor(1000 + Math.random() * 9000).toString();
     try {
       const candidateRef = doc(db, 'gameRooms', candidate);
-      const snap = await getDocFromServer(candidateRef);
+      const snap = await getDocFromServer(candidateRef).catch(() => getDoc(candidateRef));
       if (!snap.exists()) {
         return candidate;
       }
@@ -1513,21 +1580,25 @@ async function pickAvailableRoomCodeAndCleanStale(hostId: string): Promise<strin
       const playerCount = Number(existingData.playerCount || 1);
       const canRecycle =
         existingData.status === 'finished' ||
-        (existingData.hostId === hostId && playerCount <= 1) ||
-        (Boolean(existingData.isPublicMatch) &&
-          !Boolean(existingData.isOpenGroup) &&
-          existingData.status === 'waiting' &&
-          playerCount <= 1 &&
-          isRoomDocStale(existingData, PUBLIC_QUEUE_STALE_MS)) ||
-        (playerCount <= 1 && isRoomDocStale(existingData, PRIVATE_ROOM_STALE_MS)) ||
+        existingData.hostId === hostId ||
+        (playerCount <= 1 && isRoomDocStale(existingData, 2 * 60 * 1000)) ||
         isRoomDocStale(existingData, PRIVATE_ROOM_STALE_MS);
 
       if (canRecycle) {
         try {
+          if (playerCount > 1 && existingData.status !== 'finished' && existingData.hostId === hostId) {
+            await updateDoc(candidateRef, {
+              status: 'finished',
+              gameStateJson: String(existingData.gameStateJson || '{}'),
+              currentTurn: '',
+              moveAction: 'ROOM_RECYCLED',
+              updatedAt: serverTimestamp(),
+            }).catch(() => {});
+          }
           await deleteDoc(candidateRef);
           return candidate;
         } catch {
-          // Another client may own or be deleting it; try another code
+          // Another client owns an active room on this code; try next candidate
         }
       }
     } catch {
@@ -1558,17 +1629,17 @@ export async function createFirestoreGameRoom(
     ? Math.min(8, Math.max(2, opts.activeSeatLimit || (gameId === 'truth_dare' ? 6 : gameId === 'ludo' ? 4 : 2)))
     : safeMax;
 
-  // Automatically release any prior orphaned room hosted by this user so room limits are never hit
+  // Auto-cleanup: delete/expire ALL previously hosted inactive/abandoned rooms for unlimited creation
   if (opts.recycleRoomCode) {
-    await kickOrLeaveFirestoreRoom(opts.recycleRoomCode, hostPlayer.id).catch(() => {});
+    await cleanupSingleHostedRoomDoc(opts.recycleRoomCode, hostPlayer.id).catch(() => {});
   }
   await releasePreviousHostedRoom(hostPlayer.id);
 
   const players: RoomPlayer[] = [
     {
       id: hostPlayer.id,
-      name: hostPlayer.name.slice(0, 80),
-      avatar: sanitizeAvatarUrl(hostPlayer.avatar),
+      name: (hostPlayer.name || 'JIT Player').slice(0, 80),
+      avatar: sanitizeRoomAvatarUrl(hostPlayer.avatar),
       isHost: true,
       isReady: true,
       color: 'Red',
@@ -1579,12 +1650,13 @@ export async function createFirestoreGameRoom(
   const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'in_game' : 'waiting';
 
   let lastErr: any = null;
-  for (let createAttempt = 0; createAttempt < 4; createAttempt++) {
+  for (let createAttempt = 0; createAttempt < 12; createAttempt++) {
     const chosenCode = await pickAvailableRoomCodeAndCleanStale(hostPlayer.id);
     const payload = {
       roomCode: chosenCode,
       gameId,
       hostId: hostPlayer.id,
+      player2Id: '',
       status: initialStatus,
       maxPlayers: safeMax,
       playerCount: 1,
@@ -1620,6 +1692,7 @@ export async function createFirestoreGameRoom(
           roomCode: chosenCode,
           gameId,
           hostId: hostPlayer.id,
+          player2Id: '',
           createdAt: Date.now(),
           status: initialStatus,
           maxPlayers: safeMax,
@@ -1640,10 +1713,10 @@ export async function createFirestoreGameRoom(
     } catch (err: any) {
       lastErr = err;
       if (err?.message === 'ROOM_CODE_COLLISION') {
+        await cleanupSingleHostedRoomDoc(chosenCode, hostPlayer.id).catch(() => {});
         continue;
       }
-      if (err?.code === 'permission-denied' && createAttempt < 3) {
-        // Retry with another unused 4-digit code if concurrent creation caused update check failure
+      if (err?.code === 'permission-denied' && createAttempt < 11) {
         continue;
       }
       if (err?.code === 'permission-denied') {
@@ -1653,7 +1726,7 @@ export async function createFirestoreGameRoom(
     }
   }
 
-  throw lastErr || new Error('Could not allocate an unused 4-digit room code. Please retry.');
+  throw lastErr || new Error('Could not allocate a 4-digit room code right now. Please try again.');
 }
 
 export async function joinFirestoreGameRoom(
@@ -1701,8 +1774,8 @@ export async function joinFirestoreGameRoom(
         const hasOpenActiveSeat = parsed.players.length < seatLimit;
         const newEntry: RoomPlayer = {
           id: player.id,
-          name: player.name.slice(0, 80),
-          avatar: sanitizeAvatarUrl(player.avatar),
+          name: (player.name || 'JIT Player').slice(0, 80),
+          avatar: sanitizeRoomAvatarUrl(player.avatar),
           isHost: false,
           isReady: true,
           color: seatColors[(parsed.players.length + currentWaiting.length) % seatColors.length],
@@ -1716,6 +1789,7 @@ export async function joinFirestoreGameRoom(
         tx.update(roomRef, {
           playersJson: JSON.stringify(nextPlayers),
           waitingPlayersJson: JSON.stringify(nextWaiting),
+          player2Id: nextPlayers[1]?.id || '',
           playerCount: nextCount,
           hostId: parsed.hostId,
           status: 'in_game',
@@ -1724,6 +1798,7 @@ export async function joinFirestoreGameRoom(
 
         return {
           ...parsed,
+          player2Id: nextPlayers[1]?.id || '',
           status: 'in_game' as const,
           players: nextPlayers,
           waitingPlayers: nextWaiting,
@@ -1738,8 +1813,8 @@ export async function joinFirestoreGameRoom(
         ...parsed.players,
         {
           id: player.id,
-          name: player.name.slice(0, 80),
-          avatar: sanitizeAvatarUrl(player.avatar),
+          name: (player.name || 'JIT Player').slice(0, 80),
+          avatar: sanitizeRoomAvatarUrl(player.avatar),
           isHost: false,
           isReady: true,
           color: seatColors[parsed.players.length % seatColors.length],
@@ -1758,6 +1833,7 @@ export async function joinFirestoreGameRoom(
 
       tx.update(roomRef, {
         playersJson: JSON.stringify(nextPlayers),
+        player2Id: nextPlayers[1]?.id || '',
         playerCount: nextPlayers.length,
         hostId: parsed.hostId,
         status: nextStatus,
@@ -1773,6 +1849,7 @@ export async function joinFirestoreGameRoom(
 
       return {
         ...parsed,
+        player2Id: nextPlayers[1]?.id || '',
         status: nextStatus,
         players: nextPlayers,
         ...(nextStatus === 'in_game'
@@ -1828,14 +1905,22 @@ function filterActiveWaitingRooms(
   for (const d of docs) {
     const data = d.data();
     const parsed = parseRoomSnapshotData(data);
-    if (parsed.isOpenGroup || parsed.status !== 'waiting' || parsed.gameId !== gameId) {
+    if (
+      !parsed.isPublicMatch ||
+      parsed.isOpenGroup ||
+      parsed.status !== 'waiting' ||
+      parsed.gameId !== gameId
+    ) {
       continue;
     }
-    if (parsed.players.length >= parsed.maxPlayers) {
+    // Check explicit player2 empty invariant
+    const hasPlayer2 =
+      Boolean(parsed.player2Id && parsed.player2Id.length > 0) ||
+      parsed.players.length >= parsed.maxPlayers;
+    if (hasPlayer2) {
       continue;
     }
     if (isRoomDocStale(data, PUBLIC_QUEUE_STALE_MS)) {
-      // Lazily prune dead public queue rooms so queue stays healthy
       if (parsed.players.length <= 1 && parsed.roomCode && /^\d{4}$/.test(parsed.roomCode)) {
         deleteDoc(doc(db, 'gameRooms', parsed.roomCode)).catch(() => {});
       }
@@ -1852,24 +1937,32 @@ function filterActiveWaitingRooms(
   );
 }
 
+async function listWaitingQuickMatchRooms(
+  gameId: string,
+  excludeRoomCode: string,
+  playerId: string
+): Promise<MultiplayerRoom[]> {
+  try {
+    // Query ONLY unstarted 'waiting' rooms so historical finished/open_group rooms never starve limit()
+    const q = query(
+      collection(db, 'gameRooms'),
+      where('status', '==', 'waiting'),
+      limit(100)
+    );
+    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
+    return filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
+  } catch {
+    return [];
+  }
+}
+
 export async function findOtherWaitingQuickMatchRoom(
   gameId: string,
   excludeRoomCode: string,
   playerId: string
 ): Promise<MultiplayerRoom | null> {
-  try {
-    // Single-field server-first query avoids stale cache and composite indexes
-    const q = query(
-      collection(db, 'gameRooms'),
-      where('isPublicMatch', '==', true),
-      limit(120)
-    );
-    const snap = await getDocsFromServer(q).catch(() => getDocs(q));
-    const candidates = filterActiveWaitingRooms(snap.docs, gameId, excludeRoomCode, playerId);
-    return candidates[0] || null;
-  } catch {
-    return null;
-  }
+  const candidates = await listWaitingQuickMatchRooms(gameId, excludeRoomCode, playerId);
+  return candidates[0] || null;
 }
 
 export function subscribeToPublicMatchmakingQueue(
@@ -1880,8 +1973,8 @@ export function subscribeToPublicMatchmakingQueue(
 ): Unsubscribe {
   const q = query(
     collection(db, 'gameRooms'),
-    where('isPublicMatch', '==', true),
-    limit(60)
+    where('status', '==', 'waiting'),
+    limit(100)
   );
   return onSnapshot(
     q,
@@ -2288,6 +2381,91 @@ export async function releasePublicQueueSlotIfOwner(
   await leaveMatchmakingQueue(playerId).catch(() => {});
 }
 
+async function tryAtomicallyJoinWaitingRoom(
+  roomCode: string,
+  gameId: string,
+  player: { id: string; name: string; avatar: string }
+): Promise<MultiplayerRoom | null> {
+  const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) return null;
+
+  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const slotRef = doc(db, 'matchmakingQueue', `slot_${gameId}`);
+  const cleanName = (player.name || 'JIT Player').slice(0, 80);
+  const cleanAvatar = sanitizeRoomAvatarUrl(player.avatar);
+  const seatColors = ['Red', 'Yellow', 'Green', 'Blue'];
+
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(roomRef);
+    const slotSnap = await tx.get(slotRef);
+    if (!snap.exists()) return null;
+
+    const data = snap.data();
+    const parsed = parseRoomSnapshotData(data);
+    if (
+      !parsed.isPublicMatch ||
+      parsed.isOpenGroup ||
+      parsed.gameId !== gameId ||
+      parsed.status !== 'waiting' ||
+      Boolean(parsed.player2Id) ||
+      parsed.players.length >= parsed.maxPlayers ||
+      parsed.players.some((p) => p.id === player.id)
+    ) {
+      return null;
+    }
+
+    const nextPlayers: RoomPlayer[] = [
+      ...parsed.players,
+      {
+        id: player.id,
+        name: cleanName,
+        avatar: cleanAvatar,
+        isHost: false,
+        isReady: true,
+        color: seatColors[parsed.players.length % seatColors.length],
+        joinedAtMs: Date.now(),
+      },
+    ];
+    const nextStatus: MultiplayerRoom['status'] =
+      nextPlayers.length >= parsed.maxPlayers ? 'in_game' : 'waiting';
+    const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const nextGameState =
+      nextStatus === 'in_game'
+        ? { ...(parsed.gameState || {}), _startId: startId, moveSeq: 0 }
+        : parsed.gameState || {};
+
+    tx.update(roomRef, {
+      playersJson: JSON.stringify(nextPlayers),
+      player2Id: nextPlayers[1]?.id || player.id,
+      playerCount: nextPlayers.length,
+      hostId: parsed.hostId,
+      status: nextStatus,
+      gameStateJson: JSON.stringify(nextGameState),
+      moveAction: nextStatus === 'in_game' ? 'GAME_START' : 'ROOM_CREATED',
+      currentTurn: parsed.players[0]?.id || parsed.hostId,
+      updatedAt: serverTimestamp(),
+    });
+
+    if (slotSnap.exists() && slotSnap.data().matchedRoomCode === cleanCode) {
+      tx.update(slotRef, {
+        status: 'matched',
+        matchedRoomCode: cleanCode,
+        matchedWithId: player.id,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
+    return {
+      ...parsed,
+      player2Id: nextPlayers[1]?.id || player.id,
+      status: nextStatus,
+      players: nextPlayers,
+      gameState: nextGameState,
+      currentTurn: parsed.players[0]?.id || parsed.hostId,
+    };
+  });
+}
+
 export async function quickMatchFirestoreRoom(
   gameId: string,
   maxPlayers: number,
@@ -2295,48 +2473,34 @@ export async function quickMatchFirestoreRoom(
 ): Promise<{ room: MultiplayerRoom; matchedExisting: boolean }> {
   const safeMax = Math.min(4, Math.max(2, maxPlayers || 2));
   const cleanName = (player.name || 'JIT Player').slice(0, 80);
-  const cleanAvatar = sanitizeAvatarUrl(player.avatar);
+  const cleanAvatar = sanitizeRoomAvatarUrl(player.avatar);
   const slotId = `slot_${gameId}`;
   const slotRef = doc(db, 'matchmakingQueue', slotId);
 
-  // Calibrate server UTC clock offset & release any prior solo abandoned room before entering queue
+  // Release any prior orphaned rooms hosted by this user & calibrate UTC server clock offset
   await Promise.allSettled([
     releasePreviousHostedRoom(player.id),
     syncServerClockWithTicket(player, gameId),
   ]);
 
-  // 1. Canonical atomic transaction on `slot_${gameId}` FIRST:
-  //    Concurrent players requesting quick match serialize on this single lock document.
-  //    Player 1 creates/claims the shared waiting room; Player 2 retries transactionally and joins it immediately.
   let lastErr: any = null;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    // Also check if another public waiting room exists (e.g. if a slot cleared prematurely)
-    const discoveredWaiting =
-      attempt === 0
-        ? await findOtherWaitingQuickMatchRoom(gameId, '', player.id).catch(() => null)
-        : null;
-    if (discoveredWaiting) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    // 1. Query Firestore directly for any unstarted waiting room where player2 is empty
+    const waitingCandidates = await listWaitingQuickMatchRooms(gameId, '', player.id).catch(() => []);
+    for (const candidate of waitingCandidates) {
       try {
-        const joined = await joinFirestoreGameRoom(discoveredWaiting.roomCode, gameId, player);
-        await runTransaction(db, async (tx) => {
-          const slotSnap = await tx.get(slotRef);
-          if (slotSnap.exists() && slotSnap.data().matchedRoomCode === discoveredWaiting.roomCode) {
-            tx.update(slotRef, {
-              status: 'matched',
-              matchedRoomCode: discoveredWaiting.roomCode,
-              matchedWithId: player.id,
-              updatedAt: serverTimestamp(),
-            });
-          }
-        }).catch(() => {});
-        await leaveMatchmakingQueue(player.id).catch(() => {});
-        setStoredHostedRoomCode(player.id, null);
-        return { room: joined, matchedExisting: true };
+        const joined = await tryAtomicallyJoinWaitingRoom(candidate.roomCode, gameId, player);
+        if (joined) {
+          await leaveMatchmakingQueue(player.id).catch(() => {});
+          setStoredHostedRoomCode(player.id, null);
+          return { room: joined, matchedExisting: true };
+        }
       } catch {
-        // Room filled concurrently; fall through directly to serialized slot transaction
+        // Claimed concurrently; check next waiting room or fall through to atomic slot transaction
       }
     }
 
+    // 2. Atomic Firestore transaction on canonical slot_${gameId} prevents split-room races
     const chosenCode = await pickAvailableRoomCodeAndCleanStale(player.id);
     const candidateRoomRef = doc(db, 'gameRooms', chosenCode);
 
@@ -2359,7 +2523,6 @@ export async function quickMatchFirestoreRoom(
           const waitingRoomSnap = await tx.get(waitingRoomRef);
           if (waitingRoomSnap.exists()) {
             const parsedWaiting = parseRoomSnapshotData(waitingRoomSnap.data());
-            // Re-use own active waiting room on rapid double-click
             if (
               String(slotData.playerId || '') === player.id &&
               !parsedWaiting.isOpenGroup &&
@@ -2380,6 +2543,7 @@ export async function quickMatchFirestoreRoom(
               !parsedWaiting.isOpenGroup &&
               parsedWaiting.gameId === gameId &&
               parsedWaiting.status === 'waiting' &&
+              !parsedWaiting.player2Id &&
               parsedWaiting.players.length < parsedWaiting.maxPlayers &&
               !parsedWaiting.players.some((p) => p.id === player.id) &&
               !isRoomDocStale(waitingRoomSnap.data(), PUBLIC_QUEUE_STALE_MS);
@@ -2409,6 +2573,7 @@ export async function quickMatchFirestoreRoom(
 
               tx.update(waitingRoomRef, {
                 playersJson: JSON.stringify(nextPlayers),
+                player2Id: nextPlayers[1]?.id || player.id,
                 playerCount: nextPlayers.length,
                 hostId: parsedWaiting.hostId,
                 status: nextStatus,
@@ -2429,6 +2594,7 @@ export async function quickMatchFirestoreRoom(
                 matchedExisting: true,
                 room: {
                   ...parsedWaiting,
+                  player2Id: nextPlayers[1]?.id || player.id,
                   status: nextStatus,
                   players: nextPlayers,
                   gameState: updatedGameState,
@@ -2439,7 +2605,7 @@ export async function quickMatchFirestoreRoom(
           }
         }
 
-        // No active waiting room in slot — create the single waiting room for this game atomically
+        // Still no waiting room — atomically create one waiting room for this game
         const existingCandidateSnap = await tx.get(candidateRoomRef);
         if (existingCandidateSnap.exists()) {
           throw new Error('ROOM_CODE_COLLISION');
@@ -2461,6 +2627,7 @@ export async function quickMatchFirestoreRoom(
           roomCode: chosenCode,
           gameId,
           hostId: player.id,
+          player2Id: '',
           status: 'waiting',
           maxPlayers: safeMax,
           playerCount: 1,
@@ -2514,6 +2681,7 @@ export async function quickMatchFirestoreRoom(
             roomCode: chosenCode,
             gameId,
             hostId: player.id,
+            player2Id: '',
             createdAt: nowMs,
             status: 'waiting',
             maxPlayers: safeMax,
@@ -2543,9 +2711,10 @@ export async function quickMatchFirestoreRoom(
     } catch (err: any) {
       lastErr = err;
       if (err?.message === 'ROOM_CODE_COLLISION') {
+        await cleanupSingleHostedRoomDoc(chosenCode, player.id).catch(() => {});
         continue;
       }
-      if (err?.code === 'permission-denied' && attempt < 3) {
+      if (err?.code === 'permission-denied' && attempt < 5) {
         continue;
       }
       if (err?.code === 'permission-denied') {
@@ -2837,6 +3006,7 @@ export async function kickOrLeaveFirestoreRoom(
     await updateDoc(roomRef, {
       playersJson: JSON.stringify(updatedActive),
       waitingPlayersJson: JSON.stringify(updatedWaiting),
+      player2Id: updatedActive[1]?.id || '',
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
       status: parsed.status,

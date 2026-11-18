@@ -25,6 +25,6 @@
     "resolveJsonModule": true,
     "noEmit": true
   },
-  "include": ["src", "vite.config.ts", "server.ts"],
+  "include": ["src", "api", "vite.config.ts", "server.ts"],
   "exclude": ["dist", "node_modules", "supabase"]
 }

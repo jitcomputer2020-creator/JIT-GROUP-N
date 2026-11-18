@@ -32,25 +32,36 @@ export const AiCaptionGenerator: React.FC<AiCaptionGeneratorProps> = ({
   const [topic, setTopic] = useState('');
   const [tone, setTone] = useState<string>('engaging');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [source, setSource] = useState<'ai' | 'template' | null>(null);
   const [captions, setCaptions] = useState<string[]>([]);
   const [hashtags, setHashtags] = useState<string[]>([]);
   const [appliedTag, setAppliedTag] = useState<string | null>(null);
 
   const handleGenerate = async () => {
     setLoading(true);
-    setError(null);
+    setNotice(null);
     try {
       const res = await generateAiCaptions({
-        topic: topic.trim() || currentText.trim() || (contentType === 'reel' ? 'Campus highlight reel' : 'Campus & tech moment'),
+        topic:
+          topic.trim() ||
+          currentText.trim() ||
+          (contentType === 'reel' ? 'Campus highlight reel' : 'Campus & tech moment'),
         existingText: currentText,
         contentType,
         tone,
       });
-      setCaptions(res.captions);
-      setHashtags(res.hashtags);
+      setCaptions(Array.isArray(res.captions) ? res.captions : []);
+      setHashtags(Array.isArray(res.hashtags) ? res.hashtags : []);
+      setSource(res.source);
+      if (res.notice) {
+        setNotice(res.notice);
+      }
     } catch (err: any) {
-      setError(err?.message || 'Unable to generate AI captions right now.');
+      setNotice(
+        err?.message || 'AI caption suggestion could not be loaded right now. You can still write your own caption.'
+      );
+      setSource('template');
     } finally {
       setLoading(false);
     }
@@ -120,17 +131,17 @@ export const AiCaptionGenerator: React.FC<AiCaptionGeneratorProps> = ({
         </button>
       </div>
 
-      {error && (
-        <div className="p-2 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200/70 dark:border-red-900/50 text-[11px] text-red-600 dark:text-red-400 flex items-center gap-1.5">
-          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-          <span>{error}</span>
+      {notice && (
+        <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/50 text-[11px] text-amber-800 dark:text-amber-300 flex items-start gap-1.5">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>{notice}</span>
         </div>
       )}
 
       {captions.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-            Click a caption to apply
+            {source === 'template' ? 'Starter templates (click to apply)' : 'Click an AI caption to apply'}
           </p>
           <div className="space-y-1.5">
             {captions.map((cap, idx) => (
@@ -155,7 +166,7 @@ export const AiCaptionGenerator: React.FC<AiCaptionGeneratorProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1">
               <Hash className="w-3 h-3" />
-              Suggested Hashtags
+              {source === 'template' ? 'Starter Hashtags' : 'Suggested Hashtags'}
             </span>
             <button
               type="button"
