@@ -271,23 +271,43 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
           </button>
 
           {isHost ? (
+            room.status === 'active' || room.status === 'in_game' ? (
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex-1 py-2.5 text-xs font-bold rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white shadow-md flex items-center justify-center gap-2 transition-all"
+              >
+                <Play className="w-4 h-4 fill-white" />
+                <span>Resume Active Match</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onStartGame}
+                disabled={!canStart}
+                className="flex-1 py-2.5 text-xs font-bold rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-40 text-white shadow-md flex items-center justify-center gap-2 transition-all"
+              >
+                {room.players.length < 2 ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Waiting for Player</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4 fill-white" />
+                    <span>Start Game Now</span>
+                  </>
+                )}
+              </button>
+            )
+          ) : room.status === 'active' || room.status === 'in_game' ? (
             <button
               type="button"
-              onClick={onStartGame}
-              disabled={!canStart}
-              className="flex-1 py-2.5 text-xs font-bold rounded-2xl bg-blue-600 hover:bg-blue-700 active:scale-95 disabled:opacity-40 text-white shadow-md flex items-center justify-center gap-2 transition-all"
+              onClick={onClose}
+              className="flex-1 py-2.5 text-xs font-bold rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-md flex items-center justify-center gap-2 transition-all"
             >
-              {room.players.length < 2 ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Waiting for Player</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-white" />
-                  <span>Start Game Now</span>
-                </>
-              )}
+              <Play className="w-4 h-4 fill-white" />
+              <span>Match Active · Play</span>
             </button>
           ) : (
             <div className="flex-1 py-2.5 text-xs font-bold text-center text-slate-500 bg-slate-50 dark:bg-slate-800/60 rounded-2xl">

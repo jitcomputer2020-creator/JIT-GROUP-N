@@ -80,6 +80,7 @@ export interface MultiplayerRoom {
   roomCode: string;
   gameId: string;
   hostId: string;
+  player1?: string;
   player2?: string;
   player2Id?: string;
   createdAt: number;

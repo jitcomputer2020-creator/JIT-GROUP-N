@@ -1359,12 +1359,14 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   const maxPlayers = Number(data.maxPlayers || 2);
   const activeSeatLimit = Number(data.activeSeatLimit || maxPlayers || 2);
 
+  const resolvedPlayer1 = String(data.player1 || data.hostId || players[0]?.id || '');
   const resolvedPlayer2 = String(data.player2 || data.player2Id || players[1]?.id || '');
 
   return {
     roomCode: String(data.roomCode || ''),
     gameId: String(data.gameId || 'tictactoe'),
     hostId: String(data.hostId || ''),
+    player1: resolvedPlayer1,
     player2: resolvedPlayer2,
     player2Id: resolvedPlayer2,
     createdAt: createdMs,
@@ -1664,6 +1666,7 @@ export async function createFirestoreGameRoom(
       roomCode: chosenCode,
       gameId,
       hostId: hostPlayer.id,
+      player1: hostPlayer.id,
       player2: '',
       player2Id: '',
       status: initialStatus,
@@ -1701,6 +1704,7 @@ export async function createFirestoreGameRoom(
           roomCode: chosenCode,
           gameId,
           hostId: hostPlayer.id,
+          player1: hostPlayer.id,
           player2: '',
           player2Id: '',
           createdAt: Date.now(),
@@ -1799,6 +1803,7 @@ export async function joinFirestoreGameRoom(
         tx.update(roomRef, {
           playersJson: JSON.stringify(nextPlayers),
           waitingPlayersJson: JSON.stringify(nextWaiting),
+          player1: nextPlayers[0]?.id || parsed.hostId,
           player2: nextPlayers[1]?.id || '',
           player2Id: nextPlayers[1]?.id || '',
           playerCount: nextCount,
@@ -1809,6 +1814,7 @@ export async function joinFirestoreGameRoom(
 
         return {
           ...parsed,
+          player1: nextPlayers[0]?.id || parsed.hostId,
           player2: nextPlayers[1]?.id || '',
           player2Id: nextPlayers[1]?.id || '',
           status: 'in_game' as const,
@@ -1850,6 +1856,7 @@ export async function joinFirestoreGameRoom(
 
       tx.update(roomRef, {
         playersJson: JSON.stringify(nextPlayers),
+        player1: nextPlayers[0]?.id || parsed.hostId,
         player2: nextPlayers[1]?.id || '',
         player2Id: nextPlayers[1]?.id || '',
         playerCount: nextPlayers.length,
@@ -1867,6 +1874,7 @@ export async function joinFirestoreGameRoom(
 
       return {
         ...parsed,
+        player1: nextPlayers[0]?.id || parsed.hostId,
         player2: nextPlayers[1]?.id || '',
         player2Id: nextPlayers[1]?.id || '',
         status: nextStatus,
@@ -2279,6 +2287,7 @@ export async function pairQueuePlayersIntoRoom(
           roomCode,
           gameId,
           hostId: oppPlayer.id,
+          player1: oppPlayer.id,
           player2: initPlayer.id,
           player2Id: initPlayer.id,
           status: 'active',
@@ -2320,6 +2329,7 @@ export async function pairQueuePlayersIntoRoom(
           roomCode,
           gameId,
           hostId: oppPlayer.id,
+          player1: oppPlayer.id,
           player2: initPlayer.id,
           player2Id: initPlayer.id,
           createdAt: Date.now(),
@@ -2455,6 +2465,7 @@ export async function tryAtomicallyJoinWaitingRoom(
         joinedAtMs: Date.now(),
       },
     ];
+    const joinedPlayer1Id = nextPlayers[0]?.id || parsed.hostId;
     const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
     const nextStatus: MultiplayerRoom['status'] = 'active';
     const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -2462,6 +2473,7 @@ export async function tryAtomicallyJoinWaitingRoom(
 
     tx.update(roomRef, {
       playersJson: JSON.stringify(nextPlayers),
+      player1: joinedPlayer1Id,
       player2: joinedPlayer2Id,
       player2Id: joinedPlayer2Id,
       playerCount: nextPlayers.length,
@@ -2470,7 +2482,7 @@ export async function tryAtomicallyJoinWaitingRoom(
       status: nextStatus,
       gameStateJson: JSON.stringify(nextGameState),
       moveAction: 'GAME_START',
-      currentTurn: parsed.players[0]?.id || parsed.hostId,
+      currentTurn: joinedPlayer1Id,
       updatedAt: serverTimestamp(),
     });
 
@@ -2485,13 +2497,14 @@ export async function tryAtomicallyJoinWaitingRoom(
 
     return {
       ...parsed,
+      player1: joinedPlayer1Id,
       player2: joinedPlayer2Id,
       player2Id: joinedPlayer2Id,
       isPublicMatch: true,
       status: nextStatus,
       players: nextPlayers,
       gameState: nextGameState,
-      currentTurn: parsed.players[0]?.id || parsed.hostId,
+      currentTurn: joinedPlayer1Id,
     };
   });
 }
@@ -2593,12 +2606,14 @@ export async function quickMatchFirestoreRoom(
                   joinedAtMs: Date.now(),
                 },
               ];
+              const joinedPlayer1Id = hostPlayer?.id || parsedWaiting.hostId;
               const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
               const nextStatus: MultiplayerRoom['status'] = 'active';
               const updatedGameState = { ...(parsedWaiting.gameState || {}), _startId: startId, moveSeq: 0 };
 
               tx.update(waitingRoomRef, {
                 playersJson: JSON.stringify(nextPlayers),
+                player1: joinedPlayer1Id,
                 player2: joinedPlayer2Id,
                 player2Id: joinedPlayer2Id,
                 playerCount: nextPlayers.length,
@@ -2607,7 +2622,7 @@ export async function quickMatchFirestoreRoom(
                 status: nextStatus,
                 gameStateJson: JSON.stringify(updatedGameState),
                 moveAction: 'GAME_START',
-                currentTurn: hostPlayer?.id || parsedWaiting.hostId,
+                currentTurn: joinedPlayer1Id,
                 updatedAt: serverTimestamp(),
               });
 
@@ -2622,13 +2637,14 @@ export async function quickMatchFirestoreRoom(
                 matchedExisting: true,
                 room: {
                   ...parsedWaiting,
+                  player1: joinedPlayer1Id,
                   player2: joinedPlayer2Id,
                   player2Id: joinedPlayer2Id,
                   isPublicMatch: true,
                   status: nextStatus,
                   players: nextPlayers,
                   gameState: updatedGameState,
-                  currentTurn: hostPlayer?.id || parsedWaiting.hostId,
+                  currentTurn: joinedPlayer1Id,
                 } as MultiplayerRoom,
               };
             }
@@ -2657,6 +2673,7 @@ export async function quickMatchFirestoreRoom(
           roomCode: chosenCode,
           gameId,
           hostId: player.id,
+          player1: player.id,
           player2: '',
           player2Id: '',
           status: 'waiting',
@@ -2712,6 +2729,7 @@ export async function quickMatchFirestoreRoom(
             roomCode: chosenCode,
             gameId,
             hostId: player.id,
+            player1: player.id,
             player2: '',
             player2Id: '',
             createdAt: nowMs,
@@ -3038,6 +3056,7 @@ export async function kickOrLeaveFirestoreRoom(
     await updateDoc(roomRef, {
       playersJson: JSON.stringify(updatedActive),
       waitingPlayersJson: JSON.stringify(updatedWaiting),
+      player1: updatedActive[0]?.id || nextHostId,
       player2: updatedActive[1]?.id || '',
       player2Id: updatedActive[1]?.id || '',
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
@@ -3059,6 +3078,9 @@ export function subscribeToGameRoom(
   onRoomDeleted?: () => void
 ): Unsubscribe {
   const cleanCode = (roomCode || '').trim().replace(/\D/g, '');
+  if (cleanCode.length !== 4) {
+    return () => {};
+  }
   return onSnapshot(
     doc(db, 'gameRooms', cleanCode),
     (snap) => {
