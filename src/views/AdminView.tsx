@@ -17,6 +17,7 @@ import { APP_CONFIG } from '../constants/branding';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { saveCompressedProfileMediaFile, validateMediaFile } from '../services/mediaStorage';
+import { isValidImageUrl, isValidVideoUrl } from '../lib/mediaValidation';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import { detectExpressBackendAvailable, safeParseJsonResponse } from '../utils/safeFetch';
@@ -2988,6 +2989,9 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                     (typeof p.mediaUrl === 'string' && p.mediaUrl.trim() ? p.mediaUrl.trim() : undefined);
                                   if (!primaryMediaUrl || (p.mediaType === 'none' && !p.videoUrl)) return null;
                                   const isVideoMedia = p.mediaType === 'video' || Boolean(p.videoUrl);
+                                  if (isVideoMedia ? !isValidVideoUrl(primaryMediaUrl) : !isValidImageUrl(primaryMediaUrl)) {
+                                    return null;
+                                  }
                                   return (
                                     <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-700 w-full">
                                       {isVideoMedia ? (
@@ -2996,6 +3000,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                           poster={p.thumbnailUrl}
                                           controls
                                           compactControls
+                                          hideOnInvalid
                                           className="w-full h-auto max-h-48 object-contain"
                                         />
                                       ) : (

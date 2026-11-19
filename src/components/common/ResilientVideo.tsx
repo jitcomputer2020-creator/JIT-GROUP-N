@@ -7,6 +7,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Video, RotateCcw, Loader2 } from 'lucide-react';
 import { resolveLocalMediaUrl } from '../../services/mediaStorage';
 import { fetchCloudChunkedVideoBlobUrl } from '../../lib/firebase';
+import { isValidImageUrl, isValidVideoUrl } from '../../lib/mediaValidation';
 
 interface ResilientVideoProps {
   src?: string;
@@ -19,6 +20,7 @@ interface ResilientVideoProps {
   loop?: boolean;
   muted?: boolean;
   playsInline?: boolean;
+  hideOnInvalid?: boolean;
   videoRef?: React.RefObject<HTMLVideoElement | null>;
   onError?: () => void;
   onLoadedData?: () => void;
@@ -47,20 +49,23 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
   loop = false,
   muted = false,
   playsInline = true,
+  hideOnInvalid = false,
   videoRef,
   onError,
   onLoadedData,
 }) => {
   const cleanSrc = typeof src === 'string' ? src.trim() : '';
-  const isAsyncUri = cleanSrc.startsWith('idb://') || cleanSrc.startsWith('fschunk://');
+  const hasValidSrc = isValidVideoUrl(cleanSrc);
+  const safePoster = isValidImageUrl(poster) ? poster.trim() : undefined;
+  const isAsyncUri = hasValidSrc && (cleanSrc.startsWith('idb://') || cleanSrc.startsWith('fschunk://'));
 
   const [resolvedSrc, setResolvedSrc] = useState<string>(() =>
-    cleanSrc && !isAsyncUri ? cleanSrc : ''
+    hasValidSrc && !isAsyncUri ? cleanSrc : ''
   );
   const [resolvingMedia, setResolvingMedia] = useState<boolean>(() => isAsyncUri);
   const [mediaMissing, setMediaMissing] = useState<boolean>(false);
-  // First try CORS-enabled native playback (<source type="video/mp4"> + crossOrigin="anonymous").
-  // If remote storage lacks Access-Control-Allow-Origin, transparently fall back to direct src without crossOrigin.
+  // First try CORS-enabled native playback (<source type="video/mp4"> + crossOrigin="anonymous") for external HTTP/HTTPS URLs.
+  // If remote storage lacks Access-Control-Allow-Origin, transparently fall back once to direct src without crossOrigin.
   const [playbackMode, setPlaybackMode] = useState<'cors_source' | 'direct_no_cors'>('cors_source');
   const [retrySeed, setRetrySeed] = useState(0);
 
@@ -79,7 +84,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
     setMediaMissing(false);
     setPlaybackMode('cors_source');
 
-    if (!cleanSrc) {
+    if (!cleanSrc || !hasValidSrc) {
       setResolvingMedia(false);
       setResolvedSrc('');
       return;
@@ -142,24 +147,28 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
         URL.revokeObjectURL(createdLegacyIdbObjectUrl);
       }
     };
-  }, [cleanSrc, retrySeed]);
+  }, [cleanSrc, hasValidSrc, retrySeed]);
 
   useEffect(() => {
     const el = internalVideoRef.current;
-    if (el && resolvedSrc) {
+    if (el && resolvedSrc && !mediaMissing) {
       try {
         el.load();
       } catch {
         // Ignore load errors
       }
     }
-  }, [resolvedSrc, playbackMode]);
+  }, [resolvedSrc, playbackMode, mediaMissing]);
+
+  const isExternalHttp =
+    resolvedSrc.startsWith('https://') || resolvedSrc.startsWith('http://');
 
   const handleVideoError = () => {
-    if (playbackMode === 'cors_source' && resolvedSrc) {
+    if (playbackMode === 'cors_source' && isExternalHttp && resolvedSrc) {
       setPlaybackMode('direct_no_cors');
       return;
     }
+    setMediaMissing(true);
     onError?.();
   };
 
@@ -174,14 +183,41 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
     return null;
   }
 
+  // Invalid or placeholder video URL (e.g., `/sample_post.mp4`): never mount <video> or fetch network
+  if (!hasValidSrc) {
+    if (hideOnInvalid) {
+      return null;
+    }
+    return (
+      <div
+        className={`relative w-full min-h-[160px] flex flex-col items-center justify-center bg-slate-900 text-slate-200 p-4 text-center ${containerClassName}`}
+      >
+        {safePoster && (
+          <img
+            src={safePoster}
+            alt="Video poster"
+            className="absolute inset-0 w-full h-full object-cover opacity-55"
+          />
+        )}
+        <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/75 backdrop-blur-sm px-4 py-3 rounded-2xl border border-white/15">
+          <Video className="w-6 h-6 text-slate-400" />
+          <p className="text-xs font-semibold text-white">Video preview unavailable</p>
+        </div>
+      </div>
+    );
+  }
+
   if (resolvingMedia || mediaMissing || !resolvedSrc) {
+    if (mediaMissing && hideOnInvalid && !resolvingMedia) {
+      return null;
+    }
     return (
       <div
         className={`relative w-full min-h-[190px] flex flex-col items-center justify-center bg-slate-900 text-slate-200 p-4 text-center ${containerClassName}`}
       >
-        {poster && (
+        {safePoster && (
           <img
-            src={poster}
+            src={safePoster}
             alt="Video poster"
             className="absolute inset-0 w-full h-full object-cover opacity-55"
           />
@@ -195,7 +231,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
           <p className="text-xs font-semibold text-white">
             {resolvingMedia
               ? 'Loading video...'
-              : 'Video unavailable on cloud — tap reload'}
+              : 'Video unavailable — tap reload'}
           </p>
           {!resolvingMedia && (
             <button
@@ -213,28 +249,28 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
   }
 
   const videoMimeType = inferVideoMimeType(resolvedSrc);
-  const useCors = playbackMode === 'cors_source' && !resolvedSrc.startsWith('blob:') && !resolvedSrc.startsWith('data:');
+  const useCorsSourceMode = playbackMode === 'cors_source' && isExternalHttp;
 
   if (!controls) {
     return (
       <video
         key={`${resolvedSrc}_${playbackMode}`}
         ref={setMergedVideoRef}
-        src={playbackMode === 'direct_no_cors' ? resolvedSrc : undefined}
-        poster={poster || undefined}
+        src={useCorsSourceMode ? undefined : resolvedSrc}
+        poster={safePoster}
         controls={false}
         autoPlay={autoPlay}
         loop={loop}
         muted={muted}
         playsInline={playsInline}
         preload="metadata"
-        crossOrigin={useCors ? 'anonymous' : undefined}
+        crossOrigin={useCorsSourceMode ? 'anonymous' : undefined}
         onLoadedData={onLoadedData}
         onError={handleVideoError}
         className={className}
       >
-        {playbackMode === 'cors_source' && (
-          <source src={resolvedSrc} type={videoMimeType} />
+        {useCorsSourceMode && (
+          <source src={resolvedSrc} type={videoMimeType} onError={handleVideoError} />
         )}
       </video>
     );
@@ -248,20 +284,22 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = ({
       <video
         key={`${resolvedSrc}_${playbackMode}`}
         ref={setMergedVideoRef}
-        src={playbackMode === 'direct_no_cors' ? resolvedSrc : undefined}
-        poster={poster || undefined}
+        src={useCorsSourceMode ? undefined : resolvedSrc}
+        poster={safePoster}
         controls
         autoPlay={autoPlay}
         loop={loop}
         muted={muted}
         playsInline={playsInline}
         preload="metadata"
-        crossOrigin={useCors ? 'anonymous' : undefined}
+        crossOrigin={useCorsSourceMode ? 'anonymous' : undefined}
         onLoadedData={onLoadedData}
         onError={handleVideoError}
         className={`w-full block mx-auto ${className}`}
       >
-        <source src={resolvedSrc} type={videoMimeType} />
+        {useCorsSourceMode && (
+          <source src={resolvedSrc} type={videoMimeType} onError={handleVideoError} />
+        )}
       </video>
     </div>
   );

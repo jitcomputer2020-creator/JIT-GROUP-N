@@ -14,6 +14,7 @@ import {
   VIDEO_EXPIRY_MS,
 } from '../../services/mediaStorage';
 import { uploadVideoAssetToCloud } from '../../lib/firebase';
+import { isValidImageUrl, isValidVideoUrl } from '../../lib/mediaValidation';
 import { ResilientVideo } from '../common/ResilientVideo';
 import { ResponsiveImage } from '../common/ResponsiveImage';
 import { X, Image as ImageIcon, Trash2, Check } from 'lucide-react';
@@ -116,33 +117,40 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
           )}
 
           {/* Media Preview */}
-          {mediaUrls.filter((u) => u && u.trim()).length > 0 && mediaType !== 'none' && (
-            <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 w-full">
-              {mediaType === 'video' ? (
-                <ResilientVideo
-                  src={mediaUrls[0]}
-                  poster={post.thumbnailUrl}
-                  controls
-                  className="w-full h-auto max-h-64 object-contain"
-                />
-              ) : (
-                <ResponsiveImage
-                  src={mediaUrls[0]}
-                  alt="Edited post image"
-                  fit="contain"
-                  className="w-full h-auto max-h-64 object-contain mx-auto block"
-                />
-              )}
-              <button
-                type="button"
-                onClick={handleRemoveMedia}
-                className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
-                title="Remove Media"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-          )}
+          {(() => {
+            const firstUrl = mediaUrls.find((u) => u && u.trim());
+            if (!firstUrl || mediaType === 'none') return null;
+            const valid = mediaType === 'video' ? isValidVideoUrl(firstUrl) : isValidImageUrl(firstUrl);
+            if (!valid) return null;
+            return (
+              <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 w-full">
+                {mediaType === 'video' ? (
+                  <ResilientVideo
+                    src={firstUrl}
+                    poster={post.thumbnailUrl}
+                    controls
+                    hideOnInvalid
+                    className="w-full h-auto max-h-64 object-contain"
+                  />
+                ) : (
+                  <ResponsiveImage
+                    src={firstUrl}
+                    alt="Edited post image"
+                    fit="contain"
+                    className="w-full h-auto max-h-64 object-contain mx-auto block"
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={handleRemoveMedia}
+                  className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                  title="Remove Media"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            );
+          })()}
 
           {/* Hidden File Picker */}
           <input

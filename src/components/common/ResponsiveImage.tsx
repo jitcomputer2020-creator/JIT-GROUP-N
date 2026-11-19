@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { Image as ImageIcon } from 'lucide-react';
 import { resolveLocalMediaUrl } from '../../services/mediaStorage';
+import { isValidImageUrl } from '../../lib/mediaValidation';
 
 interface ResponsiveImageProps {
   src?: string;
@@ -27,18 +28,19 @@ export const ResponsiveImage: React.FC<ResponsiveImageProps> = ({
   onClick,
 }) => {
   const cleanSrc = typeof src === 'string' ? src.trim() : '';
+  const hasValidSrc = isValidImageUrl(cleanSrc);
   const [resolvedSrc, setResolvedSrc] = useState<string>(() =>
-    cleanSrc && !cleanSrc.startsWith('idb://') ? cleanSrc : ''
+    hasValidSrc && !cleanSrc.startsWith('idb://') ? cleanSrc : ''
   );
   const [status, setStatus] = useState<'loading' | 'loaded' | 'error'>(() =>
-    !cleanSrc ? 'error' : cleanSrc.startsWith('idb://') ? 'loading' : 'loading'
+    !hasValidSrc ? 'error' : 'loading'
   );
 
   useEffect(() => {
     let cancelled = false;
     let objectUrl = '';
 
-    if (!cleanSrc) {
+    if (!hasValidSrc) {
       setResolvedSrc('');
       setStatus('error');
       return;

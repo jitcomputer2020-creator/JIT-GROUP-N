@@ -15,6 +15,7 @@ import {
   VIDEO_EXPIRY_MS,
 } from '../services/mediaStorage';
 import { uploadVideoAssetToCloud, isVideoContentExpired } from '../lib/firebase';
+import { isValidImageUrl, isValidVideoUrl } from '../lib/mediaValidation';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import { LikedByModal } from '../components/modals/LikedByModal';
@@ -342,13 +343,17 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                   </div>
                 </div>
 
-                {ann.mediaUrl && (
+                {ann.mediaUrl &&
+                  (ann.mediaType === 'video'
+                    ? isValidVideoUrl(ann.mediaUrl)
+                    : isValidImageUrl(ann.mediaUrl)) && (
                   <div className="rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-700/80 w-full relative">
                     {ann.mediaType === 'video' ? (
                       <ResilientVideo
                         src={ann.mediaUrl}
                         poster={ann.thumbnailUrl}
                         controls
+                        hideOnInvalid
                         className="w-full h-auto max-h-72 object-contain"
                       />
                     ) : (
@@ -679,6 +684,9 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                   (typeof post.mediaUrl === 'string' && post.mediaUrl.trim() ? post.mediaUrl.trim() : undefined);
                 if (!primaryMediaUrl || (post.mediaType === 'none' && !post.videoUrl)) return null;
                 const isVideoMedia = post.mediaType === 'video' || Boolean(post.videoUrl);
+                if (isVideoMedia ? !isValidVideoUrl(primaryMediaUrl) : !isValidImageUrl(primaryMediaUrl)) {
+                  return null;
+                }
                 return (
                   <div className="relative mb-4 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
                     {isVideoMedia ? (
@@ -686,6 +694,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                         src={primaryMediaUrl}
                         poster={post.thumbnailUrl}
                         controls
+                        hideOnInvalid
                         className="w-full h-auto max-h-[440px] object-contain"
                       />
                     ) : (
@@ -981,13 +990,17 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
             </div>
 
             <div className="p-4 sm:p-5 overflow-y-auto space-y-4">
-              {activeAnnouncementModal.mediaUrl && (
+              {activeAnnouncementModal.mediaUrl &&
+                (activeAnnouncementModal.mediaType === 'video'
+                  ? isValidVideoUrl(activeAnnouncementModal.mediaUrl)
+                  : isValidImageUrl(activeAnnouncementModal.mediaUrl)) && (
                 <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 w-full">
                   {activeAnnouncementModal.mediaType === 'video' ? (
                     <ResilientVideo
                       src={activeAnnouncementModal.mediaUrl}
                       poster={activeAnnouncementModal.thumbnailUrl}
                       controls
+                      hideOnInvalid
                       className="w-full h-auto max-h-80 object-contain"
                     />
                   ) : (

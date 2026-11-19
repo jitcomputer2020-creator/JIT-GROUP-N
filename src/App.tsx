@@ -94,6 +94,15 @@ const MainLayout: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  // Ensure unrelated story/search overlays close whenever Games hub / active game rooms mount
+  useEffect(() => {
+    if (activeTab === 'games') {
+      setViewingStory(null);
+      setIsSearchOpen(false);
+      setIsNotifOpen(false);
+    }
+  }, [activeTab]);
+
   const handleNavigate = (tab: NavTab) => {
     if (tab === 'admin') {
       handleOpenAdmin();
@@ -106,6 +115,11 @@ const MainLayout: React.FC = () => {
     }
     if (typeof window !== 'undefined' && isAdminPathActive()) {
       window.history.pushState(null, '', '/');
+    }
+    if (tab === 'games') {
+      setViewingStory(null);
+      setIsSearchOpen(false);
+      setIsNotifOpen(false);
     }
     setActiveTab(tab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -232,10 +246,12 @@ const MainLayout: React.FC = () => {
         onNavigate={handleNavigate}
       />
 
-      <StoryViewerModal
-        story={viewingStory}
-        onClose={() => setViewingStory(null)}
-      />
+      {activeTab !== 'games' && (
+        <StoryViewerModal
+          story={viewingStory}
+          onClose={() => setViewingStory(null)}
+        />
+      )}
     </div>
   );
 };

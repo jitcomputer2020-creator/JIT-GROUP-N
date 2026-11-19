@@ -293,6 +293,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // Match award duplicate guard
   const awardedMatchRef = useRef<Record<string, boolean>>({});
   const aiTimersRef = useRef<number[]>([]);
+  const ludoRollIntervalRef = useRef<number | null>(null);
+  const slRollIntervalRef = useRef<number | null>(null);
 
   const registerAiTimer = useCallback((fn: () => void, ms: number) => {
     const id = window.setTimeout(fn, ms);
@@ -303,6 +305,14 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const clearAiTimers = useCallback(() => {
     aiTimersRef.current.forEach((id) => window.clearTimeout(id));
     aiTimersRef.current = [];
+    if (ludoRollIntervalRef.current !== null) {
+      window.clearInterval(ludoRollIntervalRef.current);
+      ludoRollIntervalRef.current = null;
+    }
+    if (slRollIntervalRef.current !== null) {
+      window.clearInterval(slRollIntervalRef.current);
+      slRollIntervalRef.current = null;
+    }
   }, []);
 
   useEffect(() => {
@@ -1610,6 +1620,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         isOpenGroup: false,
         recycleRoomCode: oldCode,
       });
+      currentRoomRef.current = room;
       setCurrentRoom(room);
       attachFirestoreRoomSubscription(room.roomCode);
       showRewardToast(`New 4-digit room code generated: #${room.roomCode}`);
@@ -2373,12 +2384,19 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setLudoRolling(true);
     soundFx.playDice();
 
+    if (ludoRollIntervalRef.current !== null) {
+      window.clearInterval(ludoRollIntervalRef.current);
+    }
     const interval = window.setInterval(() => {
       setLudoDice(Math.floor(Math.random() * 6) + 1);
     }, 65);
+    ludoRollIntervalRef.current = interval;
 
     registerAiTimer(() => {
       window.clearInterval(interval);
+      if (ludoRollIntervalRef.current === interval) {
+        ludoRollIntervalRef.current = null;
+      }
       const cur = ludoStateRef.current;
       if (
         gameModeRef.current !== 'ai' &&
@@ -2593,35 +2611,35 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             multiplayerSocket.sendMove(room.roomCode, 'QUIZ_MOVE', txMerged, '');
             if (txMerged.scores) setQuizMultiplayerScores(txMerged.scores);
             if (txMerged.answersByQ) setQuizAnswersByQ(txMerged.answersByQ);
-            if (txMerged.finished || txMerged.index !== qIdxAtSubmit) {
-              registerAiTimer(() => {
-                if (!currentRoomRef.current || currentRoomRef.current.roomCode !== room.roomCode) return;
-                if (txMerged.finished) {
-                  setQuizFinished(true);
-                  const myFinal = Number(txMerged.scores?.[myId] ?? nextPlayerScore);
-                  const otherScores = Object.entries(txMerged.scores || {})
-                    .filter(([pid]) => pid !== myId)
-                    .map(([, val]) => Number(val || 0));
-                  const topOther = otherScores.length > 0 ? Math.max(...otherScores) : 0;
-                  const wonMatch = otherScores.length > 0 ? myFinal >= topOther : myFinal >= 300;
-                  const pts = wonMatch ? 55 : myFinal > 0 ? 25 : 10;
-                  triggerGameAward('quiz', {
-                    gameId: 'quiz',
-                    gameName: 'Quiz Battle',
-                    mode: gameModeRef.current,
-                    outcome: wonMatch ? 'win' : 'loss',
-                    pointsEarned: pts,
-                    scoreSummary:
-                      otherScores.length > 0
-                        ? `Scored ${myFinal} vs Opponent ${topOther}`
-                        : `Scored ${myFinal} pts`,
-                  });
-                } else if (typeof txMerged.index === 'number') {
-                  setQuizIndex(txMerged.index);
+            if (txMerged.finished) {
+              setQuizFinished(true);
+              const myFinal = Number(txMerged.scores?.[myId] ?? nextPlayerScore);
+              const otherScores = Object.entries(txMerged.scores || {})
+                .filter(([pid]) => pid !== myId)
+                .map(([, val]) => Number(val || 0));
+              const topOther = otherScores.length > 0 ? Math.max(...otherScores) : 0;
+              const wonMatch = otherScores.length > 0 ? myFinal >= topOther : myFinal >= 300;
+              const pts = wonMatch ? 55 : myFinal > 0 ? 25 : 10;
+              triggerGameAward('quiz', {
+                gameId: 'quiz',
+                gameName: 'Quiz Battle',
+                mode: gameModeRef.current,
+                outcome: wonMatch ? 'win' : 'loss',
+                pointsEarned: pts,
+                scoreSummary:
+                  otherScores.length > 0
+                    ? `Scored ${myFinal} vs Opponent ${topOther}`
+                    : `Scored ${myFinal} pts`,
+              });
+            } else if (typeof txMerged.index === 'number' && txMerged.index !== qIdxAtSubmit) {
+              const targetIdx = txMerged.index;
+              setQuizIndex((prevIdx) => {
+                if (prevIdx !== targetIdx) {
                   setSelectedOption(null);
                   setQuizTimer(15);
                 }
-              }, 650);
+                return targetIdx;
+              });
             }
             return;
           }
@@ -2726,7 +2744,18 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [selectedGame, quizIndex, quizFinished, selectedOption, subView, handleQuizNext]);
+  }, [
+    selectedGame,
+    quizIndex,
+    quizFinished,
+    selectedOption,
+    subView,
+    currentRoom,
+    waiting,
+    gameStarted,
+    isWaitingSpectator,
+    handleQuizNext,
+  ]);
 
   // --------------------------------------------------------------------------
   // GAME 4: CHESS LOGIC (Strict Legal Rules, Check/Checkmate/Stalemate, Promotion)
@@ -2989,12 +3018,19 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setSlRolling(true);
       soundFx.playDice();
 
+      if (slRollIntervalRef.current !== null) {
+        window.clearInterval(slRollIntervalRef.current);
+      }
       const interval = window.setInterval(() => {
         setSlDice(Math.floor(Math.random() * 6) + 1);
       }, 65);
+      slRollIntervalRef.current = interval;
 
       registerAiTimer(() => {
         window.clearInterval(interval);
+        if (slRollIntervalRef.current === interval) {
+          slRollIntervalRef.current = null;
+        }
         const room = currentRoomRef.current;
         if (gameModeRef.current !== 'ai' && room) {
           const expectedSeatId = side === 'p1' ? room.players[0]?.id : room.players[1]?.id;
@@ -4050,18 +4086,29 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               <div className="max-w-md mx-auto flex flex-col items-center">
                 <div className="w-full mb-3 flex items-center justify-between text-xs font-bold px-1">
                   <span className={slTurn === 'p1' ? 'text-blue-600' : 'text-slate-400'}>
-                    You 📍: Sq {slPositions.p1}/100
+                    {currentRoom && gameMode !== 'ai'
+                      ? currentRoom.players[0]?.id === activePlayer.id
+                        ? 'You'
+                        : currentRoom.players[0]?.name?.split(' ')[0] || 'P1'
+                      : 'You'}{' '}
+                    📍: Sq {slPositions.p1}/100
                   </span>
                   <button
                     type="button"
                     onClick={() => resetSnakeLadder(true)}
-                    className="text-xs font-semibold px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center gap-1"
+                    disabled={Boolean(currentRoom && isWaitingSpectator)}
+                    className="text-xs font-semibold px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-40 flex items-center gap-1"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     <span>Reset</span>
                   </button>
                   <span className={slTurn === 'p2' ? 'text-amber-500' : 'text-slate-400'}>
-                    {gameMode === 'ai' ? 'AI' : 'P2'} ⭐: Sq {slPositions.p2}/100
+                    {gameMode === 'ai'
+                      ? 'AI'
+                      : currentRoom && currentRoom.players[1]?.id === activePlayer.id
+                      ? 'You'
+                      : currentRoom?.players[1]?.name?.split(' ')[0] || 'P2'}{' '}
+                    ⭐: Sq {slPositions.p2}/100
                   </span>
                 </div>
 
@@ -4433,16 +4480,16 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       />
 
       {/* 7. In-Game Voice & Video Calling Dock */}
-      {activeCallType && (
+      {activeCallType && currentRoom && (
         <InGameCallOverlay
           callType={activeCallType}
-          isActive={!!activeCallType}
+          isActive={!!activeCallType && !!currentRoom}
           onEndCall={handleEndCall}
           callerName={
-            currentRoom?.players.find((p) => p.id !== activePlayer.id)?.name || 'Opponent'
+            currentRoom.players.find((p) => p.id !== activePlayer.id)?.name || 'Opponent'
           }
           callerAvatar={
-            currentRoom?.players.find((p) => p.id !== activePlayer.id)?.avatar
+            currentRoom.players.find((p) => p.id !== activePlayer.id)?.avatar
           }
         />
       )}

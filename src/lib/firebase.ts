@@ -52,6 +52,12 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
 import {
+  isPlaceholderOrInvalidMediaString,
+  isValidImageUrl,
+  isValidVideoUrl,
+  sanitizeVideoUrl,
+} from './mediaValidation';
+import {
   UserProfile,
   LeaderboardEntry,
   MatchHistoryRecord,
@@ -1969,6 +1975,7 @@ export async function joinFirestoreGameRoom(
         const hasOpenActiveSeat = parsed.players.length < seatLimit;
         const newEntry: RoomPlayer = {
           id: player.id,
+          ...(auth.currentUser?.uid ? { authUid: auth.currentUser.uid } : {}),
           name: (player.name || 'JIT Player').slice(0, 80),
           avatar: sanitizeRoomAvatarUrl(player.avatar),
           isHost: false,
@@ -2397,8 +2404,9 @@ export function subscribeToMyMatchmakingTicket(
     (snap) => {
       if (!snap.exists()) return;
       const ticket = parseMatchmakingTicket(snap.data());
-      if (ticket.status === 'matched' && /^\d{4}$/.test(ticket.matchedRoomCode)) {
-        onMatchedRoom(ticket.matchedRoomCode, ticket.matchedWithId);
+      const normalizedMatchedRoom = normalizeRoomId(ticket.matchedRoomCode);
+      if (ticket.status === 'matched' && normalizedMatchedRoom) {
+        onMatchedRoom(normalizedMatchedRoom, ticket.matchedWithId);
       }
     },
     (err) => {
@@ -2485,8 +2493,9 @@ export async function pairQueuePlayersIntoRoom(
         // If our own queue ticket was already matched by the other player concurrently, use THAT room!
         if (mySnap.exists()) {
           const myData = mySnap.data();
-          if (myData.status === 'matched' && /^\d{4}$/.test(String(myData.matchedRoomCode || ''))) {
-            return { existingRoomCode: String(myData.matchedRoomCode), room: null as MultiplayerRoom | null };
+          const matchedCode = normalizeRoomId(String(myData.matchedRoomCode || ''));
+          if (myData.status === 'matched' && matchedCode) {
+            return { existingRoomCode: matchedCode, room: null as MultiplayerRoom | null };
           }
         }
 
@@ -4884,18 +4893,7 @@ export async function uploadVideoAssetToCloud(
 }
 
 export function isAccessibleVideoUrl(url?: string): boolean {
-  if (typeof url !== 'string') return false;
-  const clean = url.trim();
-  if (!clean) return false;
-  return (
-    clean.startsWith('https://') ||
-    clean.startsWith('http://') ||
-    clean.startsWith('/api/media/') ||
-    clean.startsWith('/assets/') ||
-    clean.startsWith('data:video/') ||
-    clean.startsWith('fschunk://') ||
-    clean.startsWith('blob:')
-  );
+  return isValidVideoUrl(url);
 }
 
 function normalizeEpochMs(value: unknown): number | undefined {
@@ -4914,11 +4912,14 @@ function normalizeEpochMs(value: unknown): number | undefined {
 }
 
 function unwrapSingleMediaString(val: unknown): string {
-  if (typeof val === 'string') return val.trim();
-  if (val && typeof val === 'object' && 'url' in val && typeof (val as any).url === 'string') {
-    return (val as any).url.trim();
+  let raw = '';
+  if (typeof val === 'string') {
+    raw = val.trim();
+  } else if (val && typeof val === 'object' && 'url' in val && typeof (val as any).url === 'string') {
+    raw = (val as any).url.trim();
   }
-  return '';
+  if (!raw || isPlaceholderOrInvalidMediaString(raw)) return '';
+  return raw;
 }
 
 function isLikelyVideoUrl(url?: string): boolean {
@@ -4936,6 +4937,14 @@ function isLikelyVideoUrl(url?: string): boolean {
   );
 }
 
+function sanitizePostCandidateUrl(url: string): string | undefined {
+  if (!url || isPlaceholderOrInvalidMediaString(url)) return undefined;
+  if (isLikelyVideoUrl(url)) {
+    return sanitizeVideoUrl(url);
+  }
+  return isValidImageUrl(url) ? url : undefined;
+}
+
 function unwrapPostMediaFields(data: Record<string, any>): {
   mediaUrls: string[] | undefined;
   mediaUrl: string | undefined;
@@ -4944,10 +4953,18 @@ function unwrapPostMediaFields(data: Record<string, any>): {
   primaryUrl: string | undefined;
 } {
   const candidates: string[] = [];
+  const pushCandidate = (rawVal: unknown, unshift = false) => {
+    const unwrapped = unwrapSingleMediaString(rawVal);
+    const valid = unwrapped ? sanitizePostCandidateUrl(unwrapped) : undefined;
+    if (valid && !candidates.includes(valid)) {
+      if (unshift) candidates.unshift(valid);
+      else candidates.push(valid);
+    }
+  };
+
   if (Array.isArray(data.mediaUrls)) {
     for (const entry of data.mediaUrls) {
-      const s = unwrapSingleMediaString(entry);
-      if (s && !candidates.includes(s)) candidates.push(s);
+      pushCandidate(entry);
     }
   } else if (typeof data.mediaUrls === 'string' && data.mediaUrls.trim()) {
     const raw = data.mediaUrls.trim();
@@ -4956,36 +4973,40 @@ function unwrapPostMediaFields(data: Record<string, any>): {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
           for (const entry of parsed) {
-            const s = unwrapSingleMediaString(entry);
-            if (s && !candidates.includes(s)) candidates.push(s);
+            pushCandidate(entry);
           }
         }
       } catch {
-        candidates.push(raw);
+        pushCandidate(raw);
       }
     } else {
-      candidates.push(raw);
+      pushCandidate(raw);
     }
   }
 
-  const videoUrl = unwrapSingleMediaString(data.videoUrl) || undefined;
-  const mediaUrl = unwrapSingleMediaString(data.mediaUrl) || undefined;
-  const imageUrl = unwrapSingleMediaString(data.imageUrl) || undefined;
+  const rawVideoUrl = unwrapSingleMediaString(data.videoUrl);
+  const videoUrl = sanitizeVideoUrl(rawVideoUrl);
+  const rawMediaUrl = unwrapSingleMediaString(data.mediaUrl);
+  const mediaUrl = rawMediaUrl ? sanitizePostCandidateUrl(rawMediaUrl) : undefined;
+  const rawImageUrl = unwrapSingleMediaString(data.imageUrl);
+  const imageUrl = rawImageUrl && isValidImageUrl(rawImageUrl) ? rawImageUrl : undefined;
 
   if (videoUrl && !candidates.includes(videoUrl)) candidates.unshift(videoUrl);
   if (mediaUrl && !candidates.includes(mediaUrl)) candidates.push(mediaUrl);
   if (imageUrl && !candidates.includes(imageUrl)) candidates.push(imageUrl);
 
   const primaryUrl = candidates[0];
-  let mediaType: 'image' | 'video' | 'none' =
-    data.mediaType === 'video' || data.mediaType === 'image' || data.mediaType === 'none'
-      ? data.mediaType
-      : 'none';
+  let mediaType: 'image' | 'video' | 'none' = 'none';
 
-  if (videoUrl || (primaryUrl && isLikelyVideoUrl(primaryUrl))) {
+  if (videoUrl || (primaryUrl && isLikelyVideoUrl(primaryUrl) && isValidVideoUrl(primaryUrl))) {
     mediaType = 'video';
-  } else if (mediaType === 'none' && primaryUrl) {
+  } else if (primaryUrl && isValidImageUrl(primaryUrl)) {
     mediaType = 'image';
+  } else if (
+    (data.mediaType === 'image' || data.mediaType === 'video') &&
+    primaryUrl
+  ) {
+    mediaType = data.mediaType;
   }
 
   return {
@@ -5109,7 +5130,8 @@ export function subscribeToFirestoreReels(
         const data = d.data();
         const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
         const createdAtMs = Number(data.createdAtMs || 0);
-        const videoUrl = unwrapSingleMediaString(data.videoUrl || data.mediaUrl || (Array.isArray(data.mediaUrls) ? data.mediaUrls[0] : ''));
+        const rawReelVideoUrl = unwrapSingleMediaString(data.videoUrl || data.mediaUrl || (Array.isArray(data.mediaUrls) ? data.mediaUrls[0] : ''));
+        const videoUrl = sanitizeVideoUrl(rawReelVideoUrl) || '';
         if (
           isVideoContentExpired(
             { expiresAt, createdAtMs, mediaType: 'video', videoUrl },
@@ -5134,8 +5156,8 @@ export function subscribeToFirestoreReels(
           creatorName: String(data.creatorName || 'JIT Member'),
           creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
           videoUrl,
-          mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
-          thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+          mediaUrl: sanitizeVideoUrl(data.mediaUrl),
+          thumbnailUrl: typeof data.thumbnailUrl === 'string' && isValidImageUrl(data.thumbnailUrl) ? data.thumbnailUrl : undefined,
           caption: String(data.caption || ''),
           musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
           likesCount: Number(data.likesCount || 0),
@@ -5794,7 +5816,8 @@ export async function adminFetchUserActivityClient(
       const data = d.data();
       const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
       const createdAtMs = Number(data.createdAtMs || 0);
-      const videoUrl = unwrapSingleMediaString(data.videoUrl || data.mediaUrl || (Array.isArray(data.mediaUrls) ? data.mediaUrls[0] : ''));
+      const rawReelVideoUrl = unwrapSingleMediaString(data.videoUrl || data.mediaUrl || (Array.isArray(data.mediaUrls) ? data.mediaUrls[0] : ''));
+      const videoUrl = sanitizeVideoUrl(rawReelVideoUrl) || '';
       if (
         isVideoContentExpired({ expiresAt, createdAtMs, mediaType: 'video', videoUrl })
       ) {
@@ -5814,8 +5837,8 @@ export async function adminFetchUserActivityClient(
         creatorName: String(data.creatorName || 'JIT Member'),
         creatorAvatar: typeof data.creatorAvatar === 'string' ? data.creatorAvatar : undefined,
         videoUrl,
-        mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
-        thumbnailUrl: typeof data.thumbnailUrl === 'string' ? data.thumbnailUrl : undefined,
+        mediaUrl: sanitizeVideoUrl(data.mediaUrl),
+        thumbnailUrl: typeof data.thumbnailUrl === 'string' && isValidImageUrl(data.thumbnailUrl) ? data.thumbnailUrl : undefined,
         caption: String(data.caption || ''),
         musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
         likesCount: Number(data.likesCount || 0),

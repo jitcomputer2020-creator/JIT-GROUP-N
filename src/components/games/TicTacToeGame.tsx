@@ -126,6 +126,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
 
   // Real-Time Firestore Single-Source-of-Truth Subscription
   useEffect(() => {
+    isWritingRef.current = false;
     if (!roomId || gameMode === 'ai') {
       setRoomData(null);
       setBoardState(Array<CellValue>(9).fill(null));
@@ -173,7 +174,10 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       }
     );
 
-    return () => unsub();
+    return () => {
+      isWritingRef.current = false;
+      unsub();
+    };
   }, [roomId, gameMode]);
 
   const activeBoard = isMultiplayer ? boardState : aiBoard;
@@ -301,6 +305,13 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
             scores: nextScores,
             status: nextWinner ? 'finished' : 'active',
             moveAction: 'TTT_MOVE',
+            lastMove: {
+              action: 'TTT_MOVE',
+              byPlayerId: currentActorUid,
+              byAuthUid: auth.currentUser?.uid || null,
+              summary: `${mySymbol} -> cell ${index + 1}`,
+              timestampMs: Date.now(),
+            },
             lastUpdated: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -424,6 +435,13 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
           scores,
           status: 'active',
           moveAction: 'REMATCH',
+          lastMove: {
+            action: 'REMATCH',
+            byPlayerId: auth.currentUser?.uid || localPlayerId,
+            byAuthUid: auth.currentUser?.uid || null,
+            summary: 'TicTacToe rematch started',
+            timestampMs: Date.now(),
+          },
           lastUpdated: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });

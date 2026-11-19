@@ -142,6 +142,9 @@ export function useRoomVoiceChat({
   const syncRemoteAudioMuteStates = useCallback(
     (speakerOn: boolean, mutedIds: Set<string>) => {
       const ctx = sharedAudioCtxRef.current;
+      if (speakerOn && ctx && ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
 
       remotePipelinesRef.current.forEach((pipeline, peerId) => {
         const effectiveMuted = !speakerOn || mutedIds.has(peerId);
@@ -308,6 +311,7 @@ export function useRoomVoiceChat({
       rawMicStreamRef.current = null;
     }
     peerConnectionsRef.current.forEach((pc) => {
+      if (pc.connectionState === 'closed' || pc.signalingState === 'closed') return;
       pc.getSenders().forEach((sender) => {
         if (sender.track?.kind === 'audio') {
           sender.replaceTrack(null).catch(() => {});
@@ -752,6 +756,7 @@ export function useRoomVoiceChat({
 
       if (audioTrack) {
         peerConnectionsRef.current.forEach((pc, remoteId) => {
+          if (pc.connectionState === 'closed' || pc.signalingState === 'closed') return;
           const existingAudioSender = pc
             .getSenders()
             .find((s) => s.track?.kind === 'audio' || !s.track);
@@ -770,13 +775,13 @@ export function useRoomVoiceChat({
               } catch {
                 // ignore read-only direction in older browsers
               }
-              if (currentRoom) {
+              if (currentRoom && pc.signalingState === 'stable') {
                 sendOfferToPeer(remoteId, currentRoom).catch(() => {});
               }
             }
           } else {
             pc.addTrack(audioTrack, cleanStream);
-            if (currentRoom) {
+            if (currentRoom && pc.signalingState === 'stable') {
               sendOfferToPeer(remoteId, currentRoom).catch(() => {});
             }
           }

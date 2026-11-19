@@ -10,6 +10,7 @@ import { NavTab, UserProfile } from '../types';
 import { INITIAL_ACHIEVEMENTS, INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
 import { getCloudProfileById, deriveUsername, isVideoContentExpired } from '../lib/firebase';
+import { isValidImageUrl, isValidVideoUrl } from '../lib/mediaValidation';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
 import {
@@ -536,6 +537,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                     (typeof post.mediaUrl === 'string' && post.mediaUrl.trim() ? post.mediaUrl.trim() : undefined);
                   if (!primaryMediaUrl || (post.mediaType === 'none' && !post.videoUrl)) return null;
                   const isVideoMedia = post.mediaType === 'video' || Boolean(post.videoUrl);
+                  if (isVideoMedia ? !isValidVideoUrl(primaryMediaUrl) : !isValidImageUrl(primaryMediaUrl)) {
+                    return null;
+                  }
                   return (
                     <div className="mt-3 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
                       {isVideoMedia ? (
@@ -543,6 +547,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                           src={primaryMediaUrl}
                           poster={post.thumbnailUrl}
                           controls
+                          hideOnInvalid
                           className="w-full h-auto max-h-72 object-contain"
                         />
                       ) : (

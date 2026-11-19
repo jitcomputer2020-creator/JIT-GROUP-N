@@ -82,6 +82,14 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
 
   const lastAppliedMoveIdRef = useRef<string | null>(null);
   const spinTimersRef = useRef<number[]>([]);
+  const roomScoresRef = useRef(roomScores);
+  roomScoresRef.current = roomScores;
+  const roomSpinsUsedRef = useRef(roomSpinsUsed);
+  roomSpinsUsedRef.current = roomSpinsUsed;
+  const roundNumRef = useRef(roundNum);
+  roundNumRef.current = roundNum;
+  const spinsUsedRef = useRef(spinsUsed);
+  spinsUsedRef.current = spinsUsed;
 
   const isMultiplayer = Boolean(currentRoom && gameMode !== 'ai');
   const myId = activePlayerId || userId;
@@ -113,6 +121,28 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
     return () => clearSpinTimers();
   }, [clearSpinTimers]);
 
+  // Reset multiplayer spin state cleanly when switching rooms or modes
+  useEffect(() => {
+    clearSpinTimers();
+    lastAppliedMoveIdRef.current = null;
+    setRotation(0);
+    setIsSpinning(false);
+    setLastPrize(null);
+    setLastWinnerName(null);
+    setRoomScores({});
+    setRoomSpinsUsed({});
+    setRoundNum(1);
+  }, [currentRoom?.roomCode, gameMode, clearSpinTimers]);
+
+  // Safety watchdog so remote disconnects mid-spin never leave the wheel permanently locked
+  useEffect(() => {
+    if (!isSpinning || !isMultiplayer) return;
+    const watchdog = window.setTimeout(() => {
+      setIsSpinning(false);
+    }, 6000);
+    return () => window.clearTimeout(watchdog);
+  }, [isSpinning, isMultiplayer]);
+
   const applySpinSnapshot = useCallback((incoming: SpinSyncedState | null | undefined) => {
     if (!incoming || typeof incoming !== 'object') return;
     if (incoming.moveId && lastAppliedMoveIdRef.current === incoming.moveId) {
@@ -138,6 +168,8 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
     }
     if (incoming.lastWinnerName) {
       setLastWinnerName(incoming.lastWinnerName);
+    } else if (!incoming.isSpinning && !incoming.spinResult) {
+      setLastWinnerName(null);
     }
     if (incoming.spinResult && !incoming.isSpinning) {
       const matchedSlice =
@@ -148,7 +180,7 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
           textColor: '#FFFFFF',
         };
       setLastPrize(matchedSlice);
-    } else if (incoming.isSpinning) {
+    } else {
       setLastPrize(null);
     }
   }, []);
@@ -239,17 +271,20 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
       soundFx.playWin();
 
       if (isMultiplayer && onSyncSpin && currentRoom) {
+        const latestUsed = roomSpinsUsedRef.current;
+        const latestScores = roomScoresRef.current;
+        const latestRound = roundNumRef.current;
         const nextUsedMap: Record<string, number> = {
-          ...roomSpinsUsed,
-          [myId]: (roomSpinsUsed[myId] || 0) + 1,
+          ...latestUsed,
+          [myId]: (latestUsed[myId] || 0) + 1,
         };
         const nextScoresMap: Record<string, number> = {
-          ...roomScores,
-          [myId]: (roomScores[myId] || 0) + chosen.points,
+          ...latestScores,
+          [myId]: (latestScores[myId] || 0) + chosen.points,
         };
         setRoomSpinsUsed(nextUsedMap);
         setRoomScores(nextScoresMap);
-        const nextRound = roundNum + 1;
+        const nextRound = latestRound + 1;
         setRoundNum(nextRound);
 
         const seatIdx = activePlayers.findIndex((p) => p.id === myId);
@@ -277,7 +312,7 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
           'active'
         );
       } else {
-        const nextUsed = spinsUsed + 1;
+        const nextUsed = spinsUsedRef.current + 1;
         setSpinsUsed(nextUsed);
         if (typeof window !== 'undefined') {
           localStorage.setItem(storageKey, String(nextUsed));

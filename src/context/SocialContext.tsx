@@ -31,6 +31,12 @@ import { APP_CONFIG } from '../constants/branding';
 import { purgeExpiredLocalMedia } from '../services/mediaStorage';
 import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
 import {
+  isPlaceholderOrInvalidMediaString,
+  isValidImageUrl,
+  isValidVideoUrl,
+  sanitizeVideoUrl,
+} from '../lib/mediaValidation';
+import {
   VIDEO_EXPIRY_MS,
   deriveUsername,
   isVideoContentExpired,
@@ -143,29 +149,52 @@ function safeSetLocalStorage(key: string, value: unknown): void {
   }
 }
 
+function sanitizePostRecordMedia(p: Post): Post {
+  const validMediaUrls = p.mediaUrls?.filter(
+    (u) =>
+      typeof u === 'string' &&
+      !isPlaceholderOrInvalidMediaString(u) &&
+      (isValidVideoUrl(u) || isValidImageUrl(u)) &&
+      !(u.startsWith('data:video/') && u.length > 250_000)
+  );
+  const safeVideoUrl = sanitizeVideoUrl(p.videoUrl);
+  const safeMediaUrl =
+    p.mediaUrl && !isPlaceholderOrInvalidMediaString(p.mediaUrl) && (isValidVideoUrl(p.mediaUrl) || isValidImageUrl(p.mediaUrl))
+      ? p.mediaUrl
+      : undefined;
+  const hasAnyMedia = Boolean(
+    (validMediaUrls && validMediaUrls.length > 0) || safeVideoUrl || safeMediaUrl
+  );
+  return {
+    ...p,
+    mediaUrls: validMediaUrls && validMediaUrls.length > 0 ? validMediaUrls : undefined,
+    videoUrl: safeVideoUrl,
+    mediaUrl: safeMediaUrl,
+    mediaType: hasAnyMedia ? p.mediaType : 'none',
+  };
+}
+
 function sanitizePostsForCache(list: Post[]): Post[] {
   return list
     .filter((p) => !isVideoContentExpired(p))
     .slice(0, 60)
-    .map((p) => ({
-      ...p,
-      mediaUrls: p.mediaUrls?.filter(
-        (u) => !(typeof u === 'string' && u.startsWith('data:video/') && u.length > 250_000)
-      ),
-    }));
+    .map(sanitizePostRecordMedia);
 }
 
 function sanitizeReelsForCache(list: Reel[]): Reel[] {
   return list
     .filter((r) => !isVideoContentExpired(r))
     .slice(0, 50)
-    .map((r) => ({
-      ...r,
-      videoUrl:
-        r.videoUrl && r.videoUrl.startsWith('data:video/') && r.videoUrl.length > 250_000
-          ? ''
-          : r.videoUrl,
-    }));
+    .map((r) => {
+      const cleanUrl = sanitizeVideoUrl(r.videoUrl) || '';
+      return {
+        ...r,
+        videoUrl:
+          cleanUrl.startsWith('data:video/') && cleanUrl.length > 250_000
+            ? ''
+            : cleanUrl,
+      };
+    });
 }
 
 const SEED_COMMENTS: Record<string, Comment[]> = {
@@ -266,7 +295,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         try {
           const parsed = JSON.parse(saved) as Post[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            return parsed.filter((p) => !isVideoContentExpired(p));
+            return parsed.filter((p) => !isVideoContentExpired(p)).map(sanitizePostRecordMedia);
           }
         } catch (e) {
           console.error('Failed to parse cached posts', e);
@@ -299,7 +328,9 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         try {
           const parsed = JSON.parse(saved) as Reel[];
           if (Array.isArray(parsed) && parsed.length > 0) {
-            return parsed.filter((r) => !isVideoContentExpired(r));
+            return parsed
+              .filter((r) => !isVideoContentExpired(r))
+              .map((r) => ({ ...r, videoUrl: sanitizeVideoUrl(r.videoUrl) || '' }));
           }
         } catch (e) {
           console.error('Failed to parse cached reels', e);
@@ -457,10 +488,10 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         for (const r of cloudReels) {
           const prevMatch = prevMap.get(r.id);
           const resolvedVideoUrl =
-            (r.videoUrl && r.videoUrl.trim()) ||
-            (r.mediaUrl && r.mediaUrl.trim()) ||
-            prevMatch?.videoUrl ||
-            prevMatch?.mediaUrl ||
+            sanitizeVideoUrl(r.videoUrl) ||
+            sanitizeVideoUrl(r.mediaUrl) ||
+            sanitizeVideoUrl(prevMatch?.videoUrl) ||
+            sanitizeVideoUrl(prevMatch?.mediaUrl) ||
             '';
           const candidate: Reel = { ...r, videoUrl: resolvedVideoUrl };
           if (!deletedReelIdsRef.current.has(r.id) && !isVideoContentExpired(candidate)) {
@@ -474,7 +505,10 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             !deletedReelIdsRef.current.has(localR.id) &&
             !isVideoContentExpired(localR)
           ) {
-            byId.set(localR.id, localR);
+            byId.set(localR.id, {
+              ...localR,
+              videoUrl: sanitizeVideoUrl(localR.videoUrl) || '',
+            });
           }
         }
         for (const seedR of SEED_REELS) {
@@ -500,16 +534,25 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         const byId = new Map<string, Post>();
         for (const p of cloudPosts) {
           const prevMatch = prevMap.get(p.id);
-          const fallbackUrl = p.videoUrl || p.mediaUrl || prevMatch?.videoUrl || prevMatch?.mediaUrl;
+          const sanitizedCloud = sanitizePostRecordMedia(p);
+          const sanitizedPrev = prevMatch ? sanitizePostRecordMedia(prevMatch) : undefined;
+          const fallbackUrl =
+            sanitizedCloud.videoUrl ||
+            sanitizedCloud.mediaUrl ||
+            sanitizedPrev?.videoUrl ||
+            sanitizedPrev?.mediaUrl;
           const resolvedMediaUrls =
-            p.mediaUrls && p.mediaUrls.length > 0
-              ? p.mediaUrls
-              : prevMatch?.mediaUrls && prevMatch.mediaUrls.length > 0
-              ? prevMatch.mediaUrls
+            sanitizedCloud.mediaUrls && sanitizedCloud.mediaUrls.length > 0
+              ? sanitizedCloud.mediaUrls
+              : sanitizedPrev?.mediaUrls && sanitizedPrev.mediaUrls.length > 0
+              ? sanitizedPrev.mediaUrls
               : fallbackUrl
               ? [fallbackUrl]
               : undefined;
-          const candidate: Post = { ...p, ...(resolvedMediaUrls ? { mediaUrls: resolvedMediaUrls } : {}) };
+          const candidate: Post = sanitizePostRecordMedia({
+            ...sanitizedCloud,
+            ...(resolvedMediaUrls ? { mediaUrls: resolvedMediaUrls } : {}),
+          });
           if (!deletedPostIdsRef.current.has(p.id) && !isVideoContentExpired(candidate)) {
             const isLiked = currentUser?.id ? (p.likedBy || []).includes(currentUser.id) : false;
             const isSaved = savedPostIds.includes(p.id);
@@ -522,7 +565,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
             !deletedPostIdsRef.current.has(lp.id) &&
             !isVideoContentExpired(lp)
           ) {
-            byId.set(lp.id, lp);
+            byId.set(lp.id, sanitizePostRecordMedia(lp));
           }
         }
         return Array.from(byId.values()).sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));

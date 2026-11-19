@@ -110,6 +110,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
   const animRef = useRef<number | null>(null);
   const aiTimerRef = useRef<number | null>(null);
   const finishedRef = useRef(false);
+  const lastAwardedFinishRef = useRef<string | null>(null);
   const lastAppliedMoveIdRef = useRef<string | null>(null);
 
   const [strikerX, setStrikerX] = useState(SIZE / 2);
@@ -293,6 +294,41 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     }
   }, [gameMode, currentRoom]);
 
+  // Reset Carrom board state cleanly when switching rooms or toggling AI/multiplayer mode
+  useEffect(() => {
+    if (animRef.current) {
+      cancelAnimationFrame(animRef.current);
+      animRef.current = null;
+    }
+    if (aiTimerRef.current) {
+      window.clearTimeout(aiTimerRef.current);
+      aiTimerRef.current = null;
+    }
+    finishedRef.current = false;
+    lastAwardedFinishRef.current = null;
+    lastAppliedMoveIdRef.current = null;
+    coinsRef.current = createInitialCoins();
+    strikerRef.current = {
+      id: 'striker',
+      x: SIZE / 2,
+      y: BASELINE_Y_PLAYER,
+      vx: 0,
+      vy: 0,
+      r: 12,
+      type: 'striker',
+      pocketed: false,
+    };
+    setStrikerX(SIZE / 2);
+    setAimAngle(0);
+    setPower(72);
+    setTurn('player');
+    setIsSimulating(false);
+    setScores({ player: 0, opponent: 0, queenHolder: '' });
+    setWinnerMsg(null);
+    setStatusLog(['Position striker, set angle & power, or tap the board to aim!']);
+    drawBoard();
+  }, [currentRoom?.roomCode, gameMode, drawBoard]);
+
   const applyCarromSnapshotState = useCallback(
     (incoming: CarromSyncedState) => {
       if (!incoming) return;
@@ -326,8 +362,33 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
       if (Array.isArray(incoming.statusLog) && incoming.statusLog.length > 0) {
         setStatusLog(incoming.statusLog);
       }
-      finishedRef.current = Boolean(incoming.finished);
+
+      const wasFinished = finishedRef.current;
+      const isNowFinished = Boolean(incoming.finished);
+      finishedRef.current = isNowFinished;
+      if (!isNowFinished) {
+        lastAwardedFinishRef.current = null;
+      }
       setWinnerMsg(incoming.winnerMsg ?? null);
+
+      if (isNowFinished && !wasFinished && currentRoomRef.current && gameModeRef.current !== 'ai') {
+        const finalScores = incoming.scores || scoresRef.current;
+        const finishSig = `${currentRoomRef.current.roomCode}:${finalScores.player}:${finalScores.opponent}:${incoming.winnerMsg || ''}`;
+        if (lastAwardedFinishRef.current !== finishSig && incoming.byPlayerId !== activePlayerId) {
+          lastAwardedFinishRef.current = finishSig;
+          const p1Won = finalScores.player >= finalScores.opponent;
+          const didMySideWin = mySide === 'player' ? p1Won : !p1Won;
+          const summary = didMySideWin
+            ? `Victory ${finalScores.player}-${finalScores.opponent}`
+            : `Match ${finalScores.player}-${finalScores.opponent}`;
+          if (didMySideWin) {
+            soundFx.playWin();
+          } else {
+            soundFx.playMove();
+          }
+          onMatchFinish(didMySideWin ? 'win' : 'loss', summary, didMySideWin ? 45 : 10);
+        }
+      }
 
       const nextStrikerX =
         typeof incoming.striker?.x === 'number' && Number.isFinite(incoming.striker.x)
@@ -353,7 +414,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
       setStrikerX(nextStrikerX);
       drawBoard();
     },
-    [drawBoard]
+    [activePlayerId, drawBoard, mySide, onMatchFinish]
   );
 
   // Hydrate board state from parent syncedState
@@ -554,6 +615,8 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
           computedWinnerMsg = p1Won
             ? `White (P1) won Carrom (${nextScores.player} vs ${nextScores.opponent})!`
             : `Black (P2) won Carrom (${nextScores.opponent} vs ${nextScores.player})!`;
+          const finishSig = `${currentRoomRef.current?.roomCode || 'ai'}:${nextScores.player}:${nextScores.opponent}:${computedWinnerMsg}`;
+          lastAwardedFinishRef.current = finishSig;
           setWinnerMsg(computedWinnerMsg);
           soundFx.playWin();
           onMatchFinish(didMySideWin ? 'win' : 'loss', summary, didMySideWin ? 45 : 10);
@@ -605,6 +668,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
               statusLog: nextLogs,
               winnerMsg: computedWinnerMsg,
               finished: finishedRef.current,
+              byPlayerId: activePlayerId,
             },
             nextTurnActorId,
             finishedRef.current ? 'finished' : 'active'
@@ -633,7 +697,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
 
       animRef.current = requestAnimationFrame(step);
     },
-    [aiDifficulty, drawBoard, isAuthorizedMultiplayerActor, isSimulating, mySide, onMatchFinish, onSyncMove]
+    [aiDifficulty, activePlayerId, drawBoard, isAuthorizedMultiplayerActor, isSimulating, mySide, onMatchFinish, onSyncMove]
   );
 
   const handleCanvasPointer = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -785,8 +849,9 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
           </button>
           <button
             type="button"
+            disabled={Boolean(currentRoom && isWaitingSpectator)}
             onClick={() => resetCarrom(true)}
-            className="px-4 py-2.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-100 rounded-xl text-xs font-bold flex items-center gap-1.5 min-h-[44px]"
+            className="px-4 py-2.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 disabled:opacity-45 text-slate-800 dark:text-slate-100 rounded-xl text-xs font-bold flex items-center gap-1.5 min-h-[44px]"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>Reset</span>
