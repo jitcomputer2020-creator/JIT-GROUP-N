@@ -42,7 +42,10 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
   onToggleSpeaker,
   onClearError,
 }) => {
-  const remotePeers = voicePeers.filter((p) => p.peerId !== localPlayerId);
+  const sanitizedLocalId = (localPlayerId || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 72);
+  const remotePeers = voicePeers.filter(
+    (p) => p.peerId !== localPlayerId && p.peerId !== sanitizedLocalId
+  );
   const activeTalkingPeers = remotePeers.filter(
     (p) => p.micEnabled && !hostMutedVoiceIds.includes(p.peerId)
   );
@@ -67,7 +70,9 @@ export const InGameVoiceHud: React.FC<InGameVoiceHudProps> = ({
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <span className="text-xs font-bold text-white truncate">
-                {roomCode ? `Live Voice · Room #${roomCode}` : 'Voice Chat HUD'}
+                {roomCode
+                  ? `Live Voice · Room #${roomCode.length > 8 ? roomCode.slice(0, 6).toUpperCase() : roomCode}`
+                  : 'Voice Chat HUD'}
               </span>
               {gameMode !== 'ai' && roomCode && (
                 <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">

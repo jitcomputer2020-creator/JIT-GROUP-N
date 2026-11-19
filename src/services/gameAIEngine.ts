@@ -586,10 +586,20 @@ export const QUIZ_QUESTION_BANK: QuizQuestion[] = [
   },
 ];
 
-function shuffleQuestions(list: QuizQuestion[]): QuizQuestion[] {
+function createSeededRng(seed: number): () => number {
+  let t = (seed >>> 0) || 1;
+  return () => {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleQuestions(list: QuizQuestion[], rng: () => number = Math.random): QuizQuestion[] {
   const arr = [...list];
   for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng() * (i + 1));
     [arr[i], arr[j]] = [arr[j], arr[i]];
   }
   return arr;
@@ -597,30 +607,34 @@ function shuffleQuestions(list: QuizQuestion[]): QuizQuestion[] {
 
 export function pickShuffledQuizQuestions(
   count = 10,
-  excludeQuestions: string[] = []
+  excludeQuestions: string[] = [],
+  seed?: number
 ): QuizQuestion[] {
+  const rng = typeof seed === 'number' && Number.isFinite(seed) ? createSeededRng(seed) : Math.random;
   const safeCount = Math.max(5, Math.min(20, count));
   const csTarget = Math.round(safeCount * 0.7);
   const generalTarget = safeCount - csTarget;
   const excludeSet = new Set(excludeQuestions.map((q) => q.trim().toLowerCase()));
 
   const csFresh = shuffleQuestions(
-    QUIZ_QUESTION_BANK.filter((q) => q.domain === 'cs' && !excludeSet.has(q.q.toLowerCase()))
+    QUIZ_QUESTION_BANK.filter((q) => q.domain === 'cs' && !excludeSet.has(q.q.toLowerCase())),
+    rng
   );
   const csAll = csFresh.length >= csTarget
     ? csFresh
-    : [...csFresh, ...shuffleQuestions(QUIZ_QUESTION_BANK.filter((q) => q.domain === 'cs'))];
+    : [...csFresh, ...shuffleQuestions(QUIZ_QUESTION_BANK.filter((q) => q.domain === 'cs'), rng)];
 
   const genFresh = shuffleQuestions(
-    QUIZ_QUESTION_BANK.filter((q) => q.domain === 'general' && !excludeSet.has(q.q.toLowerCase()))
+    QUIZ_QUESTION_BANK.filter((q) => q.domain === 'general' && !excludeSet.has(q.q.toLowerCase())),
+    rng
   );
   const genAll = genFresh.length >= generalTarget
     ? genFresh
-    : [...genFresh, ...shuffleQuestions(QUIZ_QUESTION_BANK.filter((q) => q.domain === 'general'))];
+    : [...genFresh, ...shuffleQuestions(QUIZ_QUESTION_BANK.filter((q) => q.domain === 'general'), rng)];
 
   const pickedCs = csAll.slice(0, csTarget);
   const pickedGen = genAll.slice(0, generalTarget);
-  return shuffleQuestions([...pickedCs, ...pickedGen]);
+  return shuffleQuestions([...pickedCs, ...pickedGen], rng);
 }
 
 export function getQuizAIMove(

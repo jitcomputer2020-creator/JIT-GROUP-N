@@ -27,7 +27,6 @@ import {
   Check,
   X,
   Video,
-  Clock,
   ShieldAlert,
   Loader2,
 } from 'lucide-react';
@@ -195,12 +194,6 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
             <span className="text-[11px] text-white/80">
               {safeIndex + 1}/{activeReels.length}
             </span>
-            {typeof currentReel.expiresAt === 'number' && currentReel.expiresAt > Date.now() && (
-              <span className="text-[10px] font-semibold bg-black/45 backdrop-blur-md text-amber-300 px-2 py-0.5 rounded-lg flex items-center gap-1">
-                <Clock className="w-3 h-3" />
-                {Math.max(1, Math.ceil((currentReel.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))}d
-              </span>
-            )}
           </div>
 
           <div className="flex items-center gap-2">

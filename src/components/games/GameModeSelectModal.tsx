@@ -189,7 +189,13 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
             }`}
           >
             <Bot className="w-3.5 h-3.5" />
-            <span>{gameId === 'truth_dare' ? 'Party Solo' : 'AI Bot'}</span>
+            <span>
+              {gameId === 'truth_dare'
+                ? 'Party Solo'
+                : gameId === 'spin_wheel'
+                ? 'Solo Bonus'
+                : 'AI Bot'}
+            </span>
           </button>
         </div>
 
@@ -432,16 +438,22 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
             <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-300 font-bold text-sm">
               <Bot className="w-4 h-4" />
               <span>
-                {gameId === 'truth_dare' ? 'Local Party / Solo Deck' : 'Play Against Campus AI Bot'}
+                {gameId === 'truth_dare'
+                  ? 'Local Party / Solo Deck'
+                  : gameId === 'spin_wheel'
+                  ? 'Daily Solo Bonus Wheel'
+                  : 'Play Against Campus AI Bot'}
               </span>
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
               {gameId === 'truth_dare'
                 ? 'Launch an instant Truth & Dare session right here on this screen with System Choice & Own Choice prompts.'
+                : gameId === 'spin_wheel'
+                ? 'Spin the wheel solo to win daily JIT Points, or choose With Friend / Random / Open Group above to spin live with peers!'
                 : `Sharpen your skills against an AI opponent making authentic legal moves according to official ${gameName} rules. Choose your challenge level:`}
             </p>
 
-            {gameId !== 'truth_dare' && (
+            {gameId !== 'truth_dare' && gameId !== 'spin_wheel' && (
               <div className="grid grid-cols-3 gap-2">
                 {(
                   [
@@ -481,6 +493,8 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
               <span>
                 {gameId === 'truth_dare'
                   ? 'Start Party Truth & Dare'
+                  : gameId === 'spin_wheel'
+                  ? 'Start Solo Lucky Spin'
                   : `Start vs ${selectedDifficulty.toUpperCase()} AI`}
               </span>
             </button>

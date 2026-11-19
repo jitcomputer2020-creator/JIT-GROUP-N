@@ -30,11 +30,13 @@ export interface CarromSyncedCoin {
 
 export interface CarromSyncedState {
   coins: CarromSyncedCoin[];
+  striker?: { x: number; angle: number; power: number };
   turn: 'player' | 'opponent';
   scores: { player: number; opponent: number; queenHolder: string };
   statusLog: string[];
   winnerMsg: string | null;
   finished: boolean;
+  currentTurn?: string;
   moveId?: string;
   moveSeq?: number;
   byPlayerId?: string;
@@ -51,10 +53,29 @@ export interface QuizSyncedState {
   }>;
   source: 'ai' | 'curated-70-30';
   index: number;
+  currentQuestionIndex?: number;
+  questionSeed?: number;
   scores: Record<string, number>;
   answersByQ: Record<number, Record<string, number | null>>;
   finished: boolean;
   winnerId?: string | null;
+  moveId?: string;
+  moveSeq?: number;
+  byPlayerId?: string;
+}
+
+export interface SpinSyncedState {
+  rotation: number;
+  spinAngle: number;
+  targetAngle?: number;
+  isSpinning: boolean;
+  spinResult: { label: string; points: number; color?: string } | null;
+  lastWinnerId?: string;
+  lastWinnerName?: string;
+  scores: Record<string, number>;
+  spinsUsedByPlayer: Record<string, number>;
+  round: number;
+  currentTurn?: string;
   moveId?: string;
   moveSeq?: number;
   byPlayerId?: string;
@@ -96,12 +117,18 @@ export interface TruthAndDareState {
   round: number;
   phase: 'spinning' | 'choosing' | 'writing_custom' | 'performing' | 'round_complete';
   activePlayerId: string;
+  selectedPlayerId?: string;
   activePlayerName: string;
   activePlayerAvatar?: string;
   choiceType: 'truth' | 'dare' | null;
+  promptType?: 'truth' | 'dare' | null;
   promptSource: 'system' | 'custom' | null;
   promptText: string;
+  currentPromptText?: string;
   customAuthorName?: string;
+  mutedVoiceIds?: string[];
+  mutedChatIds?: string[];
+  currentTurn?: string;
   history: TruthAndDareHistoryItem[];
   updatedAtMs: number;
 }

@@ -27,6 +27,7 @@ const TURN_VALIDATED_ACTIONS = new Set([
   'CHESS_MOVE',
   'SL_MOVE',
   'CARROM_MOVE',
+  'SPIN_MOVE',
 ]);
 
 interface UseMultiplayerRoomOptions {
@@ -236,6 +237,7 @@ export function useMultiplayerRoom({
       nextScore: number;
       questions: QuizQuestion[];
       source: 'ai' | 'curated-70-30';
+      questionSeed?: number;
     }): Promise<QuizSyncedState | null> => {
       const room = currentRoomRef.current;
       if (!room) return null;
@@ -252,6 +254,7 @@ export function useMultiplayerRoom({
         newPlayerScore: params.nextScore,
         questions: params.questions,
         source: params.source,
+        questionSeed: params.questionSeed,
         moveId,
         moveSeq: nextSeq,
       });

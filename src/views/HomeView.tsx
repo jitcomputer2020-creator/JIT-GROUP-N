@@ -39,7 +39,6 @@ import {
   CornerDownRight,
   Loader2,
   Megaphone,
-  Clock,
   Sparkles,
   ShieldAlert,
 } from 'lucide-react';
@@ -683,20 +682,12 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                 return (
                   <div className="relative mb-4 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
                     {isVideoMedia ? (
-                      <>
-                        <ResilientVideo
-                          src={primaryMediaUrl}
-                          poster={post.thumbnailUrl}
-                          controls
-                          className="w-full h-auto max-h-[440px] object-contain"
-                        />
-                        {typeof post.expiresAt === 'number' && post.expiresAt > Date.now() && (
-                          <span className="absolute top-2.5 left-2.5 z-10 px-2 py-0.5 rounded-lg bg-slate-900/75 backdrop-blur-sm text-[10px] font-semibold text-amber-300 flex items-center gap-1 pointer-events-none">
-                            <Clock className="w-3 h-3" />
-                            {Math.max(1, Math.ceil((post.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)))}d left
-                          </span>
-                        )}
-                      </>
+                      <ResilientVideo
+                        src={primaryMediaUrl}
+                        poster={post.thumbnailUrl}
+                        controls
+                        className="w-full h-auto max-h-[440px] object-contain"
+                      />
                     ) : (
                       <ResponsiveImage
                         src={primaryMediaUrl}

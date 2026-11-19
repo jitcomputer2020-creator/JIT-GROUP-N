@@ -16,6 +16,7 @@ import {
   CarromSyncedCoin,
 } from '../../types/multiplayer';
 import { soundFx } from '../../utils/soundFx';
+import { subscribeToGameRoom } from '../../lib/firebase';
 import { Target, RotateCcw, Sparkles } from 'lucide-react';
 
 interface Coin extends CarromSyncedCoin {
@@ -292,54 +293,88 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     }
   }, [gameMode, currentRoom]);
 
-  // Hydrate board state from Firestore room snapshot
-  useEffect(() => {
-    if (!syncedState) return;
-    if (syncedState.moveId && lastAppliedMoveIdRef.current === syncedState.moveId) {
-      return;
-    }
-    if (syncedState.moveId) {
-      lastAppliedMoveIdRef.current = syncedState.moveId;
-    }
-    if (animRef.current) {
-      cancelAnimationFrame(animRef.current);
-      animRef.current = null;
-    }
-    setIsSimulating(false);
+  const applyCarromSnapshotState = useCallback(
+    (incoming: CarromSyncedState) => {
+      if (!incoming) return;
+      if (incoming.moveId && lastAppliedMoveIdRef.current === incoming.moveId) {
+        return;
+      }
+      if (incoming.moveId) {
+        lastAppliedMoveIdRef.current = incoming.moveId;
+      }
+      if (animRef.current) {
+        cancelAnimationFrame(animRef.current);
+        animRef.current = null;
+      }
+      setIsSimulating(false);
 
-    if (Array.isArray(syncedState.coins) && syncedState.coins.length > 0) {
-      coinsRef.current = syncedState.coins.map((c) => ({
-        ...c,
+      if (Array.isArray(incoming.coins) && incoming.coins.length > 0) {
+        coinsRef.current = incoming.coins.map((c) => ({
+          ...c,
+          vx: 0,
+          vy: 0,
+        }));
+      } else {
+        coinsRef.current = createInitialCoins();
+      }
+
+      const syncedTurn = incoming.turn === 'opponent' ? 'opponent' : 'player';
+      setTurn(syncedTurn);
+      if (incoming.scores) {
+        setScores(incoming.scores);
+      }
+      if (Array.isArray(incoming.statusLog) && incoming.statusLog.length > 0) {
+        setStatusLog(incoming.statusLog);
+      }
+      finishedRef.current = Boolean(incoming.finished);
+      setWinnerMsg(incoming.winnerMsg ?? null);
+
+      const nextStrikerX =
+        typeof incoming.striker?.x === 'number' && Number.isFinite(incoming.striker.x)
+          ? Math.max(70, Math.min(SIZE - 70, incoming.striker.x))
+          : SIZE / 2;
+      if (typeof incoming.striker?.angle === 'number' && Number.isFinite(incoming.striker.angle)) {
+        setAimAngle(incoming.striker.angle);
+      }
+      if (typeof incoming.striker?.power === 'number' && Number.isFinite(incoming.striker.power)) {
+        setPower(incoming.striker.power);
+      }
+
+      strikerRef.current = {
+        id: 'striker',
+        x: nextStrikerX,
+        y: syncedTurn === 'player' ? BASELINE_Y_PLAYER : BASELINE_Y_AI,
         vx: 0,
         vy: 0,
-      }));
-    } else {
-      coinsRef.current = createInitialCoins();
-    }
+        r: 12,
+        type: 'striker',
+        pocketed: false,
+      };
+      setStrikerX(nextStrikerX);
+      drawBoard();
+    },
+    [drawBoard]
+  );
 
-    const syncedTurn = syncedState.turn === 'opponent' ? 'opponent' : 'player';
-    setTurn(syncedTurn);
-    if (syncedState.scores) {
-      setScores(syncedState.scores);
-    }
-    if (Array.isArray(syncedState.statusLog) && syncedState.statusLog.length > 0) {
-      setStatusLog(syncedState.statusLog);
-    }
-    finishedRef.current = Boolean(syncedState.finished);
-    setWinnerMsg(syncedState.winnerMsg ?? null);
-    strikerRef.current = {
-      id: 'striker',
-      x: SIZE / 2,
-      y: syncedTurn === 'player' ? BASELINE_Y_PLAYER : BASELINE_Y_AI,
-      vx: 0,
-      vy: 0,
-      r: 12,
-      type: 'striker',
-      pocketed: false,
-    };
-    setStrikerX(SIZE / 2);
-    drawBoard();
-  }, [syncedState, drawBoard]);
+  // Hydrate board state from parent syncedState
+  useEffect(() => {
+    if (!syncedState) return;
+    applyCarromSnapshotState(syncedState);
+  }, [syncedState, applyCarromSnapshotState]);
+
+  // Direct Firestore onSnapshot subscription for Carrom room document
+  useEffect(() => {
+    const roomCode = currentRoom?.roomCode;
+    if (!roomCode || gameMode === 'ai') return;
+    const unsub = subscribeToGameRoom(roomCode, (room, moveAction) => {
+      const board = (room.boardState || room.gameState) as CarromSyncedState | null;
+      if (!board || moveAction === 'ROOM_CREATED') return;
+      if (Array.isArray(board.coins) || board.moveId || moveAction === 'CARROM_MOVE' || moveAction === 'REMATCH') {
+        applyCarromSnapshotState(board);
+      }
+    });
+    return () => unsub();
+  }, [currentRoom?.roomCode, gameMode, applyCarromSnapshotState]);
 
   const executeStrike = useCallback(
     (
@@ -563,7 +598,9 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
           onSyncMove(
             {
               coins: serializedCoins,
+              striker: { x: Math.round(strikeX), angle: strikeAngleDeg, power: strikePower },
               turn: nextSide,
+              currentTurn: nextTurnActorId,
               scores: nextScores,
               statusLog: nextLogs,
               winnerMsg: computedWinnerMsg,

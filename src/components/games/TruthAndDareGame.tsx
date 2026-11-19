@@ -58,6 +58,9 @@ interface TruthAndDareGameProps {
   waitingCount: number;
   currentUserId: string;
   firebaseAuthUid?: string | null;
+  currentTurnId?: string;
+  mutedVoiceIds?: string[];
+  mutedChatIds?: string[];
   isHost: boolean;
   isSeatedActivePlayer: boolean;
   state: TruthAndDareState | null;
@@ -71,6 +74,9 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
   waitingCount,
   currentUserId,
   firebaseAuthUid,
+  currentTurnId,
+  mutedVoiceIds = [],
+  mutedChatIds = [],
   isHost,
   isSeatedActivePlayer,
   state,
@@ -103,18 +109,26 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
     [firebaseAuthUid]
   );
   const canOperateRound = (isHost || isSeatedActivePlayer) && isAuthIdentityValid(myPlayer);
+  const effectiveSelectedId = state?.selectedPlayerId || state?.activePlayerId || '';
   const spotlightPlayer = state
-    ? activePlayers.find((p) => p.id === state.activePlayerId)
+    ? activePlayers.find((p) => p.id === effectiveSelectedId)
     : undefined;
+  const turnMatches =
+    !currentTurnId ||
+    currentTurnId === currentUserId ||
+    (firebaseAuthUid ? currentTurnId === firebaseAuthUid : false);
   const isMyTurn = state
     ? canOperateRound &&
-      ((state.activePlayerId === currentUserId && isAuthIdentityValid(spotlightPlayer)) || isHost)
+      ((effectiveSelectedId === currentUserId &&
+        turnMatches &&
+        isAuthIdentityValid(spotlightPlayer)) ||
+        isHost)
     : canOperateRound;
 
   const pickRandomPlayer = (): RoomPlayer | null => {
     if (activePlayers.length === 0) return null;
     if (activePlayers.length === 1) return activePlayers[0];
-    const pool = activePlayers.filter((p) => p.id !== state?.activePlayerId);
+    const pool = activePlayers.filter((p) => p.id !== effectiveSelectedId);
     const list = pool.length > 0 ? pool : activePlayers;
     return list[Math.floor(Math.random() * list.length)];
   };
@@ -131,18 +145,27 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
       spinTimerRef.current = null;
       setIsSpinningAnim(false);
       const chosen = pickRandomPlayer() || activePlayers[0];
-      onUpdateState({
-        round: nextRoundNum,
-        phase: 'choosing',
-        activePlayerId: chosen.id,
-        activePlayerName: chosen.name,
-        activePlayerAvatar: chosen.avatar,
-        choiceType: null,
-        promptSource: null,
-        promptText: '',
-        history: state?.history || [],
-        updatedAtMs: Date.now(),
-      });
+      onUpdateState(
+        {
+          round: nextRoundNum,
+          phase: 'choosing',
+          activePlayerId: chosen.id,
+          selectedPlayerId: chosen.id,
+          activePlayerName: chosen.name,
+          activePlayerAvatar: chosen.avatar,
+          choiceType: null,
+          promptType: null,
+          promptSource: null,
+          promptText: '',
+          currentPromptText: '',
+          mutedVoiceIds,
+          mutedChatIds,
+          currentTurn: chosen.id,
+          history: state?.history || [],
+          updatedAtMs: Date.now(),
+        },
+        'active'
+      );
     }, 650);
   };
 
@@ -150,74 +173,108 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
     if (!state || !isMyTurn) return;
     const bank = choiceType === 'truth' ? TRUTH_PROMPTS : DARE_PROMPTS;
     const picked = bank[Math.floor(Math.random() * bank.length)];
-    onUpdateState({
-      ...state,
-      phase: 'performing',
-      choiceType,
-      promptSource: 'system',
-      promptText: picked,
-      customAuthorName: 'JIT System Generator',
-      updatedAtMs: Date.now(),
-    });
+    onUpdateState(
+      {
+        ...state,
+        selectedPlayerId: effectiveSelectedId,
+        phase: 'performing',
+        choiceType,
+        promptType: choiceType,
+        promptSource: 'system',
+        promptText: picked,
+        currentPromptText: picked,
+        customAuthorName: 'JIT System Generator',
+        mutedVoiceIds,
+        mutedChatIds,
+        currentTurn: effectiveSelectedId,
+        updatedAtMs: Date.now(),
+      },
+      'active'
+    );
   };
 
   const handleStartCustomChoice = (choiceType: 'truth' | 'dare') => {
     if (!state || !canOperateRound) return;
     setPendingChoice(choiceType);
     setCustomPromptDraft('');
-    onUpdateState({
-      ...state,
-      phase: 'writing_custom',
-      choiceType,
-      promptSource: 'custom',
-      updatedAtMs: Date.now(),
-    });
+    onUpdateState(
+      {
+        ...state,
+        selectedPlayerId: effectiveSelectedId,
+        phase: 'writing_custom',
+        choiceType,
+        promptType: choiceType,
+        promptSource: 'custom',
+        mutedVoiceIds,
+        mutedChatIds,
+        currentTurn: effectiveSelectedId,
+        updatedAtMs: Date.now(),
+      },
+      'active'
+    );
   };
 
   const handleSubmitCustomPrompt = (e: React.FormEvent) => {
     e.preventDefault();
     if (!state || !canOperateRound || !customPromptDraft.trim()) return;
-    const finalChoice = state.choiceType || pendingChoice;
-    onUpdateState({
-      ...state,
-      phase: 'performing',
-      choiceType: finalChoice,
-      promptSource: 'custom',
-      promptText: customPromptDraft.trim().slice(0, 260),
-      customAuthorName: myPlayer?.name || 'Room Player',
-      updatedAtMs: Date.now(),
-    });
+    const finalChoice = state.promptType || state.choiceType || pendingChoice;
+    const text = customPromptDraft.trim().slice(0, 260);
+    onUpdateState(
+      {
+        ...state,
+        selectedPlayerId: effectiveSelectedId,
+        phase: 'performing',
+        choiceType: finalChoice,
+        promptType: finalChoice,
+        promptSource: 'custom',
+        promptText: text,
+        currentPromptText: text,
+        customAuthorName: myPlayer?.name || 'Room Player',
+        mutedVoiceIds,
+        mutedChatIds,
+        currentTurn: effectiveSelectedId,
+        updatedAtMs: Date.now(),
+      },
+      'active'
+    );
     setCustomPromptDraft('');
   };
 
   const handleCompleteRound = (roundStatus: 'completed' | 'skipped') => {
-    if (!state || !state.choiceType || !isMyTurn) return;
+    const activeChoice = state?.promptType || state?.choiceType;
+    const activePrompt = state?.currentPromptText || state?.promptText || '';
+    if (!state || !activeChoice || !isMyTurn) return;
     const item: TruthAndDareHistoryItem = {
       id: `td_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
       round: state.round,
-      playerId: state.activePlayerId,
+      playerId: effectiveSelectedId || state.activePlayerId,
       playerName: state.activePlayerName,
-      choiceType: state.choiceType,
+      choiceType: activeChoice,
       promptSource: state.promptSource || 'system',
-      promptText: state.promptText,
+      promptText: activePrompt,
       customAuthor: state.customAuthorName,
       status: roundStatus,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
     const nextHistory = [item, ...(state.history || [])].slice(0, 12);
+    const hostPlayerId = activePlayers.find((p) => p.isHost)?.id || activePlayers[0]?.id || currentUserId;
     onUpdateState(
       {
         ...state,
+        selectedPlayerId: effectiveSelectedId || state.activePlayerId,
         phase: 'round_complete',
+        mutedVoiceIds,
+        mutedChatIds,
+        currentTurn: hostPlayerId,
         history: nextHistory,
         updatedAtMs: Date.now(),
       },
-      'finished'
+      'active'
     );
 
     if (roundStatus === 'completed' && (state.activePlayerId === currentUserId || isHost)) {
-      onRoundAward(15, `Completed ${state.choiceType.toUpperCase()} Round #${state.round}`);
+      onRoundAward(15, `Completed ${activeChoice.toUpperCase()} Round #${state.round}`);
     }
   };
 
@@ -243,18 +300,33 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
           <div className="flex items-center -space-x-2">
             {activePlayers.slice(0, 5).map((p) => {
               const isSpotlight = state?.activePlayerId === p.id;
+              const isMuted =
+                mutedVoiceIds.includes(p.id) || mutedChatIds.includes(p.id);
               return (
-                <img
-                  key={p.id}
-                  src={p.avatar || APP_CONFIG.logoUrl}
-                  alt={p.name}
-                  title={p.name}
-                  className={`w-8 h-8 rounded-full object-cover border-2 transition-transform ${
-                    isSpotlight
-                      ? 'border-fuchsia-500 scale-110 z-10 ring-2 ring-fuchsia-400/50'
-                      : 'border-white dark:border-slate-900'
-                  }`}
-                />
+                <div key={p.id} className="relative">
+                  <img
+                    src={p.avatar || APP_CONFIG.logoUrl}
+                    alt={p.name}
+                    title={
+                      isMuted
+                        ? `${p.name} (Muted by host)`
+                        : p.name
+                    }
+                    className={`w-8 h-8 rounded-full object-cover border-2 transition-transform ${
+                      isSpotlight
+                        ? 'border-fuchsia-500 scale-110 z-10 ring-2 ring-fuchsia-400/50'
+                        : 'border-white dark:border-slate-900'
+                    }`}
+                  />
+                  {isMuted && (
+                    <span
+                      title="Muted by host"
+                      className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-rose-600 text-white text-[8px] font-black flex items-center justify-center border border-white dark:border-slate-900"
+                    >
+                      !
+                    </span>
+                  )}
+                </div>
               );
             })}
           </div>

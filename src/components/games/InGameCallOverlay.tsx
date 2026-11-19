@@ -63,7 +63,12 @@ export const InGameCallOverlay: React.FC<InGameCallOverlayProps> = ({
         }
 
         const constraints: MediaStreamConstraints = {
-          audio: true,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+          },
           video:
             callType === 'video'
               ? {

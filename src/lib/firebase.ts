@@ -3114,7 +3114,10 @@ function buildInitialGameStateForGame(
       ],
       turn: 0,
       dice: 6,
+      diceValue: 6,
       phase: 'roll',
+      canRoll: true,
+      canMove: false,
       legalTokens: [],
       consecutiveSixes: 0,
       winner: null,
@@ -3128,6 +3131,7 @@ function buildInitialGameStateForGame(
       ...existing,
       board: Array(9).fill(null),
       isXNext: true,
+      scores: existing.scores || { X: 0, O: 0 },
       result: null,
       line: null,
       _startId: startId,
@@ -3140,6 +3144,8 @@ function buildInitialGameStateForGame(
       turn: 'white',
       status: 'active',
       winner: null,
+      lastMove: null,
+      capturedPieces: { white: [], black: [] },
       log: ['Match initialized. White to move first.'],
       _startId: startId,
       moveSeq: 0,
@@ -3149,8 +3155,10 @@ function buildInitialGameStateForGame(
     return {
       ...existing,
       positions: { p1: 1, p2: 1 },
+      playerPositions: { p1: 1, p2: 1 },
       turn: 'p1',
       dice: 1,
+      diceValue: 1,
       message: 'Player 1 (Blue 📍) turn to roll!',
       finished: false,
       _startId: startId,
@@ -3160,11 +3168,63 @@ function buildInitialGameStateForGame(
   if (gameId === 'carrom') {
     return {
       ...existing,
+      striker: { x: 160, angle: 0, power: 72 },
       turn: 'player',
       scores: { player: 0, opponent: 0, queenHolder: '' },
       statusLog: ['Position striker, set angle & power, or tap the board to aim!'],
       winnerMsg: null,
       finished: false,
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'quiz') {
+    const seed =
+      typeof existing.questionSeed === 'number' && Number.isFinite(existing.questionSeed)
+        ? existing.questionSeed
+        : Math.floor(100000 + Math.random() * 899999);
+    return {
+      ...existing,
+      source: existing.source || 'curated-70-30',
+      index: 0,
+      currentQuestionIndex: 0,
+      questionSeed: seed,
+      scores: existing.scores || {},
+      answersByQ: existing.answersByQ || {},
+      finished: false,
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'spin_wheel') {
+    return {
+      ...existing,
+      rotation: 0,
+      spinAngle: 0,
+      isSpinning: false,
+      spinResult: null,
+      scores: existing.scores || {},
+      spinsUsedByPlayer: existing.spinsUsedByPlayer || {},
+      round: 1,
+      _startId: startId,
+      moveSeq: 0,
+    };
+  }
+  if (gameId === 'truth_dare') {
+    return {
+      ...existing,
+      round: 1,
+      phase: 'spinning',
+      activePlayerId: '',
+      selectedPlayerId: '',
+      activePlayerName: '',
+      choiceType: null,
+      promptType: null,
+      promptSource: null,
+      promptText: '',
+      currentPromptText: '',
+      history: [],
+      updatedAtMs: Date.now(),
       _startId: startId,
       moveSeq: 0,
     };
@@ -3250,6 +3310,7 @@ export async function pushFirestoreQuizAnswer(
     newPlayerScore: number;
     questions: any[];
     source: 'ai' | 'curated-70-30';
+    questionSeed?: number;
     moveId: string;
     moveSeq: number;
   }
@@ -3293,11 +3354,19 @@ export async function pushFirestoreQuizAnswer(
       const nextIndex = allAnswered && !isLastQ && currentIndex === params.questionIndex ? currentIndex + 1 : currentIndex;
       const nextFinished = Boolean(existing.finished) || (allAnswered && isLastQ && currentIndex === params.questionIndex);
       const status: 'active' | 'finished' = nextFinished ? 'finished' : 'active';
+      const resolvedSeed =
+        typeof existing.questionSeed === 'number'
+          ? existing.questionSeed
+          : typeof params.questionSeed === 'number'
+          ? params.questionSeed
+          : undefined;
 
       const nextState = {
         questions: qList,
         source: existing.source || params.source,
         index: nextIndex,
+        currentQuestionIndex: nextIndex,
+        ...(resolvedSeed !== undefined ? { questionSeed: resolvedSeed } : {}),
         scores: mergedScores,
         answersByQ: existingAnswersByQ,
         finished: nextFinished,
