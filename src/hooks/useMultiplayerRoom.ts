@@ -193,7 +193,6 @@ export function useMultiplayerRoom({
       const myId = activePlayerIdRef.current;
       const liveFbUid = auth.currentUser?.uid || firebaseAuthUidRef.current || null;
       const moveId = `${myId}_${nextSeq}_${Math.random().toString(36).slice(2, 6)}`;
-      appliedMoveIdsRef.current.add(moveId);
 
       const stampedState = {
         ...newGameState,

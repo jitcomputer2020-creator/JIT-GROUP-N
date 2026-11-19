@@ -1419,22 +1419,39 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
   } catch {
     mutedChatIds = [];
   }
-  try {
-    const parsedJson = typeof data.gameStateJson === 'string' ? JSON.parse(data.gameStateJson) : null;
-    if (parsedJson && Object.keys(parsedJson).length > 0) {
-      gameState = parsedJson;
-    } else if (data.boardState && typeof data.boardState === 'object' && Object.keys(data.boardState).length > 0) {
-      gameState = fromFirestoreSafeValue(data.boardState);
-    } else if (data.gameState && typeof data.gameState === 'object' && Object.keys(data.gameState).length > 0) {
-      gameState = fromFirestoreSafeValue(data.gameState);
-    } else {
+  let parsedBoardField: any = null;
+  if (Array.isArray(data.boardState)) {
+    parsedBoardField = fromFirestoreSafeValue(data.boardState);
+    gameState = {
+      board: parsedBoardField,
+      ...(data.scores && typeof data.scores === 'object' ? { scores: data.scores } : {}),
+    };
+  } else if (
+    data.boardState &&
+    typeof data.boardState === 'object' &&
+    Object.keys(data.boardState).length > 0
+  ) {
+    gameState = fromFirestoreSafeValue(data.boardState);
+    parsedBoardField = gameState;
+  } else {
+    try {
+      const parsedJson =
+        typeof data.gameStateJson === 'string' ? JSON.parse(data.gameStateJson) : null;
+      if (parsedJson && Object.keys(parsedJson).length > 0) {
+        gameState = parsedJson;
+      } else if (
+        data.gameState &&
+        typeof data.gameState === 'object' &&
+        Object.keys(data.gameState).length > 0
+      ) {
+        gameState = fromFirestoreSafeValue(data.gameState);
+      } else {
+        gameState = null;
+      }
+    } catch {
       gameState = null;
     }
-  } catch {
-    gameState =
-      data.boardState && typeof data.boardState === 'object'
-        ? fromFirestoreSafeValue(data.boardState)
-        : null;
+    parsedBoardField = gameState;
   }
   try {
     messages = typeof data.messagesJson === 'string' ? JSON.parse(data.messagesJson) : [];
@@ -1508,7 +1525,7 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     reactions,
     mutedVoiceIds,
     mutedChatIds,
-    boardState: gameState,
+    boardState: parsedBoardField,
     gameState,
     currentTurn: String(data.currentTurn || resolvedPlayer1Id || ''),
     diceRoll: resolvedDiceRoll,

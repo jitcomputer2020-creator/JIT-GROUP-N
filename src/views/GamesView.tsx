@@ -47,8 +47,6 @@ import {
   fetchFirestoreGameRoomByCode,
 } from '../lib/firebase';
 import {
-  checkTicTacToeWinner,
-  getTicTacToeAIMove,
   getPieceColor,
   getLegalMovesForSquare,
   applyChessMoveToBoard,
@@ -81,6 +79,7 @@ import { MatchmakingQueueModal } from '../components/games/MatchmakingQueueModal
 import { HostRoomControlPanel } from '../components/games/HostRoomControlPanel';
 import { TruthAndDareGame } from '../components/games/TruthAndDareGame';
 import { GameLogo } from '../components/games/GameLogo';
+import { TicTacToeGame } from '../components/games/TicTacToeGame';
 import { LudoBoard, LUDO_COLORS } from '../components/games/LudoBoard';
 import { CarromBoard } from '../components/games/CarromBoard';
 import { SpinWheelGame } from '../components/games/SpinWheelGame';
@@ -254,7 +253,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     attachRoomSubscription,
     detachRoomSubscription,
     resetMoveTracking,
-    markMoveIdApplied,
     recordMoveSeq,
     broadcastRoomMove,
     submitQuizAnswer,
@@ -363,15 +361,20 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     [awardGameResult, showRewardToast]
   );
 
-  // --------------------------------------------------------------------------
-  // GAME 1: TIC TAC TOE STATE
-  // --------------------------------------------------------------------------
-  const [tttBoard, setTttBoard] = useState<(string | null)[]>(Array(9).fill(null));
-  const [isXNext, setIsXNext] = useState(true);
-  const [tttResult, setTttResult] = useState<string | null>(null);
-  const [tttWinningLine, setTttWinningLine] = useState<number[] | null>(null);
-  const [tttScores, setTttScores] = useState({ X: 0, O: 0 });
-  const [tttAiThinking, setTttAiThinking] = useState(false);
+  const handleTicTacToeAward = useCallback(
+    (params: {
+      gameId: GameId;
+      gameName: string;
+      mode: GameMode | 'solo';
+      outcome: 'win' | 'loss' | 'draw';
+      pointsEarned: number;
+      scoreSummary: string;
+    }) => {
+      awardedMatchRef.current.tictactoe = false;
+      void triggerGameAward('tictactoe', params);
+    },
+    [triggerGameAward]
+  );
 
   // --------------------------------------------------------------------------
   // GAME 2: LUDO STATE (4 players x 4 tokens each: -1=yard, 0..55=track, 56=home)
@@ -528,30 +531,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // --------------------------------------------------------------------------
   // Reset helpers
   // --------------------------------------------------------------------------
-  const resetTtt = useCallback(
-    (sync = true) => {
-      clearAiTimers();
-      awardedMatchRef.current.tictactoe = false;
-      setTttBoard(Array(9).fill(null));
-      setIsXNext(true);
-      setTttResult(null);
-      setTttWinningLine(null);
-      setTttAiThinking(false);
-      if (sync && currentRoomRef.current) {
-        const room = currentRoomRef.current;
-        const resetState = {
-          board: Array(9).fill(null),
-          isXNext: true,
-          scores: tttScores,
-          result: null,
-          line: null,
-        };
-        multiplayerSocket.rematchGame(room.roomCode, resetState);
-        rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
-      }
-    },
-    [clearAiTimers, tttScores]
-  );
 
   const resetLudo = useCallback(
     (sync = true) => {
@@ -798,8 +777,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const applySyncedMoveState = useCallback(
     (moveAction: string, gameState: any) => {
       if (!gameState || typeof gameState !== 'object') return;
-      const moveId = typeof gameState.moveId === 'string' ? gameState.moveId : '';
-      if (moveId && !markMoveIdApplied(moveId)) return;
       const seq = Number(gameState.moveSeq || 0);
       if (seq > 0) {
         recordMoveSeq(seq);
@@ -808,10 +785,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       if (moveAction === 'REMATCH') {
         clearAiTimers();
         resetMoveTracking();
-        resetTtt(false);
-        if (gameState.scores && typeof gameState.scores.X === 'number') {
-          setTttScores(gameState.scores);
-        }
+        awardedMatchRef.current.tictactoe = false;
         resetChess(false);
         resetLudo(false);
         if (Array.isArray(gameState.questions) && gameState.questions.length > 0) {
@@ -846,28 +820,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         gameState.byPlayerId !== activePlayerIdRef.current;
 
       if (moveAction === 'TTT_MOVE') {
-        if (Array.isArray(gameState.board)) setTttBoard(gameState.board);
-        if (typeof gameState.isXNext === 'boolean') setIsXNext(gameState.isXNext);
-        if (gameState.scores && typeof gameState.scores === 'object') {
-          setTttScores({
-            X: Number(gameState.scores.X || 0),
-            O: Number(gameState.scores.O || 0),
-          });
-        }
-        setTttResult(gameState.result ?? null);
-        setTttWinningLine(gameState.line || null);
-        if (gameState.result && isFromOpponent) {
-          const isDraw = String(gameState.result).toLowerCase().includes('drawn');
-          soundFx.playMove();
-          triggerGameAward('tictactoe', {
-            gameId: 'tictactoe',
-            gameName: 'Tic Tac Toe',
-            mode: gameModeRef.current,
-            outcome: isDraw ? 'draw' : 'loss',
-            pointsEarned: isDraw ? 10 : 5,
-            scoreSummary: isDraw ? 'Draw (3x3)' : 'Opponent Victory',
-          });
-        }
+        // Handled directly via Firestore onSnapshot inside TicTacToeGame.tsx
+        return;
       } else if (moveAction === 'LUDO_MOVE') {
         const nextTokens = Array.isArray(gameState.tokens) ? gameState.tokens : ludoStateRef.current.tokens;
         const nextTurn = (typeof gameState.turn === 'number' ? gameState.turn : 0) as 0 | 1 | 2 | 3;
@@ -1035,7 +989,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     },
     [
       clearAiTimers,
-      markMoveIdApplied,
       recordMoveSeq,
       resetCarromState,
       resetChess,
@@ -1045,7 +998,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       resetSnakeLadder,
       resetSpinState,
       resetTruthDare,
-      resetTtt,
       triggerGameAward,
     ]
   );
@@ -1147,7 +1099,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 : undefined;
             clearAiTimers();
             resetMoveTracking();
-            resetTtt(false);
+            awardedMatchRef.current.tictactoe = false;
             resetChess(false);
             resetLudo(false);
             resetQuiz(false, incomingQuizSeed);
@@ -1196,7 +1148,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           const effectiveMoveAction =
             moveAction && moveAction !== 'ROOM_CREATED' && moveAction !== 'GAME_START'
               ? moveAction
-              : syncedBoardState && (syncedBoardState.moveId || Number(syncedBoardState.moveSeq || 0) > 0)
+              : syncedBoardState && typeof syncedBoardState === 'object'
               ? inferredAction
               : '';
           if (syncedBoardState && effectiveMoveAction) {
@@ -1226,8 +1178,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       resetMoveTracking,
       resetQuiz,
       resetSnakeLadder,
+      resetSpinState,
       resetTruthDare,
-      resetTtt,
       showRewardToast,
       spawnFloatingReaction,
     ]
@@ -1300,12 +1252,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     const handleGameReset = (data: { room: MultiplayerRoom }) => {
       clearAiTimers();
       setCurrentRoom(data.room);
-      resetTtt(false);
+      awardedMatchRef.current.tictactoe = false;
       resetChess(false);
       resetLudo(false);
       resetQuiz(false);
       resetSnakeLadder(false);
       resetCarromState(false);
+      resetSpinState();
       resetTruthDare();
     };
 
@@ -1404,12 +1357,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     applySyncedMoveState,
     clearAiTimers,
     isRoomMatchStarted,
-    resetTtt,
     resetChess,
     resetLudo,
     resetQuiz,
     resetSnakeLadder,
     resetCarromState,
+    resetSpinState,
     resetTruthDare,
     showRewardToast,
     spawnFloatingReaction,
@@ -1464,12 +1417,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       if (cancelled || settled) return;
       settled = true;
       clearAiTimers();
-      resetTtt(false);
+      awardedMatchRef.current.tictactoe = false;
       resetChess(false);
       resetLudo(false);
       resetQuiz(false);
       resetSnakeLadder(false);
       resetCarromState(false);
+      resetSpinState();
       resetTruthDare();
       setSubView('play');
       currentRoomRef.current = room;
@@ -1582,12 +1536,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     isRoomMatchStarted,
     attachFirestoreRoomSubscription,
     clearAiTimers,
-    resetTtt,
     resetChess,
     resetLudo,
     resetQuiz,
     resetSnakeLadder,
     resetCarromState,
+    resetSpinState,
     resetTruthDare,
     showRewardToast,
   ]);
@@ -1692,7 +1646,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         typeof (room.boardState || room.gameState)?.questionSeed === 'number'
           ? (room.boardState || room.gameState).questionSeed
           : undefined;
-      resetTtt(false);
       resetChess(false);
       resetLudo(false);
       resetQuiz(false, initQuizSeed);
@@ -1741,7 +1694,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             ? (room.boardState || room.gameState).questionSeed
             : undefined;
         setIsLobbyOpen(false);
-        resetTtt(false);
         resetChess(false);
         resetLudo(false);
         resetQuiz(false, initQuizSeed);
@@ -1822,7 +1774,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           typeof (room.boardState || room.gameState)?.questionSeed === 'number'
             ? (room.boardState || room.gameState).questionSeed
             : undefined;
-        resetTtt(false);
         resetChess(false);
         resetLudo(false);
         resetQuiz(false, initQuizSeed);
@@ -1863,7 +1814,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setIsModeSelectOpen(false);
     setIsLobbyOpen(false);
     setIsMatchmakingOpen(false);
-    resetTtt(false);
     resetChess(false);
     resetLudo(false);
     resetQuiz(false);
@@ -1880,7 +1830,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       typeof (currentRoom.boardState || currentRoom.gameState)?.questionSeed === 'number'
         ? (currentRoom.boardState || currentRoom.gameState).questionSeed
         : undefined;
-    resetTtt(false);
     resetChess(false);
     resetLudo(false);
     resetQuiz(false, initQuizSeed);
@@ -2039,12 +1988,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleHostRotatePlayers = async (nextActiveIds: string[]) => {
     if (!currentRoom || !isRoomHost) return;
     clearAiTimers();
-    resetTtt(false);
     resetChess(false);
     resetLudo(false);
     resetQuiz(false);
     resetSnakeLadder(false);
     resetCarromState(false);
+    resetSpinState();
     resetTruthDare();
 
     multiplayerSocket.hostRotatePlayers(currentRoom.roomCode, nextActiveIds, {});
@@ -2083,130 +2032,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     setActiveCallType(null);
   };
 
-  // --------------------------------------------------------------------------
-  // GAME 1: TIC TAC TOE LOGIC
-  // --------------------------------------------------------------------------
-  const handleTttClick = (index: number) => {
-    if (tttBoard[index] || tttResult || tttAiThinking) return;
-
-    if (currentRoom && isWaitingSpectator) {
-      soundFx.playError();
-      showRewardToast('You are in the Waiting Seat — chat, react, or join Voice while waiting!');
-      return;
-    }
-
-    if (gameMode !== 'ai' && currentRoom) {
-      const expectedPlayerId = isXNext ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
-      if (!isAuthorizedTurnActor(expectedPlayerId)) {
-        soundFx.playError();
-        return;
-      }
-    }
-
-    const nextSymbol = isXNext ? 'X' : 'O';
-    const newBoard = [...tttBoard];
-    newBoard[index] = nextSymbol;
-    soundFx.playMove();
-
-    const { winner, line } = checkTicTacToeWinner(newBoard);
-    const nextTurnBool = !isXNext;
-
-    let resStr: string | null = null;
-    let nextTttScores = tttScores;
-    if (winner) {
-      if (winner === 'draw') {
-        resStr = 'Match Drawn! +10 JIT Points';
-        soundFx.playMove();
-        triggerGameAward('tictactoe', {
-          gameId: 'tictactoe',
-          gameName: 'Tic Tac Toe',
-          mode: gameMode,
-          outcome: 'draw',
-          pointsEarned: 10,
-          scoreSummary: 'Draw (3x3)',
-        });
-      } else {
-        const pts = gameMode === 'ai' && aiDifficulty === 'hard' ? 35 : 25;
-        resStr = `Player ${winner} Won! +${pts} JIT Points`;
-        nextTttScores = {
-          ...tttScores,
-          [winner]: tttScores[winner] + 1,
-        };
-        setTttScores(nextTttScores);
-        soundFx.playWin();
-        triggerGameAward('tictactoe', {
-          gameId: 'tictactoe',
-          gameName: 'Tic Tac Toe',
-          mode: gameMode,
-          outcome: 'win',
-          pointsEarned: pts,
-          scoreSummary: `${winner} Victory`,
-        });
-      }
-    }
-
-    setTttBoard(newBoard);
-    setIsXNext(nextTurnBool);
-    setTttResult(resStr);
-    setTttWinningLine(line);
-
-    if (currentRoom) {
-      const nextTurnId = nextTurnBool ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
-      broadcastRoomMove(
-        'TTT_MOVE',
-        { board: newBoard, isXNext: nextTurnBool, scores: nextTttScores, result: resStr, line },
-        nextTurnId,
-        winner ? 'finished' : 'active'
-      );
-    }
-
-    if (gameMode === 'ai' && !currentRoom && !winner && isXNext) {
-      setTttAiThinking(true);
-      registerAiTimer(() => {
-        if (gameModeRef.current !== 'ai' || currentRoomRef.current) {
-          setTttAiThinking(false);
-          return;
-        }
-        const aiBoard = [...newBoard];
-        const aiMove = getTicTacToeAIMove(aiBoard, aiDifficulty);
-        if (aiMove !== -1) {
-          aiBoard[aiMove] = 'O';
-          soundFx.playMove();
-          const aiCheck = checkTicTacToeWinner(aiBoard);
-          let aiRes: string | null = null;
-          if (aiCheck.winner) {
-            if (aiCheck.winner === 'draw') {
-              aiRes = 'Match Drawn! +10 JIT Points';
-              triggerGameAward('tictactoe', {
-                gameId: 'tictactoe',
-                gameName: 'Tic Tac Toe',
-                mode: 'ai',
-                outcome: 'draw',
-                pointsEarned: 10,
-                scoreSummary: `Draw vs ${aiDifficulty} AI`,
-              });
-            } else {
-              aiRes = `Campus AI Bot (${aiDifficulty}) Won! +5 Participation Points`;
-              setTttScores((prev) => ({ ...prev, O: prev.O + 1 }));
-              triggerGameAward('tictactoe', {
-                gameId: 'tictactoe',
-                gameName: 'Tic Tac Toe',
-                mode: 'ai',
-                outcome: 'loss',
-                pointsEarned: 5,
-                scoreSummary: `Lost to ${aiDifficulty} AI`,
-              });
-            }
-          }
-          setTttBoard(aiBoard);
-          setIsXNext(true);
-          setTttResult(aiRes);
-          setTttWinningLine(aiCheck.line);
-        }
-        setTttAiThinking(false);
-      }, 450);
-    }
-  };
+  // GAME 1: TIC TAC TOE -> Handled directly via TicTacToeGame.tsx (Firestore Single Source of Truth)
 
   // --------------------------------------------------------------------------
   // GAME 2: LUDO FULL RULES LOGIC
@@ -3678,91 +3504,23 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             ) ? (
               <>
             {/* ----------------------------------------------------------- */}
-            {/* GAME 1: TIC TAC TOE */}
+            {/* GAME 1: TIC TAC TOE (Strict Firestore Single Source of Truth) */}
             {/* ----------------------------------------------------------- */}
             {selectedGame === 'tictactoe' && (
-              <div className="max-w-sm mx-auto flex flex-col items-center">
-                <div className="flex items-center justify-between w-full mb-4 px-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsModeSelectOpen(true)}
-                    className="px-3 py-1.5 rounded-xl text-xs font-semibold border flex items-center gap-1.5 bg-blue-50 dark:bg-blue-950/40 text-blue-600 border-blue-200 dark:border-blue-800"
-                  >
-                    <Bot className="w-3.5 h-3.5" />
-                    <span className="capitalize">
-                      {gameMode === 'ai' ? `${aiDifficulty} AI` : gameMode}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => resetTtt(true)}
-                    className="text-xs text-slate-600 dark:text-slate-300 hover:text-blue-600 flex items-center gap-1 font-semibold px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>Rematch</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center justify-between w-full mb-3 px-2 text-xs font-bold">
-                  <span className={isXNext && !tttResult ? 'text-blue-600' : 'text-slate-400'}>
-                    You (X): {tttScores.X}
-                  </span>
-                  <span className="text-slate-400 text-[11px]">
-                    {tttAiThinking ? 'AI thinking...' : tttResult ? 'Finished' : isXNext ? 'X Turn' : 'O Turn'}
-                  </span>
-                  <span className={!isXNext && !tttResult ? 'text-emerald-500' : 'text-slate-400'}>
-                    {gameMode === 'ai' ? 'AI Bot (O)' : 'Opponent (O)'}: {tttScores.O}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2.5 p-3 bg-slate-100 dark:bg-slate-800/80 rounded-2xl w-full aspect-square max-w-[min(280px,100%)] touch-manipulation select-none">
-                  {tttBoard.map((cell, idx) => {
-                    const isWinCell = tttWinningLine?.includes(idx);
-                    const isMyTttTurn =
-                      gameMode === 'ai'
-                        ? isXNext
-                        : !currentRoom ||
-                          isAuthorizedTurnActor(
-                            isXNext ? currentRoom.players[0]?.id : currentRoom.players[1]?.id
-                          );
-                    return (
-                      <button
-                        key={idx}
-                        type="button"
-                        disabled={Boolean(cell) || Boolean(tttResult) || tttAiThinking || !isMyTttTurn}
-                        onClick={() => handleTttClick(idx)}
-                        className={`w-full h-full rounded-xl flex items-center justify-center text-3xl font-black transition-all min-h-[44px] ${
-                          isWinCell
-                            ? 'bg-emerald-100 dark:bg-emerald-900/60 ring-2 ring-emerald-500 text-emerald-700 dark:text-emerald-300 scale-[1.03]'
-                            : cell === 'X'
-                            ? 'bg-white dark:bg-slate-900 text-blue-600 shadow-sm'
-                            : cell === 'O'
-                            ? 'bg-white dark:bg-slate-900 text-emerald-500 shadow-sm'
-                            : 'bg-white/70 dark:bg-slate-900/60 hover:bg-white dark:hover:bg-slate-900 text-transparent'
-                        }`}
-                      >
-                        {cell}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {tttResult && (
-                  <div className="mt-4 w-full p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-xl text-xs font-semibold text-blue-700 dark:text-blue-300 flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-amber-500 shrink-0" />
-                      {tttResult}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => resetTtt(true)}
-                      className="px-3 py-1 bg-blue-600 text-white rounded-lg text-[11px] font-bold shrink-0"
-                    >
-                      Play Again
-                    </button>
-                  </div>
-                )}
-              </div>
+              <TicTacToeGame
+                roomId={gameMode !== 'ai' ? currentRoom?.roomCode : undefined}
+                gameMode={gameMode}
+                aiDifficulty={aiDifficulty}
+                localPlayerId={activePlayer.id}
+                isWaitingSpectator={Boolean(currentRoom && isWaitingSpectator)}
+                onWaitingSpectatorBlocked={() =>
+                  showRewardToast(
+                    'You are in the Waiting Seat — chat, react, or join Voice while waiting!'
+                  )
+                }
+                onOpenModeSelect={() => setIsModeSelectOpen(true)}
+                onAwardMatch={handleTicTacToeAward}
+              />
             )}
 
             {/* ----------------------------------------------------------- */}
