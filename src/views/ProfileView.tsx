@@ -523,7 +523,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
               No posts published yet.
             </div>
           ) : (
-            userPosts.map((post) => (
+            userPosts.map((post, postIndex) => (
               <div
                 key={post.id}
                 className="p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm"
@@ -540,6 +540,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                   if (isVideoMedia ? !isValidVideoUrl(primaryMediaUrl) : !isValidImageUrl(primaryMediaUrl)) {
                     return null;
                   }
+                  const isPriority = postIndex < 3;
                   return (
                     <div className="mt-3 rounded-2xl overflow-hidden border border-slate-200/80 dark:border-slate-800 w-full">
                       {isVideoMedia ? (
@@ -547,6 +548,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                           src={primaryMediaUrl}
                           poster={post.thumbnailUrl}
                           controls
+                          priority={isPriority}
                           hideOnInvalid
                           className="w-full h-auto max-h-72 object-contain"
                         />
@@ -555,6 +557,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                           src={primaryMediaUrl}
                           alt={post.authorName ? `${post.authorName} post image` : 'Post image'}
                           fit="contain"
+                          priority={isPriority}
                           className="w-full h-auto max-h-72 object-contain mx-auto block"
                           fallbackText="Post image unavailable"
                         />
@@ -583,7 +586,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
               No reels created yet.
             </div>
           ) : (
-            userReels.map((reel) => (
+            userReels.map((reel, reelIdx) => (
               <div
                 key={reel.id}
                 onClick={() => onNavigate('reels')}
@@ -594,6 +597,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
                     src={reel.thumbnailUrl}
                     alt={reel.caption || 'Reel thumbnail'}
                     fit="cover"
+                    priority={reelIdx < 3}
                     containerClassName="w-full h-full"
                     className="w-full h-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
                   />

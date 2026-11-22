@@ -400,7 +400,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
           </div>
 
           {/* Stories list */}
-          {stories.map((story) => (
+          {stories.map((story, storyIndex) => (
             <div
               key={story.id}
               onClick={() => onOpenStoryViewer(story)}
@@ -411,12 +411,16 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                   <img
                     src={story.mediaUrl}
                     alt={story.authorName}
+                    loading={storyIndex < 5 ? 'eager' : 'lazy'}
+                    decoding="async"
                     className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
                   />
                   <div className="absolute inset-0 bg-black/20" />
                   <img
                     src={story.authorAvatar || APP_CONFIG.logoUrl}
                     alt={story.authorName}
+                    loading={storyIndex < 5 ? 'eager' : 'lazy'}
+                    decoding="async"
                     className="absolute bottom-1 left-1 w-5 h-5 rounded-full object-cover border border-white"
                   />
                 </div>
@@ -459,6 +463,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                     <ResilientVideo
                       src={mediaPreviewUrl}
                       controls
+                      priority
                       className="w-full h-auto max-h-64 object-contain"
                     />
                   ) : (
@@ -466,6 +471,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                       src={mediaPreviewUrl}
                       alt="Selected upload preview"
                       fit="contain"
+                      priority
                       className="w-full h-auto max-h-64 object-contain mx-auto block"
                     />
                   )}
@@ -579,9 +585,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
 
       {/* 4. Social Feed Posts List */}
       <div className="space-y-4">
-        {filteredPosts.map((post) => {
+        {filteredPosts.map((post, postIndex) => {
           const isOwnPost = currentUser?.id === post.authorId;
           const commentsList = post.comments || [];
+          const isVisiblePriority = postIndex < 3;
 
           return (
             <article
@@ -597,6 +604,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                   <img
                     src={post.authorAvatar || APP_CONFIG.logoUrl}
                     alt={post.authorName}
+                    loading={isVisiblePriority ? 'eager' : 'lazy'}
+                    decoding="async"
                     className="w-10 h-10 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 group-hover:ring-2 group-hover:ring-blue-500 transition-all"
                   />
                   <div>
@@ -694,6 +703,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                         src={primaryMediaUrl}
                         poster={post.thumbnailUrl}
                         controls
+                        priority={isVisiblePriority}
                         hideOnInvalid
                         className="w-full h-auto max-h-[440px] object-contain"
                       />
@@ -702,6 +712,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                         src={primaryMediaUrl}
                         alt={post.authorName ? `${post.authorName} feed image` : 'Feed image'}
                         fit="contain"
+                        priority={isVisiblePriority}
                         className="w-full h-auto max-h-[460px] object-contain mx-auto block"
                         fallbackText="Post image unavailable"
                       />
@@ -1000,6 +1011,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                       src={activeAnnouncementModal.mediaUrl}
                       poster={activeAnnouncementModal.thumbnailUrl}
                       controls
+                      priority
                       hideOnInvalid
                       className="w-full h-auto max-h-80 object-contain"
                     />
@@ -1008,6 +1020,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                       src={activeAnnouncementModal.mediaUrl}
                       alt={activeAnnouncementModal.title}
                       fit="contain"
+                      priority
                       className="w-full h-auto max-h-80 object-contain mx-auto block"
                       fallbackText="Announcement media unavailable"
                     />

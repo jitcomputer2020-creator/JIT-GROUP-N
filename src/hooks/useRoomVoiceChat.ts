@@ -24,7 +24,7 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
-const VOICE_HIGHPASS_HZ = 135;
+const VOICE_HIGHPASS_HZ = 130;
 const OUTGOING_LOWPASS_HZ = 4400;
 const INCOMING_LOWPASS_HZ = 4800;
 
@@ -250,9 +250,9 @@ export function useRoomVoiceChat({
         const compressor = ctx.createDynamicsCompressor();
         compressor.threshold.value = -24;
         compressor.knee.value = 16;
-        compressor.ratio.value = 3.2;
-        compressor.attack.value = 0.004;
-        compressor.release.value = 0.18;
+        compressor.ratio.value = 3.0;
+        compressor.attack.value = 0.005;
+        compressor.release.value = 0.2;
 
         const outGain = ctx.createGain();
         outGain.gain.value = 1.0;
@@ -736,6 +736,9 @@ export function useRoomVoiceChat({
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('Microphone audio is not supported by this browser.');
       }
+      if (rawMicStreamRef.current) {
+        stopLocalMicStream();
+      }
       const rawStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -761,7 +764,9 @@ export function useRoomVoiceChat({
             .getSenders()
             .find((s) => s.track?.kind === 'audio' || !s.track);
           if (existingAudioSender) {
-            existingAudioSender.replaceTrack(audioTrack).catch(() => {});
+            if (existingAudioSender.track !== audioTrack) {
+              existingAudioSender.replaceTrack(audioTrack).catch(() => {});
+            }
             const matchingTransceiver = pc
               .getTransceivers()
               .find((t) => t.sender === existingAudioSender);

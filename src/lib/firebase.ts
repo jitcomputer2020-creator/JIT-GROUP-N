@@ -2188,10 +2188,13 @@ function filterActiveWaitingRooms(
       continue;
     }
     if (parsed.roomCode === excludeRoomCode || parsed.roomId === excludeRoomCode) continue;
+    const currentAuthUid = auth.currentUser?.uid || '';
     if (
       parsed.player1Id === playerId ||
       parsed.player1 === playerId ||
       parsed.hostId === playerId ||
+      (currentAuthUid &&
+        (parsed.player1Id === currentAuthUid || parsed.player1AuthUid === currentAuthUid)) ||
       parsed.players.some((p) => p.id === playerId)
     ) {
       continue;
@@ -2211,27 +2214,44 @@ async function listWaitingQuickMatchRooms(
   playerId: string
 ): Promise<MultiplayerRoom[]> {
   try {
-    // Prefer ordered query (status == 'waiting', orderBy createdAt asc); seamlessly fall back if composite index is absent
-    let docsList: Array<{ data: () => Record<string, any>; id?: string }> = [];
-    try {
-      const orderedQ = query(
+    // Query waiting rooms for the selected gameType directly (two equality filters work without custom composite indexes)
+    const byTypeQ = query(
+      collection(db, 'gameRooms'),
+      where('gameType', '==', gameId),
+      where('status', '==', 'waiting'),
+      limit(50)
+    );
+    const byGameIdQ = query(
+      collection(db, 'gameRooms'),
+      where('gameId', '==', gameId),
+      where('status', '==', 'waiting'),
+      limit(50)
+    );
+    const [typeSnap, idSnap] = await Promise.all([
+      getDocsFromServer(byTypeQ).catch(() => getDocs(byTypeQ)),
+      getDocsFromServer(byGameIdQ).catch(() => getDocs(byGameIdQ)),
+    ]);
+
+    const mergedById = new Map<string, { data: () => Record<string, any>; id?: string }>();
+    typeSnap.docs.forEach((d) => mergedById.set(d.id, d));
+    idSnap.docs.forEach((d) => mergedById.set(d.id, d));
+
+    if (mergedById.size === 0) {
+      const broadQ = query(
         collection(db, 'gameRooms'),
         where('status', '==', 'waiting'),
-        orderBy('createdAt', 'asc'),
-        limit(50)
+        limit(100)
       );
-      const orderedSnap = await getDocsFromServer(orderedQ).catch(() => getDocs(orderedQ));
-      docsList = orderedSnap.docs;
-    } catch {
-      const fallbackQ = query(
-        collection(db, 'gameRooms'),
-        where('status', '==', 'waiting'),
-        limit(200)
-      );
-      const fallbackSnap = await getDocsFromServer(fallbackQ).catch(() => getDocs(fallbackQ));
-      docsList = fallbackSnap.docs;
+      const broadSnap = await getDocsFromServer(broadQ).catch(() => getDocs(broadQ));
+      broadSnap.docs.forEach((d) => mergedById.set(d.id, d));
     }
-    return filterActiveWaitingRooms(docsList, gameId, excludeRoomCode, playerId);
+
+    return filterActiveWaitingRooms(
+      Array.from(mergedById.values()),
+      gameId,
+      excludeRoomCode,
+      playerId
+    );
   } catch {
     return [];
   }
@@ -2254,8 +2274,9 @@ export function subscribeToPublicMatchmakingQueue(
 ): Unsubscribe {
   const q = query(
     collection(db, 'gameRooms'),
+    where('gameType', '==', gameId),
     where('status', '==', 'waiting'),
-    limit(500)
+    limit(100)
   );
   return onSnapshot(
     q,
@@ -2718,15 +2739,18 @@ export async function tryAtomicallyJoinWaitingRoom(
 
     const data = snap.data();
     const parsed = parseRoomSnapshotData(data);
+    const currentAuthUid = auth.currentUser?.uid || '';
     if (
       data.isPublicMatch === false ||
       parsed.isOpenGroup ||
-      parsed.gameId !== gameId ||
+      (parsed.gameType !== gameId && parsed.gameId !== gameId) ||
       parsed.status !== 'waiting' ||
       !isPlayer2Unassigned(data, parsed) ||
       parsed.player1Id === player.id ||
       parsed.player1 === player.id ||
       parsed.hostId === player.id ||
+      (currentAuthUid &&
+        (parsed.player1Id === currentAuthUid || parsed.player1AuthUid === currentAuthUid)) ||
       parsed.players.some((p) => p.id === player.id)
     ) {
       return null;

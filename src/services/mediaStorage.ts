@@ -25,6 +25,8 @@ interface StoredMediaRecord {
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+const resolvedIdbUrlCache = new Map<string, string>();
+const inFlightIdbResolve = new Map<string, Promise<string>>();
 
 function getDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
@@ -524,9 +526,24 @@ export function base64ToUint8(base64: string): Uint8Array {
 export async function resolveLocalMediaUrl(url?: string): Promise<string> {
   if (!url) return '';
   if (!url.startsWith('idb://')) return url;
+  const cached = resolvedIdbUrlCache.get(url);
+  if (cached) return cached;
+  const inFlight = inFlightIdbResolve.get(url);
+  if (inFlight) return inFlight;
+
   const id = url.slice('idb://'.length);
-  const resolved = await getMediaFile(id);
-  return resolved || '';
+  const promise = getMediaFile(id)
+    .then((resolved) => {
+      if (resolved) {
+        resolvedIdbUrlCache.set(url, resolved);
+      }
+      return resolved || '';
+    })
+    .finally(() => {
+      inFlightIdbResolve.delete(url);
+    });
+  inFlightIdbResolve.set(url, promise);
+  return promise;
 }
 
 /**

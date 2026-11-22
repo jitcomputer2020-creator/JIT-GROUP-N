@@ -163,6 +163,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const lastStartIdRef = useRef<string | null>(null);
   const prevRoomStatusRef = useRef<string | null>(null);
   const prevRoomStartedRef = useRef<boolean>(false);
+  const lastMatchToastRoomRef = useRef<string | null>(null);
   const isChatOpenRef = useRef<boolean>(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [isRoomSubmitting, setIsRoomSubmitting] = useState(false);
@@ -1094,10 +1095,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               (!room.gameState || !room.gameState.moveId));
 
           if (!wasStartedBefore && isRoomActive && room.isPublicMatch && !room.isOpenGroup) {
-            const displayCode =
-              room.roomCode.length > 8 ? room.roomCode.slice(0, 6).toUpperCase() : room.roomCode;
-            soundFx.playWin();
-            showRewardToast(`Match found! Connected to Room #${displayCode}`);
+            if (lastMatchToastRoomRef.current !== room.roomCode) {
+              lastMatchToastRoomRef.current = room.roomCode;
+              const displayCode =
+                room.roomCode.length > 8 ? room.roomCode.slice(0, 6).toUpperCase() : room.roomCode;
+              soundFx.playWin();
+              showRewardToast(`Match found! Connected to Room #${displayCode}`);
+            }
           }
 
           if (isFreshGameStart) {
@@ -1781,6 +1785,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       attachFirestoreRoomSubscription(room.roomCode);
 
       if (isMatchedNow) {
+        lastMatchToastRoomRef.current = room.roomCode;
         const initQuizSeed =
           typeof (room.boardState || room.gameState)?.questionSeed === 'number'
             ? (room.boardState || room.gameState).questionSeed
