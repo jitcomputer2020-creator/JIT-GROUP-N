@@ -28,6 +28,8 @@ import {
   subscribeToFirestoreConversations,
   subscribeToFirestoreMessages,
   sendFirestoreDirectMessage,
+  markChatMessagesAsRead,
+  updateChatTypingState,
   uploadVideoAssetToCloud,
   deriveUsername,
 } from '../lib/firebase';
@@ -117,14 +119,40 @@ const DEMO_CONVERSATIONS: Conversation[] = [
 
 const DEMO_BASE_MS = Date.now() - 30 * 60 * 1000;
 
+const TYPING_EXPIRY_MS = 4000;
+
+function getActiveTypingNames(
+  conv: Conversation | undefined,
+  currentUserId: string,
+  nowMs: number
+): string[] {
+  if (!conv?.typingUsers || !currentUserId) return [];
+  const names: string[] = [];
+  for (const [uid, rawTs] of Object.entries(conv.typingUsers)) {
+    if (!uid || uid === currentUserId) continue;
+    const ts = typeof rawTs === 'number' ? rawTs : Number(rawTs);
+    if (!Number.isFinite(ts)) continue;
+    const age = nowMs - ts;
+    if (age >= -2500 && age < TYPING_EXPIRY_MS) {
+      const resolvedName =
+        conv.participantsMap?.[uid]?.name ||
+        (conv.type === 'direct' ? conv.name : undefined) ||
+        'Friend';
+      names.push(resolvedName);
+    }
+  }
+  return names;
+}
+
 interface ConversationRowProps {
   conv: Conversation;
   isSelected: boolean;
+  isTyping?: boolean;
   onSelect: (convId: string) => void;
 }
 
 const ConversationRow: React.FC<ConversationRowProps> = React.memo(
-  ({ conv, isSelected, onSelect }) => (
+  ({ conv, isSelected, isTyping = false, onSelect }) => (
     <button
       onClick={() => onSelect(conv.id)}
       className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
@@ -155,9 +183,20 @@ const ConversationRow: React.FC<ConversationRowProps> = React.memo(
             {conv.updatedAt}
           </span>
         </div>
-        <p className="text-[11px] text-slate-500 truncate">
-          {conv.lastMessage?.text || 'Start chatting...'}
-        </p>
+        {isTyping ? (
+          <p className="text-[11px] font-semibold text-emerald-500 dark:text-emerald-400 flex items-center gap-1 truncate">
+            <span>typing</span>
+            <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+              <span className="w-1 h-1 rounded-full bg-emerald-500 dark:bg-emerald-400 jit-typing-dot" />
+              <span className="w-1 h-1 rounded-full bg-emerald-500 dark:bg-emerald-400 jit-typing-dot" />
+              <span className="w-1 h-1 rounded-full bg-emerald-500 dark:bg-emerald-400 jit-typing-dot" />
+            </span>
+          </p>
+        ) : (
+          <p className="text-[11px] text-slate-500 truncate">
+            {conv.lastMessage?.text || 'Start chatting...'}
+          </p>
+        )}
       </div>
 
       {conv.unreadCount > 0 && (
@@ -255,6 +294,17 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   const [aiThinking, setAiThinking] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const markingReadIdsRef = useRef<Set<string>>(new Set());
+
+  const [isTabActive, setIsTabActive] = useState<boolean>(() =>
+    typeof document === 'undefined' ? true : document.visibilityState === 'visible'
+  );
+  const [isDesktopViewport, setIsDesktopViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width: 768px)').matches
+      : true
+  );
+  const [typingClockNow, setTypingClockNow] = useState<number>(() => Date.now());
 
   // WebRTC Call state
   const [activeCall, setActiveCall] = useState<{
@@ -278,6 +328,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   // Reset state smoothly when currentUser switches
   useEffect(() => {
+    markingReadIdsRef.current.clear();
     if (!currentUser?.id) {
       setCloudConversations([]);
       setLocalConversations([]);
@@ -295,6 +346,38 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       setActiveConvId('');
     }
   }, [currentUser?.id]);
+
+  // Track browser tab visibility/focus + desktop split viewport for accurate read receipts
+  useEffect(() => {
+    const syncVisibility = () => {
+      const visible = typeof document === 'undefined' ? true : document.visibilityState === 'visible';
+      setIsTabActive(visible);
+    };
+    const handleFocus = () => setIsTabActive(true);
+    const handleBlur = () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        setIsTabActive(false);
+      }
+    };
+    document.addEventListener('visibilitychange', syncVisibility);
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+
+    let mql: MediaQueryList | null = null;
+    const handleViewportChange = (e: MediaQueryListEvent) => setIsDesktopViewport(e.matches);
+    if (typeof window.matchMedia === 'function') {
+      mql = window.matchMedia('(min-width: 768px)');
+      setIsDesktopViewport(mql.matches);
+      mql.addEventListener('change', handleViewportChange);
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibility);
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+      mql?.removeEventListener('change', handleViewportChange);
+    };
+  }, []);
 
   // Load per-user JIT AI Companion conversation history
   useEffect(() => {
@@ -550,6 +633,72 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     return sortMessagesChronologically(Array.from(byId.values()));
   }, [activeConv, cloudMessages, localMessages, aiMessages]);
 
+  const activeTypingNames = useMemo(
+    () =>
+      isAiThreadSelected
+        ? []
+        : getActiveTypingNames(activeConv, currentUser?.id || '', typingClockNow),
+    [isAiThreadSelected, activeConv, currentUser?.id, typingClockNow]
+  );
+
+  // Run lightweight 1s tick ONLY while any conversation has a recent typing timestamp so stale states auto-expire
+  useEffect(() => {
+    const now = Date.now();
+    const hasRecentTyping = conversations.some(
+      (c) =>
+        c.typingUsers &&
+        Object.entries(c.typingUsers).some(
+          ([uid, ts]) =>
+            uid !== currentUser?.id && typeof ts === 'number' && now - ts < TYPING_EXPIRY_MS + 1500
+        )
+    );
+    setTypingClockNow(now);
+    if (!hasRecentTyping) return;
+    const intervalId = window.setInterval(() => {
+      setTypingClockNow(Date.now());
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [conversations, currentUser?.id]);
+
+  // Mark incoming unread messages as read when the active chat thread is visible on screen
+  useEffect(() => {
+    const viewerId = currentUser?.id;
+    const isThreadVisible = isDesktopViewport || mobileThreadOpen;
+    if (
+      !viewerId ||
+      !activeConv ||
+      activeConv.id === JIT_AI_CONV_ID ||
+      !isTabActive ||
+      !isThreadVisible ||
+      cloudMessages.length === 0
+    ) {
+      return;
+    }
+
+    const unreadIncomingIds = cloudMessages
+      .filter((m) => {
+        if (!m.id || m.senderId === viewerId) return false;
+        const alreadyReadByViewer =
+          m.status === 'read' || (Array.isArray(m.readBy) && m.readBy.includes(viewerId));
+        return !alreadyReadByViewer && !markingReadIdsRef.current.has(m.id);
+      })
+      .map((m) => m.id);
+
+    if (unreadIncomingIds.length === 0) return;
+    unreadIncomingIds.forEach((id) => markingReadIdsRef.current.add(id));
+
+    markChatMessagesAsRead(activeConv.id, viewerId, unreadIncomingIds).catch(() => {
+      unreadIncomingIds.forEach((id) => markingReadIdsRef.current.delete(id));
+    });
+  }, [
+    currentUser?.id,
+    activeConv,
+    cloudMessages,
+    isTabActive,
+    isDesktopViewport,
+    mobileThreadOpen,
+  ]);
+
   const lastActiveMessage = activeMessages[activeMessages.length - 1];
   const lastActiveMessageKey = lastActiveMessage
     ? `${lastActiveMessage.id}:${getMessageTime(lastActiveMessage)}`
@@ -560,7 +709,14 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
     });
     return () => window.cancelAnimationFrame(rafId);
-  }, [activeMessages.length, lastActiveMessageKey, activeConv?.id, mobileThreadOpen, aiThinking]);
+  }, [
+    activeMessages.length,
+    lastActiveMessageKey,
+    activeConv?.id,
+    mobileThreadOpen,
+    aiThinking,
+    activeTypingNames.length,
+  ]);
 
   // Known peers pool for DM picker & Group member picker
   const selectablePeers = useMemo(() => {
@@ -765,6 +921,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         createdAtMs: nowMs,
         createdAtLabel: timeLabel,
         status: 'sent',
+        readBy: [currentUser.id],
       };
 
       setLocalMessages((prev) =>
@@ -855,6 +1012,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         createdAtMs: nowMs,
         createdAtLabel: timeLabel,
         status: activeConv.id === JIT_AI_CONV_ID ? 'read' : 'sent',
+        readBy: activeConv.id === JIT_AI_CONV_ID ? [currentUser.id, 'jit_ai_assistant'] : [currentUser.id],
       };
 
       if (activeConv.id === JIT_AI_CONV_ID) {
@@ -918,6 +1076,14 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   const handleClearSendError = useCallback(() => {
     setSendError(null);
   }, []);
+
+  const handleTypingChange = useCallback(
+    (isTyping: boolean) => {
+      if (!currentUser?.id || !activeConv || activeConv.id === JIT_AI_CONV_ID) return;
+      updateChatTypingState(activeConv.id, currentUser.id, isTyping).catch(() => {});
+    },
+    [currentUser?.id, activeConv]
+  );
 
   const startCall = (type: CallType) => {
     setActiveCall({
@@ -1151,6 +1317,9 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                     key={conv.id}
                     conv={conv}
                     isSelected={conv.id === activeConv?.id}
+                    isTyping={
+                      getActiveTypingNames(conv, currentUser?.id || '', typingClockNow).length > 0
+                    }
                     onSelect={handleSelectConversation}
                   />
                 ))
@@ -1315,11 +1484,26 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                   <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
                     {activeConv.name}
                   </h4>
-                  <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate">
-                    {activeConv.id === JIT_AI_CONV_ID
-                      ? 'JIT AI Companion · Studies, Code & General Chat'
-                      : 'Real-Time Sync Active · Free Personal & Group DM'}
-                  </p>
+                  {activeTypingNames.length > 0 ? (
+                    <p className="text-[11px] text-emerald-500 dark:text-emerald-400 font-semibold flex items-center gap-1 truncate">
+                      <span>
+                        {activeTypingNames.length === 1
+                          ? `${activeTypingNames[0]} is typing`
+                          : 'typing'}
+                      </span>
+                      <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+                        <span className="w-1 h-1 rounded-full bg-emerald-500 dark:bg-emerald-400 jit-typing-dot" />
+                        <span className="w-1 h-1 rounded-full bg-emerald-500 dark:bg-emerald-400 jit-typing-dot" />
+                        <span className="w-1 h-1 rounded-full bg-emerald-500 dark:bg-emerald-400 jit-typing-dot" />
+                      </span>
+                    </p>
+                  ) : (
+                    <p className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium truncate">
+                      {activeConv.id === JIT_AI_CONV_ID
+                        ? 'JIT AI Companion · Studies, Code & General Chat'
+                        : 'Real-Time Sync Active · Free Personal & Group DM'}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -1400,6 +1584,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               activeConvName={activeConv.name || 'Friend'}
               isAiThread={activeConv.id === JIT_AI_CONV_ID}
               aiThinking={aiThinking}
+              typingNames={activeTypingNames}
               onPromptChipClick={sendPromptToJitAi}
               messagesEndRef={messagesEndRef}
             />
@@ -1414,6 +1599,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               onClearExternalError={handleClearSendError}
               onSendMessage={handleSendMessage}
               onSendSticker={handleSendSticker}
+              onTypingChange={handleTypingChange}
             />
           </>
         )}

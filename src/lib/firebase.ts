@@ -47,6 +47,8 @@ import {
   limitToLast,
   where,
   serverTimestamp,
+  deleteField,
+  arrayUnion,
   Timestamp,
   Unsubscribe,
 } from 'firebase/firestore';
@@ -4723,6 +4725,17 @@ export async function createFirestoreGroupConversation(
   };
 }
 
+function sanitizeTypingUsersMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {};
+  const result: Record<string, number> = {};
+  for (const [uid, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof uid === 'string' && uid.trim() && typeof val === 'number' && Number.isFinite(val) && val > 0) {
+      result[uid] = val;
+    }
+  }
+  return result;
+}
+
 function mapChatDocToConversation(
   docId: string,
   data: Record<string, any>,
@@ -4755,6 +4768,7 @@ function mapChatDocToConversation(
     avatarUrl: peerInfo?.avatar || (typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
     participantIds,
     participantsMap: pMap,
+    typingUsers: sanitizeTypingUsersMap(data.typingUsers),
     lastMessage: lastText
       ? {
           text: lastText,
@@ -4921,7 +4935,11 @@ export function subscribeToFirestoreMessages(
           createdAt: epochMs,
           createdAtMs: epochMs,
           createdAtLabel: resolveMessageLabel(data, msgId),
-          status: (data.status as Message['status']) || 'delivered',
+          status: (data.status as Message['status']) || 'sent',
+          readBy: Array.isArray(data.readBy)
+            ? data.readBy.filter((x): x is string => typeof x === 'string')
+            : undefined,
+          readAt: data.readAt,
         });
       });
       onMessages(sortMessagesChronologically(list));
@@ -4930,6 +4948,68 @@ export function subscribeToFirestoreMessages(
       console.warn('messages onSnapshot notice:', err);
     }
   );
+}
+
+export async function markChatMessagesAsRead(
+  chatId: string,
+  readerId: string,
+  messageIds: string[]
+): Promise<void> {
+  if (!chatId || !readerId || messageIds.length === 0) return;
+  const rootCol = getChatCollectionRoot(chatId);
+  const uniqueIds = Array.from(new Set(messageIds.filter(Boolean)));
+  const CHUNK_SIZE = 350;
+
+  for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+    const slice = uniqueIds.slice(i, i + CHUNK_SIZE);
+    try {
+      const batch = writeBatch(db);
+      for (const msgId of slice) {
+        const msgRef = doc(db, rootCol, chatId, 'messages', msgId);
+        batch.update(msgRef, {
+          status: 'read',
+          readAt: serverTimestamp(),
+          readBy: arrayUnion(readerId),
+        });
+      }
+      await batch.commit();
+    } catch {
+      // Non-fatal if a message was removed or doc update raced
+    }
+  }
+}
+
+export async function updateChatTypingState(
+  chatId: string,
+  userId: string,
+  isTyping: boolean
+): Promise<void> {
+  if (!chatId || !userId) return;
+  const rootCol = getChatCollectionRoot(chatId);
+  const chatRef = doc(db, rootCol, chatId);
+  const safeUid = userId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  if (!safeUid) return;
+
+  try {
+    await updateDoc(chatRef, {
+      [`typingUsers.${safeUid}`]: isTyping ? Date.now() : deleteField(),
+    });
+  } catch (err: any) {
+    if (isTyping && err?.code === 'not-found') {
+      try {
+        await setDoc(
+          chatRef,
+          {
+            id: chatId,
+            typingUsers: { [safeUid]: Date.now() },
+          },
+          { merge: true }
+        );
+      } catch {
+        // Ignore transient typing state errors
+      }
+    }
+  }
 }
 
 export async function sendFirestoreDirectMessage(
@@ -4980,6 +5060,7 @@ export async function sendFirestoreDirectMessage(
       (conversation.participantIds?.length ? conversation.participantIds : [sender.id]).filter(Boolean)
     )
   ).sort();
+  const safeSenderKey = sender.id.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 
   const msgDoc: Record<string, any> = {
     id: msgId,
@@ -4993,7 +5074,8 @@ export async function sendFirestoreDirectMessage(
     ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: payload.mediaType || 'image' } : {}),
     ...(safeStickerId ? { stickerId: safeStickerId } : {}),
     ...(safeStickerData ? { stickerData: safeStickerData } : {}),
-    status: 'delivered',
+    status: 'sent',
+    readBy: [sender.id],
     timestamp: serverTimestamp(),
     clientCreatedAt,
   };
@@ -5028,6 +5110,11 @@ export async function sendFirestoreDirectMessage(
       },
       { merge: true }
     );
+    if (safeSenderKey) {
+      batch.update(chatRef, {
+        [`typingUsers.${safeSenderKey}`]: deleteField(),
+      });
+    }
 
     if (conversation.type === 'direct') {
       const recipientId = directRecipientId || participants.find((pid) => pid !== sender.id);
@@ -5077,7 +5164,8 @@ export async function sendFirestoreDirectMessage(
     createdAt: clientCreatedAt,
     createdAtLabel: timeLabel,
     createdAtMs: clientCreatedAt,
-    status: 'delivered',
+    status: 'sent',
+    readBy: [sender.id],
   };
 }
 

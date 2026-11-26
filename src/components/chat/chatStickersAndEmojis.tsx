@@ -75,9 +75,12 @@ export interface ChatStickerDef {
   emoji: string;
   gradientClass: string;
   borderClass: string;
+  animClass: string;
+  hoverAnimClass: string;
+  accent?: 'zzz' | 'sparkles' | 'heart' | 'rocket';
 }
 
-// 16 clean, crisp, vibrant sticker cards in a 4-column grid
+// 16 expressive, GPU-accelerated animated stickers in a 4-column grid
 export const CHAT_STICKERS: ChatStickerDef[] = [
   {
     id: 'stk_hi',
@@ -85,23 +88,30 @@ export const CHAT_STICKERS: ChatStickerDef[] = [
     badge: 'Hello 👋',
     emoji: '👋',
     gradientClass: 'from-blue-600 to-cyan-500',
-    borderClass: 'border-cyan-300/60',
+    borderClass: 'border-cyan-300/70',
+    animClass: 'jit-stk-anim-wave',
+    hoverAnimClass: 'jit-stk-hover-wave',
   },
   {
-    id: 'stk_gg',
-    label: 'GG',
-    badge: 'GG 🎮',
-    emoji: '🎮',
-    gradientClass: 'from-violet-600 to-indigo-600',
-    borderClass: 'border-violet-300/60',
+    id: 'stk_love',
+    label: 'Big Love',
+    badge: 'Big Love ❤️',
+    emoji: '❤️',
+    gradientClass: 'from-rose-600 to-pink-500',
+    borderClass: 'border-pink-200/75',
+    animClass: 'jit-stk-anim-pulse',
+    hoverAnimClass: 'jit-stk-hover-pulse',
+    accent: 'heart',
   },
   {
     id: 'stk_fire',
-    label: 'Fire',
-    badge: 'Fire 🔥',
+    label: 'On Fire',
+    badge: 'On Fire 🔥',
     emoji: '🔥',
     gradientClass: 'from-orange-600 to-red-600',
-    borderClass: 'border-amber-300/60',
+    borderClass: 'border-amber-300/75',
+    animClass: 'jit-stk-anim-flame',
+    hoverAnimClass: 'jit-stk-hover-flame',
   },
   {
     id: 'stk_lol',
@@ -109,47 +119,20 @@ export const CHAT_STICKERS: ChatStickerDef[] = [
     badge: 'LOL 😂',
     emoji: '😂',
     gradientClass: 'from-amber-500 to-orange-600',
-    borderClass: 'border-yellow-200/70',
-  },
-  {
-    id: 'stk_love',
-    label: 'Love',
-    badge: 'Love ❤️',
-    emoji: '❤️',
-    gradientClass: 'from-rose-600 to-pink-500',
-    borderClass: 'border-pink-200/70',
-  },
-  {
-    id: 'stk_thanks',
-    label: 'Thanks',
-    badge: 'Thanks 🙏',
-    emoji: '🙏',
-    gradientClass: 'from-sky-600 to-teal-500',
-    borderClass: 'border-sky-200/60',
-  },
-  {
-    id: 'stk_study',
-    label: 'Study',
-    badge: 'Study 📚',
-    emoji: '📚',
-    gradientClass: 'from-blue-700 to-indigo-500',
-    borderClass: 'border-blue-300/60',
+    borderClass: 'border-yellow-200/75',
+    animClass: 'jit-stk-anim-shake',
+    hoverAnimClass: 'jit-stk-hover-shake',
   },
   {
     id: 'stk_victory',
-    label: 'Winner',
-    badge: 'Winner 🏆',
+    label: 'Victory',
+    badge: 'Victory 🏆',
     emoji: '🏆',
     gradientClass: 'from-amber-600 to-yellow-500',
-    borderClass: 'border-yellow-200/70',
-  },
-  {
-    id: 'stk_cool',
-    label: 'Cool',
-    badge: 'Cool 😎',
-    emoji: '😎',
-    gradientClass: 'from-cyan-600 to-blue-600',
-    borderClass: 'border-cyan-200/60',
+    borderClass: 'border-yellow-200/80',
+    animClass: 'jit-stk-anim-spin-glow',
+    hoverAnimClass: 'jit-stk-hover-spin-glow',
+    accent: 'sparkles',
   },
   {
     id: 'stk_clap',
@@ -157,15 +140,19 @@ export const CHAT_STICKERS: ChatStickerDef[] = [
     badge: 'Clap 👏',
     emoji: '👏',
     gradientClass: 'from-emerald-600 to-green-500',
-    borderClass: 'border-emerald-200/60',
+    borderClass: 'border-emerald-200/70',
+    animClass: 'jit-stk-anim-clap',
+    hoverAnimClass: 'jit-stk-hover-clap',
   },
   {
-    id: 'stk_thinking',
-    label: 'Thinking',
-    badge: 'Thinking 🤔',
-    emoji: '🤔',
-    gradientClass: 'from-purple-600 to-fuchsia-600',
-    borderClass: 'border-purple-200/60',
+    id: 'stk_gg',
+    label: 'GG',
+    badge: 'GG 🎮',
+    emoji: '🎮',
+    gradientClass: 'from-violet-600 to-indigo-600',
+    borderClass: 'border-violet-300/70',
+    animClass: 'jit-stk-anim-wobble',
+    hoverAnimClass: 'jit-stk-hover-wobble',
   },
   {
     id: 'stk_party',
@@ -173,7 +160,10 @@ export const CHAT_STICKERS: ChatStickerDef[] = [
     badge: 'Party 🎉',
     emoji: '🎉',
     gradientClass: 'from-pink-600 to-purple-600',
-    borderClass: 'border-pink-200/60',
+    borderClass: 'border-pink-200/70',
+    animClass: 'jit-stk-anim-confetti',
+    hoverAnimClass: 'jit-stk-hover-confetti',
+    accent: 'sparkles',
   },
   {
     id: 'stk_100',
@@ -181,23 +171,71 @@ export const CHAT_STICKERS: ChatStickerDef[] = [
     badge: '100% 💯',
     emoji: '💯',
     gradientClass: 'from-red-600 to-orange-500',
-    borderClass: 'border-orange-200/70',
+    borderClass: 'border-orange-200/75',
+    animClass: 'jit-stk-anim-pulse',
+    hoverAnimClass: 'jit-stk-hover-pulse',
   },
   {
-    id: 'stk_yes',
-    label: 'Yes',
-    badge: 'Yes ✅',
-    emoji: '✅',
-    gradientClass: 'from-green-600 to-emerald-500',
-    borderClass: 'border-emerald-200/70',
+    id: 'stk_rocket',
+    label: "Let's Go",
+    badge: "Let's Go 🚀",
+    emoji: '🚀',
+    gradientClass: 'from-blue-600 to-indigo-700',
+    borderClass: 'border-sky-300/70',
+    animClass: 'jit-stk-anim-rocket',
+    hoverAnimClass: 'jit-stk-hover-rocket',
+    accent: 'rocket',
+  },
+  {
+    id: 'stk_thinking',
+    label: 'Hmm',
+    badge: 'Hmm 🤔',
+    emoji: '🤔',
+    gradientClass: 'from-purple-600 to-fuchsia-600',
+    borderClass: 'border-purple-200/70',
+    animClass: 'jit-stk-anim-think',
+    hoverAnimClass: 'jit-stk-hover-think',
   },
   {
     id: 'stk_night',
     label: 'Good Night',
     badge: 'Good Night 🌙',
     emoji: '🌙',
-    gradientClass: 'from-slate-800 to-indigo-800',
-    borderClass: 'border-indigo-300/60',
+    gradientClass: 'from-slate-800 to-indigo-900',
+    borderClass: 'border-indigo-300/65',
+    animClass: 'jit-stk-anim-sway',
+    hoverAnimClass: 'jit-stk-hover-sway',
+    accent: 'zzz',
+  },
+  {
+    id: 'stk_cool',
+    label: 'Cool',
+    badge: 'Cool 😎',
+    emoji: '😎',
+    gradientClass: 'from-cyan-600 to-blue-600',
+    borderClass: 'border-cyan-200/70',
+    animClass: 'jit-stk-anim-wobble',
+    hoverAnimClass: 'jit-stk-hover-wobble',
+  },
+  {
+    id: 'stk_thanks',
+    label: 'Thanks',
+    badge: 'Thanks 🙏',
+    emoji: '🙏',
+    gradientClass: 'from-sky-600 to-teal-500',
+    borderClass: 'border-sky-200/70',
+    animClass: 'jit-stk-anim-clap',
+    hoverAnimClass: 'jit-stk-hover-clap',
+  },
+  {
+    id: 'stk_study',
+    label: 'Study',
+    badge: 'Study 📚',
+    emoji: '📚',
+    gradientClass: 'from-blue-700 to-indigo-500',
+    borderClass: 'border-blue-300/70',
+    animClass: 'jit-stk-anim-think',
+    hoverAnimClass: 'jit-stk-hover-think',
   },
   {
     id: 'stk_star',
@@ -205,16 +243,19 @@ export const CHAT_STICKERS: ChatStickerDef[] = [
     badge: 'Star ⭐',
     emoji: '⭐',
     gradientClass: 'from-indigo-600 to-pink-500',
-    borderClass: 'border-yellow-200/70',
+    borderClass: 'border-yellow-200/75',
+    animClass: 'jit-stk-anim-spin-glow',
+    hoverAnimClass: 'jit-stk-hover-spin-glow',
+    accent: 'sparkles',
   },
 ];
 
 const LEGACY_STICKER_ALIAS: Record<string, string> = {
-  stk_thumbs: 'stk_yes',
+  stk_thumbs: 'stk_clap',
+  stk_yes: 'stk_100',
   stk_clutch: 'stk_gg',
   stk_brain: 'stk_thinking',
   stk_code: 'stk_study',
-  stk_rocket: 'stk_fire',
   stk_coffee: 'stk_study',
   stk_crown: 'stk_victory',
   stk_peace: 'stk_cool',
@@ -243,6 +284,70 @@ interface ChatStickerGraphicProps {
   variant?: 'message' | 'picker';
 }
 
+const StickerAccentOverlay: React.FC<{ accent?: ChatStickerDef['accent']; animated?: boolean }> = ({
+  accent,
+  animated = true,
+}) => {
+  if (accent === 'zzz') {
+    return (
+      <span
+        className={`pointer-events-none absolute top-1 right-1.5 text-[9px] font-black tracking-tighter text-indigo-200 ${
+          animated ? 'jit-stk-anim-zzz' : ''
+        }`}
+        aria-hidden="true"
+      >
+        Zzz
+      </span>
+    );
+  }
+  if (accent === 'sparkles') {
+    return (
+      <>
+        <svg
+          viewBox="0 0 16 16"
+          className={`pointer-events-none absolute top-1 left-1.5 w-3 h-3 text-yellow-200 ${
+            animated ? 'animate-pulse' : ''
+          }`}
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M8 0L9.8 6.2L16 8L9.8 9.8L8 16L6.2 9.8L0 8L6.2 6.2L8 0Z" />
+        </svg>
+        <svg
+          viewBox="0 0 16 16"
+          className={`pointer-events-none absolute top-2 right-1.5 w-2.5 h-2.5 text-white/90 ${
+            animated ? 'animate-pulse' : ''
+          }`}
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M8 0L9.8 6.2L16 8L9.8 9.8L8 16L6.2 9.8L0 8L6.2 6.2L8 0Z" />
+        </svg>
+      </>
+    );
+  }
+  if (accent === 'heart') {
+    return (
+      <span
+        className={`pointer-events-none absolute inset-1 rounded-xl border border-white/35 ${
+          animated ? 'animate-ping' : ''
+        }`}
+        style={{ animationDuration: '2.2s' }}
+        aria-hidden="true"
+      />
+    );
+  }
+  if (accent === 'rocket') {
+    return (
+      <span
+        className="pointer-events-none absolute bottom-5 left-2 w-2.5 h-2.5 rounded-full bg-amber-300/80 blur-[2px]"
+        aria-hidden="true"
+      />
+    );
+  }
+  return null;
+};
+
 export const ChatStickerGraphic: React.FC<ChatStickerGraphicProps> = React.memo(
   ({ stickerId, stickerData, variant = 'message' }) => {
     const sticker = findStickerById(stickerId, stickerData) || CHAT_STICKERS[0];
@@ -251,9 +356,14 @@ export const ChatStickerGraphic: React.FC<ChatStickerGraphicProps> = React.memo(
       return (
         <div className="w-full flex flex-col items-center justify-center gap-1.5 select-none">
           <div
-            className={`w-14 h-14 rounded-2xl bg-gradient-to-br ${sticker.gradientClass} border ${sticker.borderClass} flex items-center justify-center shadow-md`}
+            className={`relative w-14 h-14 rounded-2xl bg-gradient-to-br ${sticker.gradientClass} border ${sticker.borderClass} flex items-center justify-center shadow-md overflow-hidden`}
           >
-            <span className="text-[44px] leading-none" role="img" aria-label={sticker.label}>
+            <StickerAccentOverlay accent={sticker.accent} animated={false} />
+            <span
+              className={`text-[40px] leading-none inline-block ${sticker.hoverAnimClass}`}
+              role="img"
+              aria-label={sticker.label}
+            >
               {sticker.emoji}
             </span>
           </div>
@@ -264,19 +374,24 @@ export const ChatStickerGraphic: React.FC<ChatStickerGraphicProps> = React.memo(
       );
     }
 
-    // Chat message variant: clean 96x96px sticker with proper outer padding so edges never clip
+    // Chat message variant: animated 96x96px sticker with crisp padding so edges never clip
     return (
       <div
         className="w-24 h-24 p-1 inline-flex items-center justify-center select-none shrink-0"
         title={sticker.badge}
       >
         <div
-          className={`w-full h-full rounded-2xl bg-gradient-to-br ${sticker.gradientClass} border-2 ${sticker.borderClass} shadow-lg flex flex-col items-center justify-between px-1.5 py-1.5`}
+          className={`relative w-full h-full rounded-2xl bg-gradient-to-br ${sticker.gradientClass} border-2 ${sticker.borderClass} shadow-lg flex flex-col items-center justify-between px-1.5 py-1.5 overflow-hidden`}
         >
-          <span className="text-[44px] leading-none mt-0.5" role="img" aria-label={sticker.label}>
+          <StickerAccentOverlay accent={sticker.accent} animated />
+          <span
+            className={`text-[44px] leading-none mt-0.5 inline-block ${sticker.animClass}`}
+            role="img"
+            aria-label={sticker.label}
+          >
             {sticker.emoji}
           </span>
-          <span className="w-full text-center px-1.5 py-0.5 rounded-full bg-slate-950/85 text-[10px] font-extrabold text-white leading-tight truncate">
+          <span className="relative z-10 w-full text-center px-1.5 py-0.5 rounded-full bg-slate-950/85 text-[10px] font-extrabold text-white leading-tight truncate">
             {sticker.badge}
           </span>
         </div>
@@ -415,7 +530,7 @@ export const EmojiStickerPicker: React.FC<EmojiStickerPickerProps> = React.memo(
                 key={stk.id}
                 type="button"
                 onClick={() => onSelectSticker(stk)}
-                className="flex flex-col items-center justify-center p-1.5 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-transparent hover:border-indigo-500/60 transition-all active:scale-95"
+                className="group/stk flex flex-col items-center justify-center p-1.5 rounded-xl bg-slate-800/70 hover:bg-slate-800 border border-transparent hover:border-indigo-500/60 transition-all active:scale-95"
                 title={`Send ${stk.badge} sticker`}
               >
                 <ChatStickerGraphic stickerId={stk.id} variant="picker" />

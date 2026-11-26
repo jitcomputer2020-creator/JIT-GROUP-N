@@ -589,6 +589,7 @@
         "participants": { "type": "array", "description": "Sorted participant IDs." },
         "participantIds": { "type": "array", "description": "Participant IDs alias." },
         "participantsJson": { "type": "string", "maxLength": 30000 },
+        "typingUsers": { "type": "object", "description": "Map of active userId -> epoch ms typing timestamp." },
         "lastMessage": { "type": "string", "maxLength": 500 },
         "lastMessageText": { "type": "string", "maxLength": 500 },
         "lastMessageSenderId": { "type": "string", "maxLength": 64 },
@@ -618,6 +619,8 @@
         "mediaUrl": { "type": "string", "maxLength": 400000 },
         "mediaType": { "type": "string", "enum": ["image", "video", "file"] },
         "status": { "type": "string", "enum": ["sent", "delivered", "read"] },
+        "readBy": { "type": "array", "description": "List of user IDs who have read this message." },
+        "readAt": { "type": "string", "format": "date-time", "description": "Authoritative Firestore server timestamp when read." },
         "timestamp": { "type": "string", "format": "date-time", "description": "Authoritative Firestore serverTimestamp()." },
         "clientCreatedAt": { "type": "integer", "description": "Client fallback timestamp while serverTimestamp is pending." }
       },

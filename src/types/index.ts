@@ -167,6 +167,7 @@ export interface Conversation {
   avatarUrl?: string;
   participantIds: string[];
   participantsMap?: Record<string, { name: string; avatar?: string }>;
+  typingUsers?: Record<string, number>;
   lastMessage?: {
     text: string;
     senderId: string;
@@ -200,6 +201,8 @@ export interface Message {
   time?: string;
   date?: string;
   status: 'sent' | 'delivered' | 'read';
+  readBy?: string[];
+  readAt?: unknown;
 }
 
 export type CallType = 'voice' | 'video';

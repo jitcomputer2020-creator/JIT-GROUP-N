@@ -31,76 +31,86 @@ export function formatMessageTime(
 interface ChatMessageItemProps {
   msg: Message;
   isMe: boolean;
+  currentUserId: string;
 }
 
-const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({ msg, isMe }) => {
-  const isSticker = msg.type === 'sticker' || Boolean(msg.stickerId);
+const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(
+  ({ msg, isMe, currentUserId }) => {
+    const isSticker = msg.type === 'sticker' || Boolean(msg.stickerId);
+    const isRead =
+      msg.status === 'read' ||
+      (Array.isArray(msg.readBy) && msg.readBy.some((uid) => uid && uid !== currentUserId));
 
-  return (
-    <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-      {isSticker ? (
-        <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
-          {!isMe && (
-            <p className="text-[10px] font-bold text-blue-500 mb-1 px-1">{msg.senderName}</p>
-          )}
-          <ChatStickerGraphic
-            stickerId={msg.stickerId}
-            stickerData={msg.stickerData}
-            variant="message"
-          />
-        </div>
-      ) : (
-        <div
-          className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed break-words ${
-            isMe
-              ? 'bg-blue-600 text-white rounded-tr-sm shadow-sm'
-              : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-sm border border-slate-200 dark:border-slate-700 shadow-sm'
-          }`}
-        >
-          {!isMe && (
-            <p className="text-[10px] font-bold text-blue-500 mb-0.5">{msg.senderName}</p>
-          )}
-
-          {msg.mediaUrl && (
-            <div className="mb-2 rounded-xl overflow-hidden w-full">
-              {msg.mediaType === 'video' ? (
-                <ResilientVideo
-                  src={msg.mediaUrl}
-                  controls
-                  compactControls
-                  className="w-full h-auto max-h-56 object-contain"
-                />
-              ) : (
-                <ResponsiveImage
-                  src={msg.mediaUrl}
-                  alt="Chat attachment"
-                  fit="contain"
-                  className="w-full h-auto max-h-56 object-contain mx-auto block"
-                  fallbackText="Attachment unavailable"
-                />
-              )}
-            </div>
-          )}
-
-          {msg.content && <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
-        </div>
-      )}
-
-      <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
-        <span>{formatMessageTime(msg)}</span>
-        {isMe && (
-          <span>
-            {msg.status === 'read' ? (
-              <CheckCheck className="w-3 h-3 text-blue-500 inline" />
-            ) : (
-              <Check className="w-3 h-3 text-slate-400 inline" />
+    return (
+      <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+        {isSticker ? (
+          <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+            {!isMe && (
+              <p className="text-[10px] font-bold text-blue-500 mb-1 px-1">{msg.senderName}</p>
             )}
-          </span>
+            <ChatStickerGraphic
+              stickerId={msg.stickerId}
+              stickerData={msg.stickerData}
+              variant="message"
+            />
+          </div>
+        ) : (
+          <div
+            className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed break-words ${
+              isMe
+                ? 'bg-blue-600 text-white rounded-tr-sm shadow-sm'
+                : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-sm border border-slate-200 dark:border-slate-700 shadow-sm'
+            }`}
+          >
+            {!isMe && (
+              <p className="text-[10px] font-bold text-blue-500 mb-0.5">{msg.senderName}</p>
+            )}
+
+            {msg.mediaUrl && (
+              <div className="mb-2 rounded-xl overflow-hidden w-full">
+                {msg.mediaType === 'video' ? (
+                  <ResilientVideo
+                    src={msg.mediaUrl}
+                    controls
+                    compactControls
+                    className="w-full h-auto max-h-56 object-contain"
+                  />
+                ) : (
+                  <ResponsiveImage
+                    src={msg.mediaUrl}
+                    alt="Chat attachment"
+                    fit="contain"
+                    className="w-full h-auto max-h-56 object-contain mx-auto block"
+                    fallbackText="Attachment unavailable"
+                  />
+                )}
+              </div>
+            )}
+
+            {msg.content && <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
+          </div>
         )}
+
+        <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
+          <span>{formatMessageTime(msg)}</span>
+          {isMe && (
+            <span
+              className="inline-flex items-center"
+              title={isRead ? 'Read' : 'Sent'}
+              aria-label={isRead ? 'Read' : 'Sent'}
+            >
+              {isRead ? (
+                <CheckCheck className="w-3.5 h-3.5 text-sky-400 inline" />
+              ) : (
+                <Check className="w-3.5 h-3.5 text-slate-400 dark:text-slate-300/80 inline" />
+              )}
+            </span>
+          )}
+        </div>
       </div>
-    </div>
-  );
-});
+    );
+  }
+);
 
 ChatMessageItem.displayName = 'ChatMessageItem';
 
@@ -111,6 +121,7 @@ interface ChatMessageListProps {
   activeConvName: string;
   isAiThread: boolean;
   aiThinking: boolean;
+  typingNames?: string[];
   onPromptChipClick: (prompt: string) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
@@ -129,6 +140,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = React.memo(
     activeConvName,
     isAiThread,
     aiThinking,
+    typingNames = [],
     onPromptChipClick,
     messagesEndRef,
   }) => {
@@ -176,8 +188,30 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = React.memo(
               key={msg.id}
               msg={msg}
               isMe={msg.senderId === currentUserId}
+              currentUserId={currentUserId}
             />
           ))
+        )}
+
+        {typingNames.length > 0 && !isAiThread && (
+          <div className="flex items-start">
+            <div className="rounded-2xl rounded-tl-sm px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-emerald-500/40 text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-2 shadow-sm">
+              <span className="font-semibold">
+                {typingNames.length === 1 ? `${typingNames[0]} is typing` : 'typing'}
+              </span>
+              <span className="inline-flex items-center gap-1" aria-hidden="true">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 jit-typing-dot" />
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-500 jit-typing-dot"
+                  style={{ animationDelay: '0.18s' }}
+                />
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-500 jit-typing-dot"
+                  style={{ animationDelay: '0.36s' }}
+                />
+              </span>
+            </div>
+          </div>
         )}
 
         {aiThinking && isAiThread && (

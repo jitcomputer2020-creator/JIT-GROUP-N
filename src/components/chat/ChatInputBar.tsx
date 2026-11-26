@@ -20,6 +20,7 @@ interface ChatInputBarProps {
   onClearExternalError: () => void;
   onSendMessage: (content: string, attachedFile: File | null) => Promise<boolean>;
   onSendSticker: (sticker: ChatStickerDef) => Promise<void>;
+  onTypingChange?: (isTyping: boolean) => void;
 }
 
 export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
@@ -32,6 +33,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
     onClearExternalError,
     onSendMessage,
     onSendSticker,
+    onTypingChange,
   }) => {
     const [messageText, setMessageText] = useState('');
     const [attachedFile, setAttachedFile] = useState<File | null>(null);
@@ -42,6 +44,47 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textInputRef = useRef<HTMLInputElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const lastTypingPingRef = useRef<number>(0);
+    const stopTypingTimerRef = useRef<number | null>(null);
+    const wasTypingRef = useRef<boolean>(false);
+
+    const clearTypingSignal = useCallback(
+      (forceNotify = false) => {
+        if (stopTypingTimerRef.current !== null) {
+          window.clearTimeout(stopTypingTimerRef.current);
+          stopTypingTimerRef.current = null;
+        }
+        lastTypingPingRef.current = 0;
+        if (wasTypingRef.current || forceNotify) {
+          wasTypingRef.current = false;
+          onTypingChange?.(false);
+        }
+      },
+      [onTypingChange]
+    );
+
+    const notifyTypingActivity = useCallback(
+      (nextText: string) => {
+        if (isAiThread || !onTypingChange) return;
+        if (!nextText.trim()) {
+          clearTypingSignal();
+          return;
+        }
+        const now = Date.now();
+        if (!wasTypingRef.current || now - lastTypingPingRef.current >= 1500) {
+          lastTypingPingRef.current = now;
+          wasTypingRef.current = true;
+          onTypingChange(true);
+        }
+        if (stopTypingTimerRef.current !== null) {
+          window.clearTimeout(stopTypingTimerRef.current);
+        }
+        stopTypingTimerRef.current = window.setTimeout(() => {
+          clearTypingSignal(true);
+        }, 3000);
+      },
+      [isAiThread, onTypingChange, clearTypingSignal]
+    );
 
     const clearAttachment = useCallback(() => {
       setAttachedPreview((prev) => {
@@ -55,11 +98,15 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
       if (fileInputRef.current) fileInputRef.current.value = '';
     }, []);
 
-    // Close picker & clear draft attachment cleanly when switching conversations
+    // Close picker & clear draft attachment / typing cleanly when switching conversations
     useEffect(() => {
       setPickerOpen(false);
       clearAttachment();
-    }, [activeConvId, clearAttachment]);
+      clearTypingSignal();
+      return () => {
+        clearTypingSignal();
+      };
+    }, [activeConvId, clearAttachment, clearTypingSignal]);
 
     // Close popup on outside click
     useEffect(() => {
@@ -151,17 +198,19 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
 
     const handleClearText = useCallback(() => {
       setMessageText('');
+      clearTypingSignal();
       window.requestAnimationFrame(() => {
         textInputRef.current?.focus();
       });
-    }, []);
+    }, [clearTypingSignal]);
 
     const handlePickSticker = useCallback(
       async (sticker: ChatStickerDef) => {
         setPickerOpen(false);
+        clearTypingSignal();
         await onSendSticker(sticker);
       },
-      [onSendSticker]
+      [onSendSticker, clearTypingSignal]
     );
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -172,6 +221,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
       const fileToSend = attachedFile;
       setMessageText('');
       clearAttachment();
+      clearTypingSignal(true);
       setPickerOpen(false);
 
       const ok = await onSendMessage(trimmed, fileToSend);
@@ -278,7 +328,11 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
                 : 'Type your message...'
             }
             value={messageText}
-            onChange={(e) => setMessageText(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setMessageText(val);
+              notifyTypingActivity(val);
+            }}
             className="flex-1 min-w-0 px-3.5 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
           />
 
