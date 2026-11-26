@@ -112,6 +112,50 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
       });
     }, []);
 
+    const handleBackspace = useCallback(() => {
+      const inputEl = textInputRef.current;
+      setMessageText((prev) => {
+        if (!prev) return prev;
+        if (!inputEl) {
+          const chars = Array.from(prev);
+          chars.pop();
+          return chars.join('');
+        }
+        const start = inputEl.selectionStart ?? prev.length;
+        const end = inputEl.selectionEnd ?? prev.length;
+        if (start !== end) {
+          const next = prev.slice(0, start) + prev.slice(end);
+          window.requestAnimationFrame(() => {
+            if (textInputRef.current) {
+              textInputRef.current.focus();
+              textInputRef.current.setSelectionRange(start, start);
+            }
+          });
+          return next;
+        }
+        if (start === 0) return prev;
+        const beforeChars = Array.from(prev.slice(0, start));
+        const removed = beforeChars.pop() || '';
+        const nextBefore = beforeChars.join('');
+        const next = nextBefore + prev.slice(end);
+        const nextCaret = start - removed.length;
+        window.requestAnimationFrame(() => {
+          if (textInputRef.current) {
+            textInputRef.current.focus();
+            textInputRef.current.setSelectionRange(nextCaret, nextCaret);
+          }
+        });
+        return next;
+      });
+    }, []);
+
+    const handleClearText = useCallback(() => {
+      setMessageText('');
+      window.requestAnimationFrame(() => {
+        textInputRef.current?.focus();
+      });
+    }, []);
+
     const handlePickSticker = useCallback(
       async (sticker: ChatStickerDef) => {
         setPickerOpen(false);
@@ -143,6 +187,8 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
         {pickerOpen && (
           <EmojiStickerPicker
             onSelectEmoji={handleInsertEmoji}
+            onBackspace={handleBackspace}
+            onClearText={handleClearText}
             onSelectSticker={handlePickSticker}
             onClose={() => setPickerOpen(false)}
           />

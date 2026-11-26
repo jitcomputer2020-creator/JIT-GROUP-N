@@ -572,7 +572,8 @@
         "createdAt": { "type": "integer", "description": "Numeric Unix epoch timestamp in milliseconds." },
         "createdAtLabel": { "type": "string", "maxLength": 40, "description": "Formatted local time label." },
         "createdAtMs": { "type": "integer" },
-        "createdAtTs": { "type": "string", "format": "date-time" }
+        "createdAtTs": { "type": "string", "format": "date-time" },
+        "timestamp": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "conversationId", "senderId", "senderName", "content", "status", "createdAt", "createdAtMs", "createdAtTs"]
     },

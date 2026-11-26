@@ -58,6 +58,7 @@ import {
   isValidVideoUrl,
   sanitizeVideoUrl,
 } from './mediaValidation';
+import { normalizeTimestamp, sortMessagesChronologically } from './chatTimestamp';
 import {
   UserProfile,
   LeaderboardEntry,
@@ -4713,55 +4714,18 @@ export function subscribeToFirestoreConversations(
 }
 
 export function extractMessageEpochMs(data: Record<string, any>, docId?: string): number {
-  const numericCreated =
-    typeof data.createdAt === 'number' && Number.isFinite(data.createdAt)
-      ? data.createdAt
-      : typeof data.createdAt === 'string' && /^\d{10,}$/.test(data.createdAt.trim())
-      ? Number(data.createdAt.trim())
-      : 0;
-  if (numericCreated > 0) return numericCreated;
-
-  const numericMs = Number(data.createdAtMs || 0);
-  if (Number.isFinite(numericMs) && numericMs > 0) return numericMs;
-
-  if (data.createdAt && typeof data.createdAt.toMillis === 'function') {
-    const ms = data.createdAt.toMillis();
-    if (Number.isFinite(ms) && ms > 0) return ms;
-  }
-
-  if (data.createdAtTs && typeof data.createdAtTs.toMillis === 'function') {
-    const ms = data.createdAtTs.toMillis();
-    if (Number.isFinite(ms) && ms > 0) return ms;
-  }
-
-  if (typeof data.createdAt === 'string') {
-    const parsed = Date.parse(data.createdAt);
-    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-  }
-
-  if (typeof data.timestampIso === 'string') {
-    const parsed = Date.parse(data.timestampIso);
-    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-  }
-
-  if (typeof data.timestamp === 'string') {
-    const parsed = Date.parse(data.timestamp);
-    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
-  }
-
-  const idStr = String(data.id || docId || '');
-  const idMatch = idStr.match(/(\d{12,15})/);
-  if (idMatch) {
-    const parsed = Number(idMatch[1]);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-
-  return 0;
+  return normalizeTimestamp({
+    ...data,
+    id: String(data.id || docId || ''),
+  });
 }
 
 function resolveMessageLabel(data: Record<string, any>, epochMs: number): string {
   if (typeof data.createdAtLabel === 'string' && data.createdAtLabel.trim()) {
     return data.createdAtLabel;
+  }
+  if (typeof data.time === 'string' && data.time.trim()) {
+    return data.time;
   }
   if (typeof data.createdAt === 'string' && data.createdAt.trim() && !/^\d{10,}$/.test(data.createdAt.trim())) {
     return data.createdAt;
@@ -4779,8 +4743,7 @@ export function subscribeToFirestoreMessages(
   if (!conversationId) return () => {};
   const q = query(
     collection(db, 'conversations', conversationId, 'messages'),
-    orderBy('createdAtMs', 'asc'),
-    limitToLast(50)
+    limit(300)
   );
   return onSnapshot(
     q,
@@ -4802,18 +4765,17 @@ export function subscribeToFirestoreMessages(
           mediaType: data.mediaType as Message['mediaType'],
           stickerId: typeof data.stickerId === 'string' ? data.stickerId : undefined,
           stickerData: typeof data.stickerData === 'string' ? data.stickerData : undefined,
-          createdAt: epochMs || resolveMessageLabel(data, epochMs),
+          time: typeof data.time === 'string' ? data.time : undefined,
+          date: typeof data.date === 'string' ? data.date : undefined,
+          timestamp: data.timestamp,
+          createdAt: epochMs > 0 ? epochMs : 0,
           createdAtMs: epochMs,
           createdAtLabel: resolveMessageLabel(data, epochMs),
           status: (data.status as Message['status']) || 'delivered',
         });
       });
-      list.sort((a, b) => {
-        const tA = typeof a.createdAt === 'number' ? a.createdAt : a.createdAtMs || 0;
-        const tB = typeof b.createdAt === 'number' ? b.createdAt : b.createdAtMs || 0;
-        return tA - tB || a.id.localeCompare(b.id);
-      });
-      onMessages(list);
+      const sorted = sortMessagesChronologically(list);
+      onMessages(sorted.slice(-50));
     },
     (err) => {
       console.warn('messages onSnapshot notice:', err);
@@ -4897,6 +4859,7 @@ export async function sendFirestoreDirectMessage(
     createdAtLabel: timeLabel,
     createdAtMs: nowMs,
     createdAtTs: serverTimestamp(),
+    timestamp: serverTimestamp(),
   };
 
   const directRecipientId =
@@ -5981,6 +5944,7 @@ export async function adminFetchUserChatActivityClient(
 
   const toMsg = (id: string, fallbackConvId: string, data: Record<string, any>): Message & { createdAtMs?: number } => {
     const epochMs = extractMessageEpochMs(data, id);
+    const msgType = (data.type as Message['type']) || (data.stickerId ? 'sticker' : undefined);
     return {
       id: String(data.id || id),
       conversationId: String(data.conversationId || fallbackConvId),
@@ -5988,10 +5952,16 @@ export async function adminFetchUserChatActivityClient(
       receiverId: typeof data.receiverId === 'string' ? data.receiverId : undefined,
       senderName: String(data.senderName || 'JIT Member'),
       senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
+      type: msgType,
       content: String(data.content || ''),
       mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
       mediaType: data.mediaType as Message['mediaType'],
-      createdAt: resolveMessageLabel(data, epochMs),
+      stickerId: typeof data.stickerId === 'string' ? data.stickerId : undefined,
+      stickerData: typeof data.stickerData === 'string' ? data.stickerData : undefined,
+      time: typeof data.time === 'string' ? data.time : undefined,
+      date: typeof data.date === 'string' ? data.date : undefined,
+      timestamp: data.timestamp,
+      createdAt: epochMs > 0 ? epochMs : resolveMessageLabel(data, epochMs),
       createdAtLabel: resolveMessageLabel(data, epochMs),
       createdAtMs: epochMs,
       status: (data.status as Message['status']) || 'delivered',

@@ -10,46 +10,22 @@ import { ResilientVideo } from '../common/ResilientVideo';
 import { ChatStickerGraphic } from './chatStickersAndEmojis';
 import { Check, CheckCheck, Loader2, ShieldCheck, Sparkles } from 'lucide-react';
 
-export function getMessageTime(
-  m: Pick<Message, 'id' | 'createdAt' | 'createdAtMs' | 'timestamp'>
-): number {
-  if (typeof m.createdAt === 'number' && Number.isFinite(m.createdAt) && m.createdAt > 0) {
-    return m.createdAt;
-  }
-  const maybeCreatedAt = m.createdAt as unknown as { toMillis?: () => number } | undefined;
-  if (maybeCreatedAt && typeof maybeCreatedAt.toMillis === 'function') {
-    const ms = maybeCreatedAt.toMillis();
-    if (Number.isFinite(ms) && ms > 0) return ms;
-  }
-  if (typeof m.createdAtMs === 'number' && Number.isFinite(m.createdAtMs) && m.createdAtMs > 0) {
-    return m.createdAtMs;
-  }
-  if (typeof m.createdAt === 'string') {
-    const trimmed = m.createdAt.trim();
-    if (/^\d{10,}$/.test(trimmed)) {
-      const parsedNum = Number(trimmed);
-      if (Number.isFinite(parsedNum) && parsedNum > 0) return parsedNum;
-    }
-    const parsedDate = Date.parse(trimmed);
-    if (!Number.isNaN(parsedDate) && parsedDate > 0) return parsedDate;
-  }
-  if (typeof m.timestamp === 'string') {
-    const parsedTs = Date.parse(m.timestamp);
-    if (!Number.isNaN(parsedTs) && parsedTs > 0) return parsedTs;
-  }
-  const idMatch = String(m.id || '').match(/(\d{12,15})/);
-  if (idMatch) {
-    const parsedIdMs = Number(idMatch[1]);
-    if (Number.isFinite(parsedIdMs) && parsedIdMs > 0) return parsedIdMs;
-  }
-  return 0;
-}
+import { normalizeTimestamp, sortMessagesChronologically } from '../../lib/chatTimestamp';
+
+export { normalizeTimestamp, sortMessagesChronologically };
+export const getMessageTime = normalizeTimestamp;
 
 export function formatMessageTime(
-  msg: Pick<Message, 'id' | 'createdAt' | 'createdAtMs' | 'createdAtLabel' | 'timestamp'>
+  msg: Pick<
+    Message,
+    'id' | 'createdAt' | 'createdAtMs' | 'createdAtLabel' | 'timestamp' | 'time' | 'date'
+  >
 ): string {
   if (msg.createdAtLabel && msg.createdAtLabel.trim()) {
     return msg.createdAtLabel;
+  }
+  if (typeof msg.time === 'string' && msg.time.trim()) {
+    return msg.time;
   }
   if (
     typeof msg.createdAt === 'string' &&
@@ -58,20 +34,11 @@ export function formatMessageTime(
   ) {
     return msg.createdAt;
   }
-  const ms = getMessageTime(msg);
+  const ms = normalizeTimestamp(msg);
   if (ms > 0) {
     return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
   return 'Now';
-}
-
-export function sortMessagesChronologically(list: Message[]): Message[] {
-  return [...list].sort((a, b) => {
-    const aTime = getMessageTime(a);
-    const bTime = getMessageTime(b);
-    if (aTime !== bTime) return aTime - bTime;
-    return String(a.id || '').localeCompare(String(b.id || ''));
-  });
 }
 
 interface ChatMessageItemProps {
@@ -92,7 +59,7 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(({ msg, isMe 
           <ChatStickerGraphic
             stickerId={msg.stickerId}
             stickerData={msg.stickerData}
-            size={110}
+            variant="message"
           />
         </div>
       ) : (

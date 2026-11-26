@@ -194,7 +194,9 @@ export interface Message {
   createdAt: number | string;
   createdAtMs?: number;
   createdAtLabel?: string;
-  timestamp?: string;
+  timestamp?: unknown;
+  time?: string;
+  date?: string;
   status: 'sent' | 'delivered' | 'read';
 }
 

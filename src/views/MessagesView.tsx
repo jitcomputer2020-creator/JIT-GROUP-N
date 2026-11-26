@@ -494,7 +494,10 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       avatarUrl: APP_CONFIG.logoUrl,
       participantIds: ['jit_ai_assistant'],
       lastMessage: {
-        text: lastAiMsg?.content?.slice(0, 70) || 'Ask studies, code, or campus questions anytime',
+        text:
+          lastAiMsg?.type === 'sticker'
+            ? '[Sticker]'
+            : lastAiMsg?.content?.slice(0, 70) || 'Ask studies, code, or campus questions anytime',
         senderId: lastAiMsg?.senderId || 'jit_ai_assistant',
         createdAt: lastAiMsg ? formatMessageTime(lastAiMsg) : 'Online',
         isRead: true,
