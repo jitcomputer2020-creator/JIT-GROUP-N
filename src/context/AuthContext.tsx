@@ -599,17 +599,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     syncServerProfiles();
-    const interval = setInterval(() => {
-      syncServerProfiles();
-    }, 30 * 1000);
-    const onFocus = () => {
-      syncServerProfiles();
-    };
-    window.addEventListener('focus', onFocus);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', onFocus);
-    };
   }, [syncServerProfiles]);
 
   // Real-time Firestore profile listener so admin overrides (points, username, photos)

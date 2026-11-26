@@ -87,7 +87,7 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-in fade-in">
       <div className="w-full max-w-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
@@ -143,7 +143,7 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
                 <button
                   type="button"
                   onClick={handleRemoveMedia}
-                  className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                  className="absolute top-2 right-2 z-20 p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl transition-colors"
                   title="Remove Media"
                 >
                   <Trash2 className="w-4 h-4" />

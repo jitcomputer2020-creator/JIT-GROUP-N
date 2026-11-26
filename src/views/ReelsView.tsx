@@ -188,7 +188,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
         {/* Top Floating Bar */}
         <div className="absolute top-4 inset-x-3 sm:inset-x-4 z-20 flex items-center justify-between text-white drop-shadow-md">
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <span className="text-xs font-black uppercase tracking-wider bg-black/40 backdrop-blur-md px-2.5 py-1 rounded-xl">
+            <span className="text-xs font-black uppercase tracking-wider bg-black/65 px-2.5 py-1 rounded-xl">
               JIT Reels
             </span>
             <span className="text-[11px] text-white/80">
@@ -199,14 +199,14 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setIsAddReelOpen(true)}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-purple-600/90 hover:bg-purple-600 backdrop-blur-md text-white text-[11px] font-bold shadow-sm transition-all"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold shadow-sm transition-all"
             >
               <Plus className="w-3.5 h-3.5 stroke-[3]" />
               <span>Create</span>
             </button>
             <button
               onClick={toggleMute}
-              className="p-2 rounded-full bg-black/40 backdrop-blur-md hover:bg-black/60 transition-colors"
+              className="p-2 rounded-full bg-black/65 hover:bg-black/80 transition-colors"
             >
               {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
             </button>
@@ -252,8 +252,8 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           />
 
           {!isPlaying && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[2px]">
-              <div className="w-16 h-16 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center">
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+              <div className="w-16 h-16 rounded-full bg-black/65 border border-white/20 flex items-center justify-center">
                 <Play className="w-8 h-8 text-white fill-white ml-1" />
               </div>
             </div>
@@ -298,7 +298,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
             onClick={() => toggleLikeReel(currentReel.id)}
             className="flex flex-col items-center gap-1 group"
           >
-            <div className={`p-2.5 rounded-full bg-black/40 backdrop-blur-md group-hover:scale-110 transition-transform ${currentReel.isLiked ? 'text-red-500' : 'text-white'}`}>
+            <div className={`p-2.5 rounded-full bg-black/65 group-hover:scale-110 transition-transform ${currentReel.isLiked ? 'text-red-500' : 'text-white'}`}>
               <Heart className={`w-5 h-5 ${currentReel.isLiked ? 'fill-current' : ''}`} />
             </div>
             <span className="text-[10px] font-bold font-mono">{currentReel.likesCount}</span>
@@ -306,7 +306,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
 
           {/* Comments */}
           <button onClick={() => setShowComments(true)} className="flex flex-col items-center gap-1 group">
-            <div className="p-2.5 rounded-full bg-black/40 backdrop-blur-md group-hover:scale-110 transition-transform text-white">
+            <div className="p-2.5 rounded-full bg-black/65 group-hover:scale-110 transition-transform text-white">
               <MessageCircle className="w-5 h-5" />
             </div>
             <span className="text-[10px] font-bold font-mono">{commentsList.length > 0 ? commentsList.length : currentReel.commentsCount}</span>
@@ -314,7 +314,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
 
           {/* Share */}
           <button onClick={handleShare} className="flex flex-col items-center gap-1 group">
-            <div className="p-2.5 rounded-full bg-black/40 backdrop-blur-md group-hover:scale-110 transition-transform text-white">
+            <div className="p-2.5 rounded-full bg-black/65 group-hover:scale-110 transition-transform text-white">
               {copied ? <Check className="w-5 h-5 text-emerald-400" /> : <Share2 className="w-5 h-5" />}
             </div>
             <span className="text-[10px] font-bold font-mono">{copied ? 'Copied' : currentReel.sharesCount}</span>
@@ -326,7 +326,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
               type="button"
               onClick={handlePrevReel}
               disabled={currentIndex === 0}
-              className="p-2 rounded-full bg-black/50 backdrop-blur-md text-white disabled:opacity-30 active:scale-95"
+              className="p-2 rounded-full bg-black/70 text-white disabled:opacity-30 active:scale-95"
               aria-label="Previous Reel"
             >
               <ChevronUp className="w-4 h-4" />
@@ -334,7 +334,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
             <button
               type="button"
               onClick={handleNextReel}
-              className="p-2 rounded-full bg-black/50 backdrop-blur-md text-white active:scale-95"
+              className="p-2 rounded-full bg-black/70 text-white active:scale-95"
               aria-label="Next Reel"
             >
               <ChevronDown className="w-4 h-4" />
@@ -365,7 +365,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           {/* Custom Scrubber & Play/Pause Control Strip */}
           <div
             onClick={(e) => e.stopPropagation()}
-            className="flex items-center gap-2 bg-black/45 backdrop-blur-md px-2.5 py-1.5 rounded-xl border border-white/10"
+            className="flex items-center gap-2 bg-black/70 px-2.5 py-1.5 rounded-xl border border-white/10"
           >
             <button
               type="button"
@@ -419,7 +419,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
 
         {/* Comments Drawer */}
         {showComments && (
-          <div className="absolute inset-x-0 bottom-0 h-3/5 bg-slate-900/95 backdrop-blur-md rounded-t-3xl z-30 p-4 flex flex-col text-white animate-in slide-in-from-bottom">
+          <div className="absolute inset-x-0 bottom-0 h-3/5 bg-slate-900 rounded-t-3xl z-30 p-4 flex flex-col text-white animate-in slide-in-from-bottom">
             <div className="flex items-center justify-between pb-2 border-b border-slate-800 mb-3">
               <span className="text-xs font-bold uppercase tracking-wider">
                 Comments ({commentsList.length})

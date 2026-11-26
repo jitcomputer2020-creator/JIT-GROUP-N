@@ -44,6 +44,7 @@ import {
   query,
   orderBy,
   limit,
+  limitToLast,
   where,
   serverTimestamp,
   Timestamp,
@@ -4743,6 +4744,11 @@ export function extractMessageEpochMs(data: Record<string, any>, docId?: string)
     if (!Number.isNaN(parsed) && parsed > 0) return parsed;
   }
 
+  if (typeof data.timestamp === 'string') {
+    const parsed = Date.parse(data.timestamp);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+
   const idStr = String(data.id || docId || '');
   const idMatch = idStr.match(/(\d{12,15})/);
   if (idMatch) {
@@ -4773,7 +4779,8 @@ export function subscribeToFirestoreMessages(
   if (!conversationId) return () => {};
   const q = query(
     collection(db, 'conversations', conversationId, 'messages'),
-    limit(500)
+    orderBy('createdAtMs', 'asc'),
+    limitToLast(50)
   );
   return onSnapshot(
     q,
@@ -4782,15 +4789,19 @@ export function subscribeToFirestoreMessages(
       snap.forEach((d) => {
         const data = d.data();
         const epochMs = extractMessageEpochMs(data, d.id);
+        const msgType = (data.type as Message['type']) || (data.stickerId ? 'sticker' : undefined);
         list.push({
           id: String(data.id || d.id),
           conversationId: String(data.conversationId || conversationId),
           senderId: String(data.senderId || ''),
           senderName: String(data.senderName || 'JIT Member'),
           senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
+          type: msgType,
           content: String(data.content || ''),
           mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
           mediaType: data.mediaType as Message['mediaType'],
+          stickerId: typeof data.stickerId === 'string' ? data.stickerId : undefined,
+          stickerData: typeof data.stickerData === 'string' ? data.stickerData : undefined,
           createdAt: epochMs || resolveMessageLabel(data, epochMs),
           createdAtMs: epochMs,
           createdAtLabel: resolveMessageLabel(data, epochMs),
@@ -4813,16 +4824,39 @@ export function subscribeToFirestoreMessages(
 export async function sendFirestoreDirectMessage(
   conversation: Conversation,
   sender: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
-  payload: { content: string; mediaUrl?: string; mediaType?: 'image' | 'video' | 'file' }
+  payload: {
+    id?: string;
+    createdAtMs?: number;
+    type?: Message['type'];
+    content: string;
+    mediaUrl?: string;
+    mediaType?: 'image' | 'video' | 'file';
+    stickerId?: string;
+    stickerData?: string;
+  }
 ): Promise<Message> {
-  const nowMs = Date.now();
+  const nowMs =
+    typeof payload.createdAtMs === 'number' && Number.isFinite(payload.createdAtMs) && payload.createdAtMs > 0
+      ? payload.createdAtMs
+      : Date.now();
   const timeLabel = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const msgId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+  const msgId = (
+    payload.id || `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`
+  ).slice(0, 120);
   const senderName = (sender.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
   const senderAvatar = sanitizeAvatarUrl(sender.avatarUrl);
   const cleanContent = (payload.content || '').trim().slice(0, 4000);
   const safeMediaUrl =
     payload.mediaUrl && payload.mediaUrl.length <= 400000 ? payload.mediaUrl : undefined;
+  const resolvedType: Message['type'] =
+    payload.type || (payload.stickerId ? 'sticker' : safeMediaUrl ? payload.mediaType || 'image' : 'text');
+  const safeStickerId = payload.stickerId ? String(payload.stickerId).slice(0, 64) : undefined;
+  const safeStickerData = payload.stickerData ? String(payload.stickerData).slice(0, 8000) : undefined;
+  const previewText = (
+    resolvedType === 'sticker'
+      ? cleanContent || '[Sticker]'
+      : cleanContent || '[Media Attachment]'
+  ).slice(0, 500);
 
   const convRef = doc(db, 'conversations', conversation.id);
   const existingConv = await getDoc(convRef).catch(() => null);
@@ -4838,7 +4872,7 @@ export async function sendFirestoreDirectMessage(
       avatarUrl: sanitizeAvatarUrl(conversation.avatarUrl),
       participantIds: pIds,
       participantsJson: JSON.stringify(conversation.participantsMap || {}).slice(0, 29500),
-      lastMessageText: (cleanContent || '[Media Attachment]').slice(0, 500),
+      lastMessageText: previewText,
       lastMessageSenderId: sender.id,
       lastMessageAt: timeLabel,
       updatedAtMs: nowMs,
@@ -4853,8 +4887,11 @@ export async function sendFirestoreDirectMessage(
     senderId: sender.id,
     senderName,
     senderAvatar,
+    type: resolvedType,
     content: cleanContent,
     ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: payload.mediaType || 'image' } : {}),
+    ...(safeStickerId ? { stickerId: safeStickerId } : {}),
+    ...(safeStickerData ? { stickerData: safeStickerData } : {}),
     status: 'delivered',
     createdAt: nowMs,
     createdAtLabel: timeLabel,
@@ -4874,7 +4911,7 @@ export async function sendFirestoreDirectMessage(
     const batch = writeBatch(db);
     batch.set(doc(db, 'conversations', conversation.id, 'messages', msgId), msgDoc);
     batch.update(convRef, {
-      lastMessageText: (cleanContent || '[Media Attachment]').slice(0, 500),
+      lastMessageText: previewText,
       lastMessageSenderId: sender.id,
       lastMessageAt: timeLabel,
       updatedAtMs: nowMs,
@@ -4893,7 +4930,7 @@ export async function sendFirestoreDirectMessage(
           fromUserAvatar: senderAvatar,
           type: 'message',
           title: `Message from ${senderName}`,
-          message: (cleanContent || 'Sent an attachment').slice(0, 390),
+          message: (resolvedType === 'sticker' ? 'Sent a sticker' : cleanContent || 'Sent an attachment').slice(0, 390),
           isRead: false,
           createdAtIso: new Date(nowMs).toISOString(),
           createdAtMs: nowMs,
@@ -4922,9 +4959,12 @@ export async function sendFirestoreDirectMessage(
     ...(directRecipientId ? { receiverId: directRecipientId } : {}),
     senderName,
     senderAvatar,
+    type: resolvedType,
     content: cleanContent,
     mediaUrl: safeMediaUrl,
     mediaType: safeMediaUrl ? payload.mediaType || 'image' : undefined,
+    stickerId: safeStickerId,
+    stickerData: safeStickerData,
     createdAt: nowMs,
     createdAtLabel: timeLabel,
     createdAtMs: nowMs,

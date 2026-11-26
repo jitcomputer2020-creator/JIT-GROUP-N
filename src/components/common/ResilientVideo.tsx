@@ -198,7 +198,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = memo(
               className="absolute inset-0 w-full h-full object-cover opacity-55"
             />
           )}
-          <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/75 backdrop-blur-sm px-4 py-3 rounded-2xl border border-white/15">
+          <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/90 px-4 py-3 rounded-2xl border border-white/15">
             <Video className="w-6 h-6 text-slate-400" />
             <p className="text-xs font-semibold text-white">Video preview unavailable</p>
           </div>
@@ -223,7 +223,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = memo(
               className="absolute inset-0 w-full h-full object-cover opacity-55"
             />
           )}
-          <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/75 backdrop-blur-sm px-4 py-3 rounded-2xl border border-white/15">
+          <div className="relative z-10 flex flex-col items-center gap-2 bg-slate-900/90 px-4 py-3 rounded-2xl border border-white/15">
             {resolvingMedia ? (
               <Loader2 className="w-6 h-6 text-blue-400 animate-spin" />
             ) : (

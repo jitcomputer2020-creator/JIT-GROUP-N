@@ -302,19 +302,22 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({ onNavigate }) 
     }, 950);
   };
 
+  const answerTournamentQuizRef = React.useRef(handleAnswerTournamentQuiz);
+  answerTournamentQuizRef.current = handleAnswerTournamentQuiz;
+
   useEffect(() => {
     if (!isQuizArenaOpen || quizLoading || quizFinished || quizSelectedOpt !== null) return;
     const id = window.setInterval(() => {
       setQuizTimer((t) => {
         if (t <= 1) {
-          handleAnswerTournamentQuiz(null);
+          answerTournamentQuizRef.current(null);
           return 15;
         }
         return t - 1;
       });
     }, 1000);
     return () => window.clearInterval(id);
-  });
+  }, [isQuizArenaOpen, quizLoading, quizFinished, quizSelectedOpt]);
 
   const liveCount = tournaments.filter((t) => t.status === 'live').length;
   const upcomingCount = tournaments.filter((t) => t.status === 'upcoming').length;
@@ -683,7 +686,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({ onNavigate }) 
 
       {/* 5. Live AI Quiz Tournament Arena Modal (Strict 70% CS / 30% General Trivia) */}
       {isQuizArenaOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-sm animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 animate-in fade-in">
           <div className="w-full max-w-xl max-h-[92dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5">
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
               <div>

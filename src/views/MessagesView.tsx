@@ -3,17 +3,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useSocial } from '../context/SocialContext';
 import { Conversation, Message, CallType, CallStatus, NavTab, UserProfile } from '../types';
 import { INITIAL_FRIENDS, INITIAL_USER } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
-import { saveMediaFile, validateMediaFile, VIDEO_EXPIRY_MS } from '../services/mediaStorage';
-import { ResponsiveImage } from '../components/common/ResponsiveImage';
-import { ResilientVideo } from '../components/common/ResilientVideo';
+import { saveMediaFile, VIDEO_EXPIRY_MS } from '../services/mediaStorage';
 import { sendJitAiChat, JitAiChatTurn } from '../services/aiClient';
 import { detectExpressBackendAvailable, safeFetchJson } from '../utils/safeFetch';
+import {
+  ChatMessageList,
+  formatMessageTime,
+  getMessageTime,
+  sortMessagesChronologically,
+} from '../components/chat/ChatMessageList';
+import { ChatInputBar } from '../components/chat/ChatInputBar';
+import { ChatStickerDef } from '../components/chat/chatStickersAndEmojis';
 import {
   fetchPublicDirectory,
   searchCloudUsers,
@@ -26,21 +32,16 @@ import {
   deriveUsername,
 } from '../lib/firebase';
 import {
-  Send,
   Phone,
   Video,
   Mic,
   MicOff,
   VideoOff,
   PhoneOff,
-  Paperclip,
   Search,
-  CheckCheck,
-  Check,
   Plus,
   Users,
   MoreVertical,
-  ShieldCheck,
   X,
   ArrowLeft,
   MessageSquarePlus,
@@ -116,52 +117,59 @@ const DEMO_CONVERSATIONS: Conversation[] = [
 
 const DEMO_BASE_MS = Date.now() - 30 * 60 * 1000;
 
-function getMessageEpochMs(msg: Pick<Message, 'id' | 'createdAt' | 'createdAtMs'>): number {
-  if (typeof msg.createdAt === 'number' && Number.isFinite(msg.createdAt) && msg.createdAt > 0) {
-    return msg.createdAt;
-  }
-  if (typeof msg.createdAtMs === 'number' && Number.isFinite(msg.createdAtMs) && msg.createdAtMs > 0) {
-    return msg.createdAtMs;
-  }
-  if (typeof msg.createdAt === 'string') {
-    const trimmed = msg.createdAt.trim();
-    if (/^\d{10,}$/.test(trimmed)) {
-      const parsedNum = Number(trimmed);
-      if (Number.isFinite(parsedNum) && parsedNum > 0) return parsedNum;
-    }
-    const parsedDate = Date.parse(trimmed);
-    if (!Number.isNaN(parsedDate) && parsedDate > 0) return parsedDate;
-  }
-  const idMatch = String(msg.id || '').match(/(\d{12,15})/);
-  if (idMatch) {
-    const parsedIdMs = Number(idMatch[1]);
-    if (Number.isFinite(parsedIdMs) && parsedIdMs > 0) return parsedIdMs;
-  }
-  return 0;
+interface ConversationRowProps {
+  conv: Conversation;
+  isSelected: boolean;
+  onSelect: (convId: string) => void;
 }
 
-function formatMessageTime(msg: Pick<Message, 'id' | 'createdAt' | 'createdAtMs' | 'createdAtLabel'>): string {
-  if (msg.createdAtLabel && msg.createdAtLabel.trim()) {
-    return msg.createdAtLabel;
-  }
-  if (typeof msg.createdAt === 'string' && msg.createdAt.trim() && !/^\d{10,}$/.test(msg.createdAt.trim())) {
-    return msg.createdAt;
-  }
-  const ms = getMessageEpochMs(msg);
-  if (ms > 0) {
-    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return 'Now';
-}
+const ConversationRow: React.FC<ConversationRowProps> = React.memo(
+  ({ conv, isSelected, onSelect }) => (
+    <button
+      onClick={() => onSelect(conv.id)}
+      className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
+        isSelected
+          ? 'bg-blue-50/70 dark:bg-blue-950/30'
+          : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+      }`}
+    >
+      <div className="relative shrink-0">
+        <img
+          src={conv.avatarUrl || APP_CONFIG.logoUrl}
+          alt={conv.name}
+          className="w-11 h-11 rounded-2xl object-cover border border-slate-200 dark:border-slate-700"
+        />
+        {conv.type === 'group' && (
+          <div className="absolute -bottom-1 -right-1 p-0.5 bg-blue-600 text-white rounded-md">
+            <Users className="w-2.5 h-2.5" />
+          </div>
+        )}
+      </div>
 
-function sortMessagesChronologically(list: Message[]): Message[] {
-  return [...list].sort((a, b) => {
-    const tA = getMessageEpochMs(a);
-    const tB = getMessageEpochMs(b);
-    if (tA !== tB) return tA - tB;
-    return String(a.id || '').localeCompare(String(b.id || ''));
-  });
-}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between mb-0.5">
+          <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
+            {conv.name || 'JIT Member'}
+          </h4>
+          <span className="text-[10px] text-slate-400 font-mono shrink-0">
+            {conv.updatedAt}
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-500 truncate">
+          {conv.lastMessage?.text || 'Start chatting...'}
+        </p>
+      </div>
+
+      {conv.unreadCount > 0 && (
+        <span className="shrink-0 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center font-mono">
+          {conv.unreadCount}
+        </span>
+      )}
+    </button>
+  )
+);
+
+ConversationRow.displayName = 'ConversationRow';
 
 const DEMO_SEED_MESSAGES: Message[] = [
   {
@@ -219,12 +227,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   );
   const [mobileThreadOpen, setMobileThreadOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [messageText, setMessageText] = useState('');
   const [sendingMessage, setSendingMessage] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [attachedFile, setAttachedFile] = useState<File | null>(null);
-  const [attachedPreview, setAttachedPreview] = useState<string | null>(null);
-  const [attachError, setAttachError] = useState<string | null>(null);
 
   // Modals: New DM & New Group
   const [isNewDmOpen, setIsNewDmOpen] = useState(false);
@@ -249,7 +253,6 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   const [aiMessages, setAiMessages] = useState<Message[]>([]);
   const [aiThinking, setAiThinking] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // WebRTC Call state
@@ -304,7 +307,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const normalized = parsed.map((m: Message, idx: number) => {
-            const ms = getMessageEpochMs(m) || Date.now() - (parsed.length - idx) * 1000;
+            const ms = getMessageTime(m) || Date.now() - (parsed.length - idx) * 1000;
             return {
               ...m,
               createdAt: ms,
@@ -388,11 +391,10 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   // Subscribe to real-time messages for active conversation
   useEffect(() => {
+    setCloudMessages([]);
     if (!activeConvId || activeConvId === JIT_AI_CONV_ID) {
-      setCloudMessages([]);
       return;
     }
-    // Demo seed threads prefixed `conv_00` only live locally unless persisted
     const unsub = subscribeToFirestoreMessages(activeConvId, (msgs) => {
       setCloudMessages(msgs);
     });
@@ -419,7 +421,16 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         });
       }
       if (Array.isArray(data.messages) && data.messages.length > 0) {
-        setLocalMessages(data.messages);
+        const normalized = data.messages.map((m, idx) => {
+          const ms = getMessageTime(m) || DEMO_BASE_MS + idx * 60_000;
+          return {
+            ...m,
+            createdAt: ms,
+            createdAtMs: ms,
+            createdAtLabel: formatMessageTime(m),
+          };
+        });
+        setLocalMessages(sortMessagesChronologically(normalized));
       }
     })();
     return () => {
@@ -536,7 +547,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   const lastActiveMessage = activeMessages[activeMessages.length - 1];
   const lastActiveMessageKey = lastActiveMessage
-    ? `${lastActiveMessage.id}:${getMessageEpochMs(lastActiveMessage)}`
+    ? `${lastActiveMessage.id}:${getMessageTime(lastActiveMessage)}`
     : '';
 
   useEffect(() => {
@@ -604,203 +615,287 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     }
   };
 
-  const handleFileAttach = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setAttachError(null);
-    const validation = validateMediaFile(file, { maxSizeMb: 15 });
-    if (!validation.valid) {
-      setAttachError(validation.error || 'Invalid file');
-      return;
-    }
-
-    setAttachedFile(file);
-    setAttachedPreview(URL.createObjectURL(file));
-  };
-
-  const clearAttachment = () => {
-    if (attachedPreview && attachedPreview.startsWith('blob:')) {
-      URL.revokeObjectURL(attachedPreview);
-    }
-    setAttachedFile(null);
-    setAttachedPreview(null);
-    setAttachError(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleClearAiChat = () => {
-    if (!currentUser) return;
-    const nowMs = Date.now();
-    const resetMsg: Message = {
-      id: `ai_welcome_${nowMs}`,
-      conversationId: JIT_AI_CONV_ID,
-      senderId: 'jit_ai_assistant',
-      senderName: 'JIT AI Assistant',
-      content: `Fresh chat started! Ask me about Computer Science, exams, coding errors, or general questions.`,
-      createdAt: nowMs,
-      createdAtMs: nowMs,
-      createdAtLabel: 'Now',
-      status: 'read',
-    };
-    setAiMessages([resetMsg]);
-    setSendError(null);
-  };
-
-  const sendPromptToJitAi = async (promptText: string) => {
-    if (!promptText.trim() || !currentUser || aiThinking) return;
-    const clean = promptText.trim();
-    const userCreatedAt = Date.now();
-    const nowTime = new Date(userCreatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const userMsg: Message = {
-      id: `ai_u_${userCreatedAt}`,
-      conversationId: JIT_AI_CONV_ID,
-      senderId: currentUser.id,
-      senderName: currentUser.fullName,
-      content: clean,
-      createdAt: userCreatedAt,
-      createdAtMs: userCreatedAt,
-      createdAtLabel: nowTime,
-      status: 'read',
-    };
-
-    const historyTurns: JitAiChatTurn[] = sortMessagesChronologically(aiMessages)
-      .filter((m) => !m.id.startsWith('ai_welcome_'))
-      .slice(-10)
-      .map((m) => ({
-        role: m.senderId === currentUser.id ? 'user' : 'model',
-        text: m.content,
-      }));
-
-    setAiMessages((prev) => sortMessagesChronologically([...prev, userMsg]));
-    setAiThinking(true);
-    setSendError(null);
-
-    try {
-      const res = await sendJitAiChat({
-        message: clean,
-        history: historyTurns,
-        userName: currentUser.fullName,
-        mode: aiMode,
+  const sendPromptToJitAi = useCallback(
+    async (promptText: string) => {
+      if (!promptText.trim() || !currentUser || aiThinking) return;
+      const clean = promptText.trim();
+      const userCreatedAt = Date.now();
+      const nowTime = new Date(userCreatedAt).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
       });
-
-      const replyCreatedAt = Math.max(Date.now(), userCreatedAt + 1);
-      const replyMsg: Message = {
-        id: `ai_m_${replyCreatedAt}_${Math.random().toString(36).slice(2, 5)}`,
+      const userMsg: Message = {
+        id: `ai_u_${userCreatedAt}`,
         conversationId: JIT_AI_CONV_ID,
-        senderId: 'jit_ai_assistant',
-        senderName: 'JIT AI Assistant',
-        content: res.reply,
-        createdAt: replyCreatedAt,
-        createdAtMs: replyCreatedAt,
-        createdAtLabel: new Date(replyCreatedAt).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
+        senderId: currentUser.id,
+        senderName: currentUser.fullName,
+        type: 'text',
+        content: clean,
+        createdAt: userCreatedAt,
+        createdAtMs: userCreatedAt,
+        createdAtLabel: nowTime,
         status: 'read',
       };
-      setAiMessages((prev) => sortMessagesChronologically([...prev, replyMsg]));
-    } catch (err: any) {
-      setSendError(err?.message || 'Unable to reach JIT AI right now.');
-    } finally {
-      setAiThinking(false);
-    }
-  };
 
-  const handleSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if ((!messageText.trim() && !attachedFile) || !currentUser || !activeConv) return;
+      const historyTurns: JitAiChatTurn[] = sortMessagesChronologically(aiMessages)
+        .filter((m) => !m.id.startsWith('ai_welcome_') && m.type !== 'sticker')
+        .slice(-10)
+        .map((m) => ({
+          role: m.senderId === currentUser.id ? 'user' : 'model',
+          text: m.content,
+        }));
 
-    if (activeConv.id === JIT_AI_CONV_ID) {
-      const prompt = messageText.trim();
-      if (!prompt) return;
-      setMessageText('');
-      await sendPromptToJitAi(prompt);
-      return;
-    }
+      setAiMessages((prev) => sortMessagesChronologically([...prev, userMsg]));
+      setAiThinking(true);
+      setSendError(null);
 
-    setSendError(null);
-    setSendingMessage(true);
-
-    let mediaUrl: string | undefined;
-    let mediaType: 'image' | 'video' | 'file' | undefined;
-
-    if (attachedFile) {
       try {
-        if (attachedFile.type.startsWith('video/')) {
-          const uploaded = await uploadVideoAssetToCloud(
-            currentUser.id,
-            attachedFile,
-            '',
-            Date.now() + VIDEO_EXPIRY_MS
-          );
-          mediaUrl = uploaded.videoUrl;
-          mediaType = 'video';
-        } else {
-          const { dataUrl } = await saveMediaFile(attachedFile);
-          mediaUrl = dataUrl;
-          mediaType = attachedFile.type.startsWith('image/') ? 'image' : 'file';
-        }
+        const res = await sendJitAiChat({
+          message: clean,
+          history: historyTurns,
+          userName: currentUser.fullName,
+          mode: aiMode,
+        });
+
+        const replyCreatedAt = Math.max(Date.now(), userCreatedAt + 1);
+        const replyMsg: Message = {
+          id: `ai_m_${replyCreatedAt}_${Math.random().toString(36).slice(2, 5)}`,
+          conversationId: JIT_AI_CONV_ID,
+          senderId: 'jit_ai_assistant',
+          senderName: 'JIT AI Assistant',
+          type: 'text',
+          content: res.reply,
+          createdAt: replyCreatedAt,
+          createdAtMs: replyCreatedAt,
+          createdAtLabel: new Date(replyCreatedAt).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          status: 'read',
+        };
+        setAiMessages((prev) => sortMessagesChronologically([...prev, replyMsg]));
       } catch (err: any) {
-        setAttachError(err?.message || 'Failed to process attached media');
-        setSendingMessage(false);
-        return;
+        setSendError(err?.message || 'Unable to reach JIT AI right now.');
+      } finally {
+        setAiThinking(false);
       }
-    }
+    },
+    [currentUser, aiThinking, aiMessages, aiMode]
+  );
 
-    const contentToSend = messageText.trim();
-    setMessageText('');
-    clearAttachment();
+  const handleSendMessage = useCallback(
+    async (contentToSend: string, fileToSend: File | null): Promise<boolean> => {
+      if ((!contentToSend.trim() && !fileToSend) || !currentUser || !activeConv) return false;
 
-    try {
-      const sentMsg = await sendFirestoreDirectMessage(activeConv, currentUser, {
-        content: contentToSend,
+      if (activeConv.id === JIT_AI_CONV_ID) {
+        const prompt = contentToSend.trim();
+        if (!prompt) return false;
+        await sendPromptToJitAi(prompt);
+        return true;
+      }
+
+      setSendError(null);
+      setSendingMessage(true);
+
+      let mediaUrl: string | undefined;
+      let mediaType: 'image' | 'video' | 'file' | undefined;
+
+      if (fileToSend) {
+        try {
+          if (fileToSend.type.startsWith('video/')) {
+            const uploaded = await uploadVideoAssetToCloud(
+              currentUser.id,
+              fileToSend,
+              '',
+              Date.now() + VIDEO_EXPIRY_MS
+            );
+            mediaUrl = uploaded.videoUrl;
+            mediaType = 'video';
+          } else {
+            const { dataUrl } = await saveMediaFile(fileToSend);
+            mediaUrl = dataUrl;
+            mediaType = fileToSend.type.startsWith('image/') ? 'image' : 'file';
+          }
+        } catch (err: any) {
+          setSendError(err?.message || 'Failed to process attached media');
+          setSendingMessage(false);
+          return false;
+        }
+      }
+
+      const nowMs = Date.now();
+      const timeLabel = new Date(nowMs).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const optimisticId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+      const resolvedType: Message['type'] = mediaUrl ? mediaType || 'image' : 'text';
+
+      const optimisticMsg: Message = {
+        id: optimisticId,
+        conversationId: activeConv.id,
+        senderId: currentUser.id,
+        senderName: currentUser.fullName,
+        senderAvatar: currentUser.avatarUrl,
+        type: resolvedType,
+        content: contentToSend.trim(),
         mediaUrl,
         mediaType,
-      });
+        createdAt: nowMs,
+        createdAtMs: nowMs,
+        createdAtLabel: timeLabel,
+        status: 'sent',
+      };
 
-      const sentTimeLabel = formatMessageTime(sentMsg);
       setLocalMessages((prev) =>
-        prev.some((m) => m.id === sentMsg.id)
+        prev.some((m) => m.id === optimisticId)
           ? prev
-          : sortMessagesChronologically([...prev, sentMsg])
-      );
-      setLocalConversations((prev) =>
-        prev.map((c) =>
-          c.id === activeConv.id
-            ? {
-                ...c,
-                lastMessage: {
-                  text: sentMsg.content || (mediaUrl ? '[Image Attachment]' : ''),
-                  senderId: currentUser.id,
-                  createdAt: sentTimeLabel,
-                  isRead: true,
-                },
-                updatedAt: sentTimeLabel,
-                updatedAtMs: getMessageEpochMs(sentMsg) || Date.now(),
-              }
-            : c
-        )
+          : sortMessagesChronologically([...prev, optimisticMsg])
       );
 
-      // Best-effort Express mirror when server backend is running
-      detectExpressBackendAvailable()
-        .then((hasBackend) => {
-          if (!hasBackend) return;
-          return fetch('/api/messages', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: sentMsg }),
-          });
-        })
-        .catch(() => {});
-    } catch (err: any) {
-      setMessageText(contentToSend);
-      setSendError(err?.message || 'Message failed to send. Please check connection and retry.');
-    } finally {
-      setSendingMessage(false);
-    }
-  };
+      try {
+        const sentMsg = await sendFirestoreDirectMessage(activeConv, currentUser, {
+          id: optimisticId,
+          createdAtMs: nowMs,
+          type: resolvedType,
+          content: contentToSend.trim(),
+          mediaUrl,
+          mediaType,
+        });
+
+        const sentTimeLabel = formatMessageTime(sentMsg);
+        setLocalMessages((prev) =>
+          sortMessagesChronologically(
+            prev.map((m) => (m.id === sentMsg.id ? sentMsg : m))
+          )
+        );
+        setLocalConversations((prev) =>
+          prev.map((c) =>
+            c.id === activeConv.id
+              ? {
+                  ...c,
+                  lastMessage: {
+                    text: sentMsg.content || (mediaUrl ? '[Media Attachment]' : ''),
+                    senderId: currentUser.id,
+                    createdAt: sentTimeLabel,
+                    isRead: true,
+                  },
+                  updatedAt: sentTimeLabel,
+                  updatedAtMs: getMessageTime(sentMsg) || nowMs,
+                }
+              : c
+          )
+        );
+
+        detectExpressBackendAvailable()
+          .then((hasBackend) => {
+            if (!hasBackend) return;
+            return fetch('/api/messages', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: sentMsg }),
+            });
+          })
+          .catch(() => {});
+        return true;
+      } catch (err: any) {
+        setLocalMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+        setSendError(err?.message || 'Message failed to send. Please check connection and retry.');
+        return false;
+      } finally {
+        setSendingMessage(false);
+      }
+    },
+    [currentUser, activeConv, sendPromptToJitAi]
+  );
+
+  const handleSendSticker = useCallback(
+    async (sticker: ChatStickerDef) => {
+      if (!currentUser || !activeConv) return;
+      const nowMs = Date.now();
+      const timeLabel = new Date(nowMs).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const optimisticId = `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+
+      const stickerMsg: Message = {
+        id: optimisticId,
+        conversationId: activeConv.id,
+        senderId: currentUser.id,
+        senderName: currentUser.fullName,
+        senderAvatar: currentUser.avatarUrl,
+        type: 'sticker',
+        stickerId: sticker.id,
+        stickerData: sticker.id,
+        content: '',
+        createdAt: nowMs,
+        createdAtMs: nowMs,
+        createdAtLabel: timeLabel,
+        status: activeConv.id === JIT_AI_CONV_ID ? 'read' : 'sent',
+      };
+
+      if (activeConv.id === JIT_AI_CONV_ID) {
+        setAiMessages((prev) => sortMessagesChronologically([...prev, stickerMsg]));
+        return;
+      }
+
+      setSendError(null);
+      setLocalMessages((prev) =>
+        prev.some((m) => m.id === optimisticId)
+          ? prev
+          : sortMessagesChronologically([...prev, stickerMsg])
+      );
+
+      try {
+        const sentMsg = await sendFirestoreDirectMessage(activeConv, currentUser, {
+          id: optimisticId,
+          createdAtMs: nowMs,
+          type: 'sticker',
+          content: '',
+          stickerId: sticker.id,
+          stickerData: sticker.id,
+        });
+
+        const sentTimeLabel = formatMessageTime(sentMsg);
+        setLocalMessages((prev) =>
+          sortMessagesChronologically(
+            prev.map((m) => (m.id === sentMsg.id ? sentMsg : m))
+          )
+        );
+        setLocalConversations((prev) =>
+          prev.map((c) =>
+            c.id === activeConv.id
+              ? {
+                  ...c,
+                  lastMessage: {
+                    text: `[Sticker: ${sticker.label}]`,
+                    senderId: currentUser.id,
+                    createdAt: sentTimeLabel,
+                    isRead: true,
+                  },
+                  updatedAt: sentTimeLabel,
+                  updatedAtMs: getMessageTime(sentMsg) || nowMs,
+                }
+              : c
+          )
+        );
+      } catch (err: any) {
+        setLocalMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+        setSendError(err?.message || 'Sticker failed to send. Please check connection and retry.');
+      }
+    },
+    [currentUser, activeConv]
+  );
+
+  const handleSelectConversation = useCallback((convId: string) => {
+    setActiveConvId(convId);
+    setMobileThreadOpen(true);
+  }, []);
+
+  const handleClearSendError = useCallback(() => {
+    setSendError(null);
+  }, []);
 
   const startCall = (type: CallType) => {
     setActiveCall({
@@ -996,56 +1091,14 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               </button>
             </div>
           ) : (
-            filteredConversations.map((conv) => {
-              const isSelected = conv.id === activeConv?.id;
-              return (
-                <button
-                  key={conv.id}
-                  onClick={() => {
-                    setActiveConvId(conv.id);
-                    setMobileThreadOpen(true);
-                  }}
-                  className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
-                    isSelected
-                      ? 'bg-blue-50/70 dark:bg-blue-950/30'
-                      : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                  }`}
-                >
-                  <div className="relative shrink-0">
-                    <img
-                      src={conv.avatarUrl || APP_CONFIG.logoUrl}
-                      alt={conv.name}
-                      className="w-11 h-11 rounded-2xl object-cover border border-slate-200 dark:border-slate-700"
-                    />
-                    {conv.type === 'group' && (
-                      <div className="absolute -bottom-1 -right-1 p-0.5 bg-blue-600 text-white rounded-md">
-                        <Users className="w-2.5 h-2.5" />
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between mb-0.5">
-                      <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                        {conv.name || 'JIT Member'}
-                      </h4>
-                      <span className="text-[10px] text-slate-400 font-mono shrink-0">
-                        {conv.updatedAt}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-500 truncate">
-                      {conv.lastMessage?.text || 'Start chatting...'}
-                    </p>
-                  </div>
-
-                  {conv.unreadCount > 0 && (
-                    <span className="shrink-0 bg-blue-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center font-mono">
-                      {conv.unreadCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })
+            filteredConversations.map((conv) => (
+              <ConversationRow
+                key={conv.id}
+                conv={conv}
+                isSelected={conv.id === activeConv?.id}
+                onSelect={handleSelectConversation}
+              />
+            ))
           )}
         </div>
       </div>
@@ -1127,7 +1180,25 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                   </div>
                   <button
                     type="button"
-                    onClick={handleClearAiChat}
+                    onClick={() => {
+                      const nowMs = Date.now();
+                      setAiMessages([
+                        {
+                          id: `ai_welcome_${nowMs}`,
+                          conversationId: JIT_AI_CONV_ID,
+                          senderId: 'jit_ai_assistant',
+                          senderName: 'JIT AI Assistant',
+                          type: 'text',
+                          content:
+                            'Fresh chat started! Ask me about Computer Science, exams, coding errors, or general questions.',
+                          createdAt: nowMs,
+                          createdAtMs: nowMs,
+                          createdAtLabel: 'Now',
+                          status: 'read',
+                        },
+                      ]);
+                      setSendError(null);
+                    }}
                     className="p-2 text-slate-400 hover:text-red-500 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     title="Clear AI Chat History"
                   >
@@ -1158,223 +1229,36 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               )}
             </div>
 
-            {/* Message Bubble Feed */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 no-scrollbar">
-              <div className="flex justify-center my-2">
-                <span className="text-[10px] text-slate-500 bg-slate-100 dark:bg-slate-800/80 px-3 py-1 rounded-full flex items-center gap-1.5 border border-slate-200 dark:border-slate-700">
-                  {activeConv.id === JIT_AI_CONV_ID ? (
-                    <>
-                      <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-                      <span>JIT AI · Ask Studies, Coding, Exams &amp; Campus Questions</span>
-                    </>
-                  ) : (
-                    <>
-                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-                      <span>Firebase Cloud Sync · Private Direct &amp; Group Messages</span>
-                    </>
-                  )}
-                </span>
-              </div>
+            {/* Memoized Message Bubble & Sticker Feed */}
+            <ChatMessageList
+              messages={activeMessages}
+              currentUserId={currentUser.id}
+              activeConvId={activeConv.id}
+              activeConvName={activeConv.name || 'Friend'}
+              isAiThread={activeConv.id === JIT_AI_CONV_ID}
+              aiThinking={aiThinking}
+              onPromptChipClick={sendPromptToJitAi}
+              messagesEndRef={messagesEndRef}
+            />
 
-              {activeConv.id === JIT_AI_CONV_ID && (
-                <div className="flex flex-wrap gap-1.5 justify-center pb-2">
-                  {[
-                    'Explain DBMS 1NF, 2NF, 3NF',
-                    'BFS vs DFS in DSA',
-                    'Debug React useEffect loop',
-                    'Make a 5-day exam study plan',
-                  ].map((promptChip) => (
-                    <button
-                      key={promptChip}
-                      type="button"
-                      disabled={aiThinking}
-                      onClick={() => sendPromptToJitAi(promptChip)}
-                      className="px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-indigo-200/80 dark:border-slate-700 hover:border-indigo-500 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 transition-colors"
-                    >
-                      {promptChip}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {activeMessages.length === 0 ? (
-                <p className="text-center text-xs text-slate-400 py-8">
-                  Say hello to {activeConv.name}! Messages sync instantaneously.
-                </p>
-              ) : (
-                activeMessages.map((msg) => {
-                  const isMe = msg.senderId === currentUser.id;
-                  return (
-                    <div
-                      key={msg.id}
-                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
-                    >
-                      <div
-                        className={`max-w-[85%] sm:max-w-[75%] rounded-2xl p-3 text-xs leading-relaxed break-words ${
-                          isMe
-                            ? 'bg-blue-600 text-white rounded-tr-sm shadow-sm'
-                            : 'bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 rounded-tl-sm border border-slate-200 dark:border-slate-700 shadow-sm'
-                        }`}
-                      >
-                        {!isMe && (
-                          <p className="text-[10px] font-bold text-blue-500 mb-0.5">
-                            {msg.senderName}
-                          </p>
-                        )}
-
-                        {msg.mediaUrl && (
-                          <div className="mb-2 rounded-xl overflow-hidden w-full">
-                            {msg.mediaType === 'video' ? (
-                              <ResilientVideo
-                                src={msg.mediaUrl}
-                                controls
-                                compactControls
-                                className="w-full h-auto max-h-56 object-contain"
-                              />
-                            ) : (
-                              <ResponsiveImage
-                                src={msg.mediaUrl}
-                                alt="Chat attachment"
-                                fit="contain"
-                                className="w-full h-auto max-h-56 object-contain mx-auto block"
-                                fallbackText="Attachment unavailable"
-                              />
-                            )}
-                          </div>
-                        )}
-
-                        {msg.content && (
-                          <p className="whitespace-pre-wrap break-words">{msg.content}</p>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
-                        <span>{formatMessageTime(msg)}</span>
-                        {isMe && (
-                          <span>
-                            {msg.status === 'read' ? (
-                              <CheckCheck className="w-3 h-3 text-blue-500 inline" />
-                            ) : (
-                              <Check className="w-3 h-3 text-slate-400 inline" />
-                            )}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-              {aiThinking && activeConv.id === JIT_AI_CONV_ID && (
-                <div className="flex items-start">
-                  <div className="rounded-2xl rounded-tl-sm px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-indigo-200 dark:border-slate-700 text-xs text-indigo-600 dark:text-indigo-300 flex items-center gap-2 shadow-sm">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    <span>JIT AI is thinking...</span>
-                  </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            {/* Attachment preview */}
-            {attachedPreview && (
-              <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <img
-                    src={attachedPreview}
-                    alt="Upload preview"
-                    className="w-10 h-10 rounded-lg object-cover border border-slate-300 dark:border-slate-600"
-                  />
-                  <span className="text-xs text-slate-700 dark:text-slate-300 truncate max-w-[200px]">
-                    {attachedFile?.name}
-                  </span>
-                </div>
-                <button
-                  onClick={clearAttachment}
-                  className="p-1 text-slate-400 hover:text-red-500"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            )}
-
-            {(attachError || sendError) && (
-              <div className="px-4 py-1.5 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 flex items-center justify-between">
-                <span>{attachError || sendError}</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAttachError(null);
-                    setSendError(null);
-                  }}
-                  className="p-0.5"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
-
-            {/* Message Input Bar */}
-            <form
-              onSubmit={handleSendMessage}
-              className="p-3 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2"
-            >
-              {activeConv.id !== JIT_AI_CONV_ID && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
-                    title="Attach Image"
-                  >
-                    <Paperclip className="w-4 h-4" />
-                  </button>
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    onChange={handleFileAttach}
-                    accept="image/*"
-                    className="hidden"
-                  />
-                </>
-              )}
-
-              <input
-                type="text"
-                placeholder={
-                  activeConv.id === JIT_AI_CONV_ID
-                    ? 'Ask JIT AI about studies, CS, code, or anything...'
-                    : 'Type your message...'
-                }
-                value={messageText}
-                onChange={(e) => setMessageText(e.target.value)}
-                className="flex-1 px-3.5 py-2 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
-              />
-              <button
-                type="submit"
-                disabled={
-                  (!messageText.trim() && !attachedFile) ||
-                  sendingMessage ||
-                  (activeConv.id === JIT_AI_CONV_ID && aiThinking)
-                }
-                className={`p-2 disabled:opacity-40 text-white rounded-xl shadow-sm transition-colors ${
-                  activeConv.id === JIT_AI_CONV_ID
-                    ? 'bg-indigo-600 hover:bg-indigo-700'
-                    : 'bg-blue-600 hover:bg-blue-700'
-                }`}
-              >
-                {sendingMessage || (activeConv.id === JIT_AI_CONV_ID && aiThinking) ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Send className="w-4 h-4" />
-                )}
-              </button>
-            </form>
+            {/* Isolated Chat Input Bar + Emoji & Sticker Picker */}
+            <ChatInputBar
+              activeConvId={activeConv.id}
+              isAiThread={activeConv.id === JIT_AI_CONV_ID}
+              sendingMessage={sendingMessage}
+              aiThinking={aiThinking}
+              externalError={sendError}
+              onClearExternalError={handleClearSendError}
+              onSendMessage={handleSendMessage}
+              onSendSticker={handleSendSticker}
+            />
           </>
         )}
       </div>
 
       {/* 3. WebRTC Active Calling Modal Screen */}
       {activeCall && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 animate-in fade-in">
           <div className="relative w-full max-w-md max-h-[90dvh] overflow-y-auto bg-slate-900 text-white rounded-3xl p-5 sm:p-6 flex flex-col items-center justify-between min-h-[400px] sm:min-h-[460px] border border-slate-800 shadow-2xl">
             <div className="flex flex-col items-center mt-4">
               <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 mb-1">
@@ -1456,7 +1340,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
       {/* Start New Direct Message Modal */}
       {isNewDmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 animate-in fade-in">
           <div className="w-full max-w-md max-h-[85dvh] flex flex-col bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 shadow-2xl space-y-3">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-2">
@@ -1548,7 +1432,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
       {/* Create New Group Chat Modal */}
       {isNewGroupModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 animate-in fade-in">
           <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-2">

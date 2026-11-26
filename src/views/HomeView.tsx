@@ -478,7 +478,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                   <button
                     type="button"
                     onClick={handleClearMedia}
-                    className="absolute top-2 right-2 z-20 p-1.5 bg-red-600/90 hover:bg-red-700 text-white rounded-xl backdrop-blur-sm transition-colors"
+                    className="absolute top-2 right-2 z-20 p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl transition-colors"
                     aria-label="Remove media preview"
                   >
                     <X className="w-4 h-4" />
@@ -937,7 +937,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
       {/* Official Global Announcement Popup Modal */}
       {activeAnnouncementModal && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/65 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-slate-950/75 flex items-center justify-center p-4"
           onClick={() => {
             markAnnouncementSeen(activeAnnouncementModal.id);
             setActiveAnnouncementModal(null);

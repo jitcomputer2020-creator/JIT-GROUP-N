@@ -183,7 +183,7 @@ export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
             </button>
             <button
               onClick={() => onNavigate('games')}
-              className="px-4 py-3 min-h-[44px] bg-white/20 hover:bg-white/30 text-white font-semibold rounded-2xl text-xs backdrop-blur-md transition-colors flex items-center justify-center gap-2"
+              className="px-4 py-3 min-h-[44px] bg-white/25 hover:bg-white/35 text-white font-semibold rounded-2xl text-xs transition-colors flex items-center justify-center gap-2"
             >
               <Gamepad2 className="w-4 h-4" />
               <span>Play to Earn</span>

@@ -156,7 +156,7 @@ export const InGameCallOverlay: React.FC<InGameCallOverlayProps> = ({
   // Minimized Floating Pill View (Keeps game 100% accessible)
   if (isMinimized) {
     return (
-      <div className="fixed bottom-20 right-4 z-50 bg-slate-900/95 text-white border border-slate-700 rounded-2xl p-2.5 shadow-2xl backdrop-blur-md flex items-center gap-3 animate-in fade-in">
+      <div className="fixed bottom-20 right-4 z-50 bg-slate-900 text-white border border-slate-700 rounded-2xl p-2.5 shadow-2xl flex items-center gap-3 animate-in fade-in">
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-xs font-mono font-bold">{formatTime(callDuration)}</span>
@@ -192,7 +192,7 @@ export const InGameCallOverlay: React.FC<InGameCallOverlayProps> = ({
 
   // Expanded Docked View
   return (
-    <div className="fixed top-16 right-3 sm:right-6 z-50 w-72 sm:w-80 bg-slate-900/95 text-white border border-slate-700 rounded-3xl shadow-2xl overflow-hidden backdrop-blur-md flex flex-col animate-in zoom-in-95">
+    <div className="fixed top-16 right-3 sm:right-6 z-50 w-72 sm:w-80 bg-slate-900 text-white border border-slate-700 rounded-3xl shadow-2xl overflow-hidden flex flex-col animate-in zoom-in-95">
       {/* Call Header */}
       <div className="p-3 bg-slate-800/80 flex items-center justify-between border-b border-slate-700">
         <div className="flex items-center gap-2">

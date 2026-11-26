@@ -3256,7 +3256,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             </p>
 
             <div className="flex flex-wrap items-center gap-2">
-              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black/30 backdrop-blur-md rounded-xl text-xs font-semibold">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black/45 rounded-xl text-xs font-semibold">
                 {socketConnected || currentRoom || (typeof navigator !== 'undefined' && navigator.onLine) ? (
                   <>
                     <Wifi className="w-3.5 h-3.5 text-emerald-400" />
@@ -3296,7 +3296,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
           {/* Points Pill & Sub-View Toggle */}
           <div className="flex flex-col sm:items-end gap-2.5 shrink-0">
-            <div className="px-4 py-2 bg-black/25 backdrop-blur-md rounded-2xl border border-white/15 flex items-center gap-2">
+            <div className="px-4 py-2 bg-black/40 rounded-2xl border border-white/15 flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-amber-300" />
               <div className="text-left">
                 <p className="text-[10px] text-blue-200 uppercase font-bold tracking-wider">
@@ -4501,7 +4501,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
       {/* 8. Rules Modal */}
       {instructionsGame && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/70 animate-in fade-in">
           <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 mb-4">
               <div className="flex items-center gap-2.5">

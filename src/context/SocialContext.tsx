@@ -691,8 +691,6 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   useEffect(() => {
     refreshAnnouncements();
-    const timer = setInterval(refreshAnnouncements, 60_000);
-    return () => clearInterval(timer);
   }, [refreshAnnouncements]);
 
   // Persist user post updates (new posts, edits, comments, likes) when backend server is active

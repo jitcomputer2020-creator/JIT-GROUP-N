@@ -2364,7 +2364,7 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       ===================================================================== */}
       {inspectedUser && (
         <div
-          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm flex justify-end"
+          className="fixed inset-0 z-50 bg-slate-950/75 flex justify-end"
           onClick={() => setInspectedUser(null)}
         >
           <div

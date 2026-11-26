@@ -108,7 +108,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-md animate-in fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 animate-in fade-in">
       <div className="w-full max-w-md max-h-[92dvh] overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-7 shadow-2xl space-y-5">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
@@ -150,7 +150,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
               <button
                 type="button"
                 onClick={handleCopyCode}
-                className="px-4 py-2 bg-white/20 hover:bg-white/30 active:scale-95 text-white font-bold text-xs rounded-xl backdrop-blur-md flex items-center gap-1.5 transition-all"
+                className="px-4 py-2 bg-white/25 hover:bg-white/35 active:scale-95 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition-all"
               >
                 {copied ? <Check className="w-3.5 h-3.5 text-emerald-300" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copied ? 'Copied!' : 'Copy Code'}</span>
@@ -168,7 +168,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
                   type="button"
                   disabled={isResettingCode}
                   onClick={onResetRoomCode}
-                  className="px-3.5 py-2 bg-white/15 hover:bg-white/25 active:scale-95 disabled:opacity-60 text-white font-bold text-xs rounded-xl backdrop-blur-md flex items-center gap-1.5 transition-all"
+                  className="px-3.5 py-2 bg-white/20 hover:bg-white/30 active:scale-95 disabled:opacity-60 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition-all"
                   title="Recycle this room and generate a fresh 4-digit code"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isResettingCode ? 'animate-spin' : ''}`} />

@@ -246,7 +246,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
           {!isViewingOther && (
             <button
               onClick={() => handleOpenPhotoModal('cover')}
-              className="absolute bottom-3 right-3 px-3.5 py-2 min-h-[40px] bg-black/65 hover:bg-black/80 active:scale-95 backdrop-blur-md text-white text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-all shadow-md"
+              className="absolute bottom-3 right-3 px-3.5 py-2 min-h-[40px] bg-black/75 hover:bg-black/90 active:scale-95 text-white text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-all shadow-md"
             >
               <Camera className="w-3.5 h-3.5" />
               <span>Update Cover</span>
@@ -623,7 +623,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
 
       {/* Edit Profile Modal (Only for own profile) */}
       {showEditModal && !isViewingOther && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-in fade-in">
           <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 mb-4">
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">Edit Profile Details</h3>

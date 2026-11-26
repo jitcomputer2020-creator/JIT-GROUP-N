@@ -185,12 +185,16 @@ export interface Message {
   receiverId?: string;
   senderName: string;
   senderAvatar?: string;
+  type?: 'text' | 'image' | 'video' | 'file' | 'sticker';
   content: string;
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'file';
+  stickerId?: string;
+  stickerData?: string;
   createdAt: number | string;
   createdAtMs?: number;
   createdAtLabel?: string;
+  timestamp?: string;
   status: 'sent' | 'delivered' | 'read';
 }
 

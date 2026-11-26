@@ -45,7 +45,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
   const secs = String(elapsedSeconds % 60).padStart(2, '0');
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/65 backdrop-blur-sm animate-in fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 animate-in fade-in">
       <div className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl text-center">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
