@@ -22,6 +22,9 @@ import {
   syncLeaderboardEntry,
   recordCloudMatchHistory,
   subscribeToCloudProfile,
+  claimCloudDailyReward,
+  DAILY_CLAIM_COOLDOWN_MS,
+  DAILY_STREAK_GRACE_MS,
 } from '../lib/firebase';
 import {
   detectExpressBackendAvailable,
@@ -91,7 +94,13 @@ interface AuthContextType {
   ) => Promise<{ success: boolean; error?: string; user?: UserProfile; isExisting?: boolean; message?: string }>;
   logout: () => void;
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
-  claimDailyReward: () => { success: boolean; pointsAdded: number; newTotal: number };
+  claimDailyReward: () => Promise<{
+    success: boolean;
+    pointsAdded: number;
+    newTotal: number;
+    remainingMs?: number;
+    error?: string;
+  }>;
   awardGameResult: (params: AwardGameParams) => Promise<{ success: boolean; newTotal: number; pointsAdded: number }>;
   spendRewardPoints: (
     amount: number,
@@ -111,6 +120,67 @@ const LS_PROFILES = 'jit_registered_profiles';
 const LS_LOGGED_OUT = 'jit_logged_out';
 export const LS_WALLET_TX = 'jit_wallet_transactions';
 export const LS_MATCH_HISTORY = 'jit_match_history';
+const LS_DAILY_CLAIM_PREFIX = 'jit_daily_claim_';
+
+export { DAILY_CLAIM_COOLDOWN_MS, DAILY_STREAK_GRACE_MS };
+
+export function readLocalDailyClaimAt(userId?: string | null): number {
+  if (typeof window === 'undefined' || !userId) return 0;
+  try {
+    const raw = localStorage.getItem(`${LS_DAILY_CLAIM_PREFIX}${userId}`);
+    const parsed = Number(raw || 0);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function writeLocalDailyClaimAt(userId: string, timestampMs: number): void {
+  if (typeof window === 'undefined' || !userId || !Number.isFinite(timestampMs) || timestampMs <= 0) return;
+  try {
+    const existing = readLocalDailyClaimAt(userId);
+    localStorage.setItem(`${LS_DAILY_CLAIM_PREFIX}${userId}`, String(Math.max(existing, timestampMs)));
+  } catch {
+    // Non-fatal storage error
+  }
+}
+
+export function getDailyClaimRemainingMs(
+  userOrTimestamp?: UserProfile | number | null,
+  nowMs: number = Date.now()
+): number {
+  const claimTs =
+    typeof userOrTimestamp === 'number'
+      ? userOrTimestamp
+      : userOrTimestamp
+      ? Math.max(
+          Number(userOrTimestamp.lastDailyClaimAt || 0),
+          readLocalDailyClaimAt(userOrTimestamp.id)
+        )
+      : 0;
+  if (!claimTs || !Number.isFinite(claimTs) || claimTs <= 0) return 0;
+  const elapsed = nowMs - claimTs;
+  if (elapsed >= DAILY_CLAIM_COOLDOWN_MS) return 0;
+  return Math.max(0, DAILY_CLAIM_COOLDOWN_MS - elapsed);
+}
+
+export function formatDailyClaimCountdown(remainingMs: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function hydrateDailyClaimTimestamp(profile: UserProfile): UserProfile {
+  const localTs = readLocalDailyClaimAt(profile.id);
+  const mergedTs = Math.max(Number(profile.lastDailyClaimAt || 0), localTs);
+  if (mergedTs > 0) {
+    writeLocalDailyClaimAt(profile.id, mergedTs);
+    return { ...profile, lastDailyClaimAt: mergedTs };
+  }
+  return profile;
+}
 
 function appendWalletTransaction(tx: WalletTransaction) {
   if (typeof window === 'undefined') return;
@@ -154,7 +224,7 @@ function readPersistedUser(): UserProfile | null {
         localStorage.removeItem(LS_CURRENT_USER);
         return null;
       }
-      return parsed;
+      return hydrateDailyClaimTimestamp(parsed);
     }
   } catch (e) {
     console.error('Failed to parse cached current user', e);
@@ -189,6 +259,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const registeredProfilesRef = useRef<UserProfile[]>(registeredProfiles);
   registeredProfilesRef.current = registeredProfiles;
   const confirmedCloudProfileRef = useRef<string | null>(null);
+  const claimInFlightRef = useRef<boolean>(false);
 
   // Sync state to localStorage
   useEffect(() => {
@@ -355,12 +426,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               localStorage.removeItem(LS_CURRENT_USER);
             }
           } else if (cloudCurrent.found && cloudCurrent.profile) {
-            cloudResolvedProfile = cloudCurrent.profile;
-            confirmedCloudProfileRef.current = cloudCurrent.profile.id;
-            const cloudProfile = cloudCurrent.profile;
-            setCurrentUser((prev) =>
-              prev ? { ...prev, ...cloudProfile } : cloudProfile
-            );
+            cloudResolvedProfile = hydrateDailyClaimTimestamp(cloudCurrent.profile);
+            confirmedCloudProfileRef.current = cloudResolvedProfile.id;
+            const cloudProfile = cloudResolvedProfile;
+            setCurrentUser((prev) => {
+              if (!prev) return cloudProfile;
+              const mergedClaimAt = Math.max(
+                Number(prev.lastDailyClaimAt || 0),
+                Number(cloudProfile.lastDailyClaimAt || 0),
+                readLocalDailyClaimAt(cloudProfile.id)
+              );
+              return {
+                ...prev,
+                ...cloudProfile,
+                ...(mergedClaimAt > 0 ? { lastDailyClaimAt: mergedClaimAt } : {}),
+              };
+            });
             setRegisteredProfiles((prev) => {
               const without = prev.filter((p) => p.id !== cloudProfile.id);
               return [cloudProfile, ...without];
@@ -469,6 +550,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                   new Date(matchedServer.adminPointsUpdatedAt).getTime() >= prevTs;
                 return {
                   ...base,
+                  lastDailyClaimAt:
+                    Math.max(
+                      Number(prev.lastDailyClaimAt || 0),
+                      Number(matchedServer.lastDailyClaimAt || 0),
+                      readLocalDailyClaimAt(prev.id)
+                    ) || undefined,
                   stats: {
                     ...base.stats,
                     rewardPoints: adminPointsOverride
@@ -476,7 +563,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                       : Math.max(prev.stats?.rewardPoints ?? 0, matchedServer.stats?.rewardPoints ?? 0),
                     gamesPlayed: Math.max(prev.stats?.gamesPlayed ?? 0, matchedServer.stats?.gamesPlayed ?? 0),
                     gamesWon: Math.max(prev.stats?.gamesWon ?? 0, matchedServer.stats?.gamesWon ?? 0),
-                    streakDays: Math.max(prev.stats?.streakDays ?? 1, matchedServer.stats?.streakDays ?? 1),
+                    streakDays:
+                      Number(prev.lastDailyClaimAt || 0) >= Number(matchedServer.lastDailyClaimAt || 0) &&
+                      prev.lastDailyClaimAt
+                        ? prev.stats?.streakDays ?? 1
+                        : Math.max(prev.stats?.streakDays ?? 1, matchedServer.stats?.streakDays ?? 1),
                   },
                 };
               });
@@ -549,9 +640,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           }
           return;
         }
-        setCurrentUser((prev) => (prev && prev.id === uid ? { ...prev, ...cloudProfile } : prev));
+        const hydratedCloud = hydrateDailyClaimTimestamp(cloudProfile);
+        setCurrentUser((prev) => {
+          if (!prev || prev.id !== uid) return prev;
+          const mergedClaimAt = Math.max(
+            Number(prev.lastDailyClaimAt || 0),
+            Number(hydratedCloud.lastDailyClaimAt || 0),
+            readLocalDailyClaimAt(uid)
+          );
+          return {
+            ...prev,
+            ...hydratedCloud,
+            ...(mergedClaimAt > 0 ? { lastDailyClaimAt: mergedClaimAt } : {}),
+          };
+        });
         setRegisteredProfiles((prev) =>
-          prev.map((p) => (p.id === uid ? { ...p, ...cloudProfile } : p))
+          prev.map((p) => (p.id === uid ? { ...p, ...hydratedCloud } : p))
         );
       } else if (!exists && confirmedCloudProfileRef.current === uid) {
         setCurrentUser(null);
@@ -1102,47 +1206,136 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     ]);
   };
 
-  const claimDailyReward = (): { success: boolean; pointsAdded: number; newTotal: number } => {
-    if (!currentUser) return { success: false, pointsAdded: 0, newTotal: 0 };
-    const pointsToAdd = 50;
-    const newTotal = (currentUser.stats.rewardPoints || 0) + pointsToAdd;
-    const newStreak = (currentUser.stats.streakDays || 0) + 1;
-    const nowIso = new Date().toISOString();
-
-    const updated: UserProfile = {
-      ...currentUser,
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-      stats: {
-        ...currentUser.stats,
-        rewardPoints: newTotal,
-        streakDays: newStreak,
-      },
-    };
-
-    setCurrentUser(updated);
-    setRegisteredProfiles((prev) =>
-      prev.map((p) => (p.id === updated.id ? updated : p))
-    );
-
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
+  const claimDailyReward = async (): Promise<{
+    success: boolean;
+    pointsAdded: number;
+    newTotal: number;
+    remainingMs?: number;
+    error?: string;
+  }> => {
+    const activeUser = currentUserRef.current;
+    if (!activeUser) {
+      return { success: false, pointsAdded: 0, newTotal: 0, error: 'Sign in required.' };
     }
 
-    appendWalletTransaction({
-      id: `tx_${Date.now()}`,
-      userId: updated.id,
-      amount: pointsToAdd,
-      type: 'daily_reward',
-      description: `Daily Streak Bonus (Day ${newStreak})`,
-      createdAt: 'Just now',
-    });
+    const currentPoints = activeUser.stats.rewardPoints || 0;
+    if (claimInFlightRef.current) {
+      return {
+        success: false,
+        pointsAdded: 0,
+        newTotal: currentPoints,
+        remainingMs: getDailyClaimRemainingMs(activeUser),
+        error: 'Claim already in progress.',
+      };
+    }
 
-    updateCloudProfile(updated, { stats: updated.stats }).catch(() => {});
-    syncLeaderboardEntry(updated).catch(() => {});
-    persistProfileRemotely(updated).catch(() => {});
+    const prevClaimAt = Math.max(
+      Number(activeUser.lastDailyClaimAt || 0),
+      readLocalDailyClaimAt(activeUser.id)
+    );
+    const nowMs = Date.now();
+    if (prevClaimAt > 0 && nowMs - prevClaimAt < DAILY_CLAIM_COOLDOWN_MS) {
+      const remainingMs = DAILY_CLAIM_COOLDOWN_MS - (nowMs - prevClaimAt);
+      if ((activeUser.lastDailyClaimAt || 0) < prevClaimAt) {
+        const synced = { ...activeUser, lastDailyClaimAt: prevClaimAt };
+        setCurrentUser(synced);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(LS_CURRENT_USER, JSON.stringify(synced));
+        }
+      }
+      return {
+        success: false,
+        pointsAdded: 0,
+        newTotal: currentPoints,
+        remainingMs,
+        error: 'Already claimed within the last 24 hours.',
+      };
+    }
 
-    return { success: true, pointsAdded: pointsToAdd, newTotal };
+    claimInFlightRef.current = true;
+    const pointsToAdd = 50;
+
+    try {
+      const cloudRes = await claimCloudDailyReward(
+        {
+          ...activeUser,
+          ...(prevClaimAt > 0 ? { lastDailyClaimAt: prevClaimAt } : {}),
+        },
+        pointsToAdd
+      );
+
+      if (!cloudRes.allowed) {
+        writeLocalDailyClaimAt(activeUser.id, cloudRes.lastDailyClaimAt);
+        const syncedUser: UserProfile = {
+          ...activeUser,
+          lastDailyClaimAt: cloudRes.lastDailyClaimAt,
+          stats: {
+            ...activeUser.stats,
+            rewardPoints: cloudRes.rewardPoints,
+            streakDays: cloudRes.streakDays,
+          },
+        };
+        setCurrentUser(syncedUser);
+        setRegisteredProfiles((prev) =>
+          prev.map((p) => (p.id === syncedUser.id ? syncedUser : p))
+        );
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(LS_CURRENT_USER, JSON.stringify(syncedUser));
+        }
+        return {
+          success: false,
+          pointsAdded: 0,
+          newTotal: cloudRes.rewardPoints,
+          remainingMs: getDailyClaimRemainingMs(cloudRes.lastDailyClaimAt),
+          error: 'Already claimed within the last 24 hours.',
+        };
+      }
+
+      const claimTs = cloudRes.lastDailyClaimAt;
+      const nowIso = new Date(claimTs).toISOString();
+      writeLocalDailyClaimAt(activeUser.id, claimTs);
+
+      const updated: UserProfile = {
+        ...activeUser,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastDailyClaimAt: claimTs,
+        stats: {
+          ...activeUser.stats,
+          rewardPoints: cloudRes.rewardPoints,
+          streakDays: cloudRes.streakDays,
+        },
+      };
+
+      setCurrentUser(updated);
+      setRegisteredProfiles((prev) =>
+        prev.map((p) => (p.id === updated.id ? updated : p))
+      );
+
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
+      }
+
+      appendWalletTransaction({
+        id: `tx_${claimTs}`,
+        userId: updated.id,
+        amount: pointsToAdd,
+        type: 'daily_reward',
+        description: `Daily Streak Bonus (Day ${cloudRes.streakDays})`,
+        createdAt: 'Just now',
+      });
+
+      persistProfileRemotely(updated).catch(() => {});
+
+      return {
+        success: true,
+        pointsAdded: pointsToAdd,
+        newTotal: cloudRes.rewardPoints,
+        remainingMs: DAILY_CLAIM_COOLDOWN_MS,
+      };
+    } finally {
+      claimInFlightRef.current = false;
+    }
   };
 
   const awardGameResult = async (

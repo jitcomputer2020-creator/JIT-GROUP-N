@@ -3,9 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { NavTab } from '../../types';
-import { useAuth } from '../../context/AuthContext';
+import {
+  useAuth,
+  getDailyClaimRemainingMs,
+  formatDailyClaimCountdown,
+} from '../../context/AuthContext';
 import { APP_CONFIG } from '../../constants/branding';
 import {
   Home,
@@ -20,6 +24,7 @@ import {
   ShieldCheck,
   Flame,
   PlusCircle,
+  Clock,
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -34,6 +39,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenCreatePost,
 }) => {
   const { currentUser, claimDailyReward } = useAuth();
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [remainingMs, setRemainingMs] = useState<number>(() =>
+    getDailyClaimRemainingMs(currentUser)
+  );
+
+  useEffect(() => {
+    const syncRemaining = () => {
+      setRemainingMs(getDailyClaimRemainingMs(currentUser));
+    };
+    syncRemaining();
+
+    if (getDailyClaimRemainingMs(currentUser) <= 0) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const next = getDailyClaimRemainingMs(currentUser);
+      setRemainingMs(next);
+      if (next <= 0) {
+        window.clearInterval(timer);
+      }
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [currentUser?.id, currentUser?.lastDailyClaimAt]);
 
   const mainLinks: { id: NavTab; label: string; icon: React.ElementType }[] = [
     { id: 'home', label: 'News Feed', icon: Home },
@@ -46,8 +76,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'settings', label: 'Settings & Privacy', icon: Settings },
   ];
 
-  const handleClaim = () => {
-    claimDailyReward();
+  const handleClaim = async () => {
+    if (!currentUser || isClaiming || remainingMs > 0) return;
+    setIsClaiming(true);
+    try {
+      const res = await claimDailyReward();
+      if (res.remainingMs && res.remainingMs > 0) {
+        setRemainingMs(res.remainingMs);
+      }
+    } finally {
+      setIsClaiming(false);
+    }
   };
 
   return (
@@ -159,9 +198,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </p>
         <button
           onClick={handleClaim}
-          className="w-full py-1.5 px-3 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold rounded-xl shadow-sm transition-colors"
+          disabled={!currentUser || isClaiming || remainingMs > 0}
+          className={`w-full py-1.5 px-3 text-xs font-semibold rounded-xl shadow-sm transition-colors flex items-center justify-center gap-1.5 ${
+            !currentUser || isClaiming || remainingMs > 0
+              ? 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 cursor-not-allowed opacity-85 shadow-none'
+              : 'bg-amber-500 hover:bg-amber-600 text-white'
+          }`}
         >
-          Claim +50 JIT Points
+          {remainingMs > 0 ? (
+            <>
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+              <span className="tabular-nums truncate">
+                Claimed • {formatDailyClaimCountdown(remainingMs)}
+              </span>
+            </>
+          ) : (
+            <span>{isClaiming ? 'Claiming...' : 'Claim +50 JIT Points'}</span>
+          )}
         </button>
       </div>
 

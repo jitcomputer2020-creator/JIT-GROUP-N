@@ -157,10 +157,11 @@ export const InGameChatDrawer: React.FC<InGameChatDrawerProps> = ({
     setInputText((prev) => prev + emoji);
   };
 
-  // Filter out muted players
-  const visibleMessages = messages.filter(
-    (m) => !mutedPlayerIds.includes(m.senderId)
-  );
+  // Filter out muted players and enforce chronological ascending order
+  const visibleMessages = messages
+    .filter((m) => !mutedPlayerIds.includes(m.senderId))
+    .slice()
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 
   return (
     <div className="fixed inset-y-0 right-0 z-50 w-full sm:w-96 bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col animate-in slide-in-from-right duration-200">

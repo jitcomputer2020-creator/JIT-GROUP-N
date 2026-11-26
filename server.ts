@@ -1511,6 +1511,11 @@ app.post('/api/profiles', async (req, res) => {
         joinedAt: existing.profile.joinedAt || payload.joinedAt || nowIso,
         lastLoginAt: nowIso,
         lastLogin: nowIso,
+        lastDailyClaimAt:
+          Math.max(
+            Number(existing.profile.lastDailyClaimAt || 0),
+            Number(payload.lastDailyClaimAt || 0)
+          ) || undefined,
         stats: {
           friendsCount: existing.profile.stats?.friendsCount ?? payload.stats?.friendsCount ?? 0,
           followersCount: existing.profile.stats?.followersCount ?? payload.stats?.followersCount ?? 0,
@@ -1520,7 +1525,10 @@ app.post('/api/profiles', async (req, res) => {
           gamesPlayed: Math.max(existing.profile.stats?.gamesPlayed ?? 0, payload.stats?.gamesPlayed ?? 0),
           gamesWon: Math.max(existing.profile.stats?.gamesWon ?? 0, payload.stats?.gamesWon ?? 0),
           rewardPoints: Math.max(existing.profile.stats?.rewardPoints ?? 0, payload.stats?.rewardPoints ?? 0),
-          streakDays: Math.max(existing.profile.stats?.streakDays ?? 1, payload.stats?.streakDays ?? 1),
+          streakDays:
+            Number(payload.lastDailyClaimAt || 0) > Number(existing.profile.lastDailyClaimAt || 0)
+              ? payload.stats?.streakDays ?? 1
+              : Math.max(existing.profile.stats?.streakDays ?? 1, payload.stats?.streakDays ?? 1),
         },
         avatarUrl: nextAvatarUrl,
         coverUrl: nextCoverUrl,
@@ -1652,6 +1660,9 @@ app.post('/api/profiles/sync', async (req, res) => {
           adminPointsUpdatedAt: existing.adminPointsUpdatedAt,
           lastLoginAt: cp.lastLoginAt || existing.lastLoginAt || new Date().toISOString(),
           lastLogin: cp.lastLogin || existing.lastLogin || new Date().toISOString(),
+          lastDailyClaimAt:
+            Math.max(Number(existing.lastDailyClaimAt || 0), Number(cp.lastDailyClaimAt || 0)) ||
+            undefined,
           stats: {
             ...(existing.stats || {}),
             ...(cp.stats || {}),
@@ -1660,7 +1671,10 @@ app.post('/api/profiles/sync', async (req, res) => {
               : Math.max(existing.stats?.rewardPoints ?? 0, cp.stats?.rewardPoints ?? 0),
             gamesPlayed: Math.max(existing.stats?.gamesPlayed ?? 0, cp.stats?.gamesPlayed ?? 0),
             gamesWon: Math.max(existing.stats?.gamesWon ?? 0, cp.stats?.gamesWon ?? 0),
-            streakDays: Math.max(existing.stats?.streakDays ?? 1, cp.stats?.streakDays ?? 1),
+            streakDays:
+              Number(cp.lastDailyClaimAt || 0) > Number(existing.lastDailyClaimAt || 0)
+                ? cp.stats?.streakDays ?? 1
+                : Math.max(existing.stats?.streakDays ?? 1, cp.stats?.streakDays ?? 1),
           },
         };
     map.set(digits, mergedOne);

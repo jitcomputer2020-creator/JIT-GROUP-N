@@ -106,6 +106,8 @@ export async function signOutFirebaseAuth(): Promise<void> {
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
 export const VIDEO_EXPIRY_MS = 40 * 24 * 60 * 60 * 1000; // 40 days auto-delete for videos & reels
+export const DAILY_CLAIM_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 86,400,000 ms (24 hours)
+export const DAILY_STREAK_GRACE_MS = 48 * 60 * 60 * 1000; // 172,800,000 ms (48 hours consecutive window)
 
 export enum OperationType {
   CREATE = 'create',
@@ -329,6 +331,13 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
 
   const fullName = String(data.fullName || 'JIT Member');
   const contactNumber = String(data.contactNumber || '');
+  const lastDailyClaimAt =
+    typeof data.lastDailyClaimAt === 'number' &&
+    Number.isFinite(data.lastDailyClaimAt) &&
+    data.lastDailyClaimAt > 0
+      ? data.lastDailyClaimAt
+      : undefined;
+
   return {
     id: String(data.id),
     contactNumber,
@@ -349,6 +358,7 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     status: (data.status as UserProfile['status']) || 'active',
     suspendedReason: typeof data.suspendedReason === 'string' && data.suspendedReason ? data.suspendedReason : undefined,
     suspendedAt: typeof data.suspendedAt === 'string' && data.suspendedAt ? data.suspendedAt : undefined,
+    ...(lastDailyClaimAt ? { lastDailyClaimAt } : {}),
     stats: sanitizeStats(data.stats),
   };
 }
@@ -434,9 +444,22 @@ export async function lookupCloudProfileByPhone(
     return { found: false, expired: true };
   }
 
+  const profile = firestoreDocToUserProfile(profileData);
+  try {
+    const userSnap = await fetchDocServerFirst(['users', profileId]);
+    if (userSnap.exists()) {
+      const userClaimAt = Number(userSnap.data()?.lastDailyClaimAt || 0);
+      if (Number.isFinite(userClaimAt) && userClaimAt > (profile.lastDailyClaimAt || 0)) {
+        profile.lastDailyClaimAt = userClaimAt;
+      }
+    }
+  } catch {
+    // Non-fatal if users alias doc does not exist yet
+  }
+
   return {
     found: true,
-    profile: firestoreDocToUserProfile(profileData),
+    profile,
   };
 }
 
@@ -571,6 +594,9 @@ export async function registerOrRecognizeCloudProfile(
     lastLogin: nowIso,
     isContactNumberPublic: Boolean(seedProfile?.isContactNumberPublic),
     isAddressPublic: Boolean(seedProfile?.isAddressPublic),
+    ...(seedProfile?.lastDailyClaimAt && seedProfile.lastDailyClaimAt > 0
+      ? { lastDailyClaimAt: seedProfile.lastDailyClaimAt }
+      : {}),
     stats: sanitizeStats(seedProfile?.stats || { rewardPoints: 100, streakDays: 1 }),
   };
 
@@ -589,6 +615,7 @@ export async function registerOrRecognizeCloudProfile(
     lastActiveAt: serverTimestamp(),
     isContactNumberPublic: Boolean(newProfile.isContactNumberPublic),
     isAddressPublic: Boolean(newProfile.isAddressPublic),
+    ...(newProfile.lastDailyClaimAt ? { lastDailyClaimAt: newProfile.lastDailyClaimAt } : {}),
     stats: newProfile.stats,
   };
   if (newProfile.coverUrl) {
@@ -598,6 +625,7 @@ export async function registerOrRecognizeCloudProfile(
   try {
     const batch = writeBatch(db);
     batch.set(doc(db, 'profiles', newProfile.id), firestoreProfileDoc);
+    batch.set(doc(db, 'users', newProfile.id), firestoreProfileDoc, { merge: true });
     batch.set(doc(db, 'phone_index', phoneKey), {
       profileId: newProfile.id,
       createdAt: serverTimestamp(),
@@ -667,8 +695,10 @@ export async function updateCloudProfile(
   ] as const;
   const hasDetailUpdates = detailKeys.some((k) => updates[k] !== undefined);
   const hasStatsUpdate = updates.stats !== undefined;
+  const hasClaimUpdate =
+    typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt);
 
-  if (!hasDetailUpdates && !hasStatsUpdate) {
+  if (!hasDetailUpdates && !hasStatsUpdate && !hasClaimUpdate) {
     await touchCloudLoginTimestamp(profile);
     return;
   }
@@ -713,25 +743,32 @@ export async function updateCloudProfile(
       };
       const batch = writeBatch(db);
       batch.update(profileRef, detailPatch);
+      batch.set(doc(db, 'users', profile.id), { id: profile.id, ...detailPatch }, { merge: true });
       batch.update(indexRef, { lastLoginAt: serverTimestamp() });
       batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
       invalidateDirectoryCache();
     }
 
-    if (hasStatsUpdate) {
+    if (hasStatsUpdate || hasClaimUpdate) {
+      const mergedStats = sanitizeStats(updates.stats || profile.stats);
       const mergedProfile: UserProfile = {
         ...profile,
         ...updates,
-        stats: sanitizeStats(updates.stats),
+        stats: mergedStats,
       };
-      const batch = writeBatch(db);
-      batch.update(profileRef, {
-        stats: sanitizeStats(updates.stats),
+      const statsPatch: Record<string, any> = {
+        stats: mergedStats,
         lastLoginAt: nowIso,
         lastLogin: nowIso,
         lastActiveAt: serverTimestamp(),
-      });
+      };
+      if (hasClaimUpdate) {
+        statsPatch.lastDailyClaimAt = updates.lastDailyClaimAt;
+      }
+      const batch = writeBatch(db);
+      batch.update(profileRef, statsPatch);
+      batch.set(doc(db, 'users', profile.id), { id: profile.id, ...statsPatch }, { merge: true });
       batch.update(indexRef, { lastLoginAt: serverTimestamp() });
       batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
@@ -741,6 +778,156 @@ export async function updateCloudProfile(
       handleFirestoreError(err, OperationType.UPDATE, `profiles/${profile.id}`);
     }
     console.warn('Firestore updateCloudProfile notice:', err);
+  }
+}
+
+/**
+ * Atomically enforces the strict 24-hour cooldown for Daily +50 Pts rewards
+ * inside Firestore (`users/{userId}` and `profiles/{userId}`) via transaction.
+ */
+export async function claimCloudDailyReward(
+  profile: UserProfile,
+  pointsToAdd = 50
+): Promise<{
+  allowed: boolean;
+  lastDailyClaimAt: number;
+  rewardPoints: number;
+  streakDays: number;
+  offlineFallback?: boolean;
+}> {
+  const userRef = doc(db, 'users', profile.id);
+  const profileRef = doc(db, 'profiles', profile.id);
+  const lbRef = doc(db, 'leaderboard', profile.id);
+  const dirRef = doc(db, 'user_directory', profile.id);
+  const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
+  const indexRef = phoneKey && phoneKey.length >= 7 ? doc(db, 'phone_index', phoneKey) : null;
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const [userSnap, profileSnap] = await Promise.all([tx.get(userRef), tx.get(profileRef)]);
+      const userData = userSnap.exists() ? userSnap.data() : {};
+      const profileData = profileSnap.exists() ? profileSnap.data() : {};
+
+      const serverLastClaimAt = Math.max(
+        Number(userData?.lastDailyClaimAt || 0),
+        Number(profileData?.lastDailyClaimAt || 0)
+      );
+      const localLastClaimAt = Number(profile.lastDailyClaimAt || 0);
+      const authoritativeLastClaim = Math.max(serverLastClaimAt, localLastClaimAt);
+
+      const nowMs = Date.now();
+      if (authoritativeLastClaim > 0 && nowMs - authoritativeLastClaim < DAILY_CLAIM_COOLDOWN_MS) {
+        const currentStats = sanitizeStats(profileData?.stats || userData?.stats || profile.stats);
+        return {
+          allowed: false,
+          lastDailyClaimAt: authoritativeLastClaim,
+          rewardPoints: currentStats.rewardPoints,
+          streakDays: currentStats.streakDays,
+        };
+      }
+
+      const baseStats = sanitizeStats(profileData?.stats || userData?.stats || profile.stats);
+      const elapsedSinceLast = authoritativeLastClaim > 0 ? nowMs - authoritativeLastClaim : 0;
+      const nextStreak =
+        authoritativeLastClaim > 0 && elapsedSinceLast <= DAILY_STREAK_GRACE_MS
+          ? Math.max(1, baseStats.streakDays) + 1
+          : 1;
+      const nextPoints = Math.min(1000000, baseStats.rewardPoints + pointsToAdd);
+      const nextStats: UserProfile['stats'] = {
+        ...baseStats,
+        rewardPoints: nextPoints,
+        streakDays: nextStreak,
+      };
+      const nowIso = new Date(nowMs).toISOString();
+
+      const updatedProfile: UserProfile = {
+        ...profile,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastDailyClaimAt: nowMs,
+        stats: nextStats,
+      };
+
+      const commonPatch: Record<string, any> = {
+        id: profile.id,
+        fullName: updatedProfile.fullName,
+        contactNumber: updatedProfile.contactNumber,
+        ...(phoneKey ? { phoneKey } : {}),
+        address: updatedProfile.address,
+        avatarUrl: sanitizeAvatarUrl(updatedProfile.avatarUrl),
+        joinedAt: updatedProfile.joinedAt || nowIso,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+        lastDailyClaimAt: nowMs,
+        stats: nextStats,
+      };
+
+      tx.set(userRef, commonPatch, { merge: true });
+      tx.set(profileRef, commonPatch, { merge: true });
+      tx.set(
+        lbRef,
+        {
+          profileId: profile.id,
+          fullName: (updatedProfile.fullName || 'JIT Member').trim().slice(0, 120),
+          avatarUrl: sanitizeAvatarUrl(updatedProfile.avatarUrl),
+          rewardPoints: nextStats.rewardPoints,
+          gamesPlayed: nextStats.gamesPlayed,
+          gamesWon: nextStats.gamesWon,
+          streakDays: nextStats.streakDays,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      tx.set(dirRef, buildUserDirectoryPayload(updatedProfile), { merge: true });
+      if (indexRef) {
+        tx.set(
+          indexRef,
+          {
+            profileId: profile.id,
+            lastLoginAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+
+      return {
+        allowed: true,
+        lastDailyClaimAt: nowMs,
+        rewardPoints: nextStats.rewardPoints,
+        streakDays: nextStats.streakDays,
+      };
+    });
+
+    return result;
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `users/${profile.id}`);
+    }
+    console.warn('claimCloudDailyReward offline fallback:', err);
+    const nowMs = Date.now();
+    const prevClaimAt = Number(profile.lastDailyClaimAt || 0);
+    if (prevClaimAt > 0 && nowMs - prevClaimAt < DAILY_CLAIM_COOLDOWN_MS) {
+      return {
+        allowed: false,
+        lastDailyClaimAt: prevClaimAt,
+        rewardPoints: profile.stats.rewardPoints,
+        streakDays: profile.stats.streakDays,
+        offlineFallback: true,
+      };
+    }
+    const elapsed = prevClaimAt > 0 ? nowMs - prevClaimAt : 0;
+    const nextStreak =
+      prevClaimAt > 0 && elapsed <= DAILY_STREAK_GRACE_MS
+        ? Math.max(1, profile.stats.streakDays) + 1
+        : 1;
+    return {
+      allowed: true,
+      lastDailyClaimAt: nowMs,
+      rewardPoints: Math.min(1000000, (profile.stats.rewardPoints || 0) + pointsToAdd),
+      streakDays: nextStreak,
+      offlineFallback: true,
+    };
   }
 }
 
@@ -1088,20 +1275,60 @@ export function subscribeToCloudProfile(
   if (!profileId || profileId.length < 4) {
     return () => {};
   }
-  const ref = doc(db, 'profiles', profileId);
-  return onSnapshot(
-    ref,
+  const profileRef = doc(db, 'profiles', profileId);
+  const userRef = doc(db, 'users', profileId);
+  let latestProfile: UserProfile | null = null;
+  let latestUserClaimAt = 0;
+
+  const emitMerged = (exists: boolean) => {
+    if (!exists || !latestProfile) {
+      onProfile(null, false);
+      return;
+    }
+    const mergedClaimAt = Math.max(latestProfile.lastDailyClaimAt || 0, latestUserClaimAt);
+    onProfile(
+      mergedClaimAt > 0
+        ? { ...latestProfile, lastDailyClaimAt: mergedClaimAt }
+        : latestProfile,
+      true
+    );
+  };
+
+  const unsubProfile = onSnapshot(
+    profileRef,
     (snap) => {
       if (!snap.exists()) {
-        onProfile(null, false);
+        latestProfile = null;
+        emitMerged(false);
         return;
       }
-      onProfile(firestoreDocToUserProfile(snap.data()), true);
+      latestProfile = firestoreDocToUserProfile(snap.data());
+      emitMerged(true);
     },
     (err) => {
       console.warn('subscribeToCloudProfile notice:', err);
     }
   );
+
+  const unsubUser = onSnapshot(
+    userRef,
+    (snap) => {
+      if (!snap.exists()) return;
+      const claimAt = Number(snap.data()?.lastDailyClaimAt || 0);
+      if (Number.isFinite(claimAt) && claimAt > 0) {
+        latestUserClaimAt = Math.max(latestUserClaimAt, claimAt);
+        if (latestProfile) {
+          emitMerged(true);
+        }
+      }
+    },
+    () => {}
+  );
+
+  return () => {
+    unsubProfile();
+    unsubUser();
+  };
 }
 
 // In-memory directory cache (25s TTL) + private digit search map for instant partial matching
@@ -3488,17 +3715,21 @@ export async function sendFirestoreRoomChat(
     if ((parsed.mutedChatIds || []).includes(msg.senderId)) {
       return { sent: false, restricted: true };
     }
+    const nowMs = Date.now();
     const formatted: InGameChatMessage = {
-      id: `gmsg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      id: `gmsg_${nowMs}_${Math.random().toString(36).substring(2, 6)}`,
       roomCode: cleanCode,
       senderId: msg.senderId,
       senderName: msg.senderName,
       senderAvatar: sanitizeAvatarUrl(msg.senderAvatar),
       ...(msg.text ? { text: msg.text.slice(0, 1000) } : {}),
       ...(msg.imageUrl ? { imageUrl: msg.imageUrl } : {}),
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      createdAt: nowMs,
     };
-    const nextMessages = [...parsed.messages, formatted].slice(-50);
+    const nextMessages = [...parsed.messages, formatted]
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      .slice(-50);
     await updateDoc(roomRef, {
       messagesJson: JSON.stringify(nextMessages),
       lastUpdated: serverTimestamp(),
@@ -4480,6 +4711,61 @@ export function subscribeToFirestoreConversations(
   );
 }
 
+export function extractMessageEpochMs(data: Record<string, any>, docId?: string): number {
+  const numericCreated =
+    typeof data.createdAt === 'number' && Number.isFinite(data.createdAt)
+      ? data.createdAt
+      : typeof data.createdAt === 'string' && /^\d{10,}$/.test(data.createdAt.trim())
+      ? Number(data.createdAt.trim())
+      : 0;
+  if (numericCreated > 0) return numericCreated;
+
+  const numericMs = Number(data.createdAtMs || 0);
+  if (Number.isFinite(numericMs) && numericMs > 0) return numericMs;
+
+  if (data.createdAt && typeof data.createdAt.toMillis === 'function') {
+    const ms = data.createdAt.toMillis();
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+
+  if (data.createdAtTs && typeof data.createdAtTs.toMillis === 'function') {
+    const ms = data.createdAtTs.toMillis();
+    if (Number.isFinite(ms) && ms > 0) return ms;
+  }
+
+  if (typeof data.createdAt === 'string') {
+    const parsed = Date.parse(data.createdAt);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  if (typeof data.timestampIso === 'string') {
+    const parsed = Date.parse(data.timestampIso);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+
+  const idStr = String(data.id || docId || '');
+  const idMatch = idStr.match(/(\d{12,15})/);
+  if (idMatch) {
+    const parsed = Number(idMatch[1]);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  return 0;
+}
+
+function resolveMessageLabel(data: Record<string, any>, epochMs: number): string {
+  if (typeof data.createdAtLabel === 'string' && data.createdAtLabel.trim()) {
+    return data.createdAtLabel;
+  }
+  if (typeof data.createdAt === 'string' && data.createdAt.trim() && !/^\d{10,}$/.test(data.createdAt.trim())) {
+    return data.createdAt;
+  }
+  if (epochMs > 0) {
+    return new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return 'Just now';
+}
+
 export function subscribeToFirestoreMessages(
   conversationId: string,
   onMessages: (msgs: Message[]) => void
@@ -4487,15 +4773,15 @@ export function subscribeToFirestoreMessages(
   if (!conversationId) return () => {};
   const q = query(
     collection(db, 'conversations', conversationId, 'messages'),
-    where('createdAtMs', '>=', 0),
-    limit(200)
+    limit(500)
   );
   return onSnapshot(
     q,
     (snap) => {
-      const list: Array<Message & { _ms: number }> = [];
+      const list: Message[] = [];
       snap.forEach((d) => {
         const data = d.data();
+        const epochMs = extractMessageEpochMs(data, d.id);
         list.push({
           id: String(data.id || d.id),
           conversationId: String(data.conversationId || conversationId),
@@ -4505,13 +4791,18 @@ export function subscribeToFirestoreMessages(
           content: String(data.content || ''),
           mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
           mediaType: data.mediaType as Message['mediaType'],
-          createdAt: String(data.createdAt || ''),
+          createdAt: epochMs || resolveMessageLabel(data, epochMs),
+          createdAtMs: epochMs,
+          createdAtLabel: resolveMessageLabel(data, epochMs),
           status: (data.status as Message['status']) || 'delivered',
-          _ms: Number(data.createdAtMs || 0),
         });
       });
-      list.sort((a, b) => a._ms - b._ms);
-      onMessages(list.map(({ _ms: _, ...m }) => m));
+      list.sort((a, b) => {
+        const tA = typeof a.createdAt === 'number' ? a.createdAt : a.createdAtMs || 0;
+        const tB = typeof b.createdAt === 'number' ? b.createdAt : b.createdAtMs || 0;
+        return tA - tB || a.id.localeCompare(b.id);
+      });
+      onMessages(list);
     },
     (err) => {
       console.warn('messages onSnapshot notice:', err);
@@ -4565,7 +4856,8 @@ export async function sendFirestoreDirectMessage(
     content: cleanContent,
     ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: payload.mediaType || 'image' } : {}),
     status: 'delivered',
-    createdAt: timeLabel,
+    createdAt: nowMs,
+    createdAtLabel: timeLabel,
     createdAtMs: nowMs,
     createdAtTs: serverTimestamp(),
   };
@@ -4633,7 +4925,8 @@ export async function sendFirestoreDirectMessage(
     content: cleanContent,
     mediaUrl: safeMediaUrl,
     mediaType: safeMediaUrl ? payload.mediaType || 'image' : undefined,
-    createdAt: timeLabel,
+    createdAt: nowMs,
+    createdAtLabel: timeLabel,
     createdAtMs: nowMs,
     status: 'delivered',
   };
@@ -5646,20 +5939,24 @@ export async function adminFetchUserChatActivityClient(
     };
   };
 
-  const toMsg = (id: string, fallbackConvId: string, data: Record<string, any>): Message & { createdAtMs?: number } => ({
-    id: String(data.id || id),
-    conversationId: String(data.conversationId || fallbackConvId),
-    senderId: String(data.senderId || ''),
-    receiverId: typeof data.receiverId === 'string' ? data.receiverId : undefined,
-    senderName: String(data.senderName || 'JIT Member'),
-    senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
-    content: String(data.content || ''),
-    mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
-    mediaType: data.mediaType as Message['mediaType'],
-    createdAt: String(data.createdAt || ''),
-    createdAtMs: Number(data.createdAtMs || 0),
-    status: (data.status as Message['status']) || 'delivered',
-  });
+  const toMsg = (id: string, fallbackConvId: string, data: Record<string, any>): Message & { createdAtMs?: number } => {
+    const epochMs = extractMessageEpochMs(data, id);
+    return {
+      id: String(data.id || id),
+      conversationId: String(data.conversationId || fallbackConvId),
+      senderId: String(data.senderId || ''),
+      receiverId: typeof data.receiverId === 'string' ? data.receiverId : undefined,
+      senderName: String(data.senderName || 'JIT Member'),
+      senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
+      content: String(data.content || ''),
+      mediaUrl: typeof data.mediaUrl === 'string' ? data.mediaUrl : undefined,
+      mediaType: data.mediaType as Message['mediaType'],
+      createdAt: resolveMessageLabel(data, epochMs),
+      createdAtLabel: resolveMessageLabel(data, epochMs),
+      createdAtMs: epochMs,
+      status: (data.status as Message['status']) || 'delivered',
+    };
+  };
 
   // 1. Primary conversation queries (participantIds array-contains + recent threads scan)
   const [partRes, recentRes] = await Promise.allSettled([
@@ -5700,7 +5997,7 @@ export async function adminFetchUserChatActivityClient(
       slice.map(async (cid) => {
         try {
           const snap = await getDocs(
-            query(collection(db, 'conversations', cid, 'messages'), where('createdAtMs', '>=', 0), limit(200))
+            query(collection(db, 'conversations', cid, 'messages'), limit(300))
           );
           snap.forEach((d) => {
             const msg = toMsg(d.id, cid, d.data());

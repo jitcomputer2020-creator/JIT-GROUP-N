@@ -132,6 +132,10 @@
           "maxLength": 40,
           "description": "ISO timestamp when moderation action occurred."
         },
+        "lastDailyClaimAt": {
+          "type": "integer",
+          "description": "Unix epoch milliseconds of the most recent daily +50 Pts reward claim."
+        },
         "stats": {
           "type": "object",
           "$ref": "#/entities/ProfileStats",
@@ -562,7 +566,8 @@
         "mediaUrl": { "type": "string", "maxLength": 400000 },
         "mediaType": { "type": "string", "enum": ["image", "video", "file"] },
         "status": { "type": "string", "enum": ["sent", "delivered", "read"] },
-        "createdAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "integer", "description": "Numeric Unix epoch timestamp in milliseconds." },
+        "createdAtLabel": { "type": "string", "maxLength": 40, "description": "Formatted local time label." },
         "createdAtMs": { "type": "integer" },
         "createdAtTs": { "type": "string", "format": "date-time" }
       },

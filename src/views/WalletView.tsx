@@ -4,7 +4,12 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useAuth, LS_WALLET_TX } from '../context/AuthContext';
+import {
+  useAuth,
+  LS_WALLET_TX,
+  getDailyClaimRemainingMs,
+  formatDailyClaimCountdown,
+} from '../context/AuthContext';
 import { WalletTransaction, NavTab } from '../types';
 import {
   Sparkles,
@@ -14,6 +19,7 @@ import {
   CheckCircle2,
   ShieldCheck,
   Gamepad2,
+  Clock,
 } from 'lucide-react';
 
 interface WalletViewProps {
@@ -23,6 +29,31 @@ interface WalletViewProps {
 export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
   const { currentUser, claimDailyReward } = useAuth();
   const [claimStatus, setClaimStatus] = useState<string | null>(null);
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [remainingMs, setRemainingMs] = useState<number>(() =>
+    getDailyClaimRemainingMs(currentUser)
+  );
+
+  useEffect(() => {
+    const syncRemaining = () => {
+      setRemainingMs(getDailyClaimRemainingMs(currentUser));
+    };
+    syncRemaining();
+
+    if (getDailyClaimRemainingMs(currentUser) <= 0) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const next = getDailyClaimRemainingMs(currentUser);
+      setRemainingMs(next);
+      if (next <= 0) {
+        window.clearInterval(timer);
+      }
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [currentUser?.id, currentUser?.lastDailyClaimAt]);
 
   const loadTransactions = useCallback((): WalletTransaction[] => {
     const defaultSeeds: WalletTransaction[] = [
@@ -78,14 +109,25 @@ export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
     setTransactions(loadTransactions());
   }, [loadTransactions, currentUser?.stats.rewardPoints]);
 
-  const handleClaimDaily = () => {
-    const res = claimDailyReward();
-    if (res.success) {
-      setTransactions(loadTransactions());
-      setClaimStatus(`Claimed +${res.pointsAdded} Points! Total balance is now ${res.newTotal}.`);
-      setTimeout(() => setClaimStatus(null), 3500);
+  const handleClaimDaily = async () => {
+    if (isClaiming || remainingMs > 0 || !currentUser) return;
+    setIsClaiming(true);
+    try {
+      const res = await claimDailyReward();
+      if (res.success) {
+        setTransactions(loadTransactions());
+        setRemainingMs(getDailyClaimRemainingMs(currentUser?.id ? { ...currentUser, lastDailyClaimAt: Date.now() } : null));
+        setClaimStatus(`Claimed +${res.pointsAdded} Points! Total balance is now ${res.newTotal}.`);
+        setTimeout(() => setClaimStatus(null), 3500);
+      } else if (res.remainingMs && res.remainingMs > 0) {
+        setRemainingMs(res.remainingMs);
+      }
+    } finally {
+      setIsClaiming(false);
     }
   };
+
+  const isOnCooldown = remainingMs > 0;
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto w-full">
@@ -118,10 +160,26 @@ export const WalletView: React.FC<WalletViewProps> = ({ onNavigate }) => {
           <div className="flex flex-col sm:flex-row gap-3">
             <button
               onClick={handleClaimDaily}
-              className="px-5 py-3 min-h-[44px] bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-2xl text-xs shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2"
+              disabled={!currentUser || isClaiming || isOnCooldown}
+              className={`px-5 py-3 min-h-[44px] font-bold rounded-2xl text-xs shadow-lg flex items-center justify-center gap-2 transition-all ${
+                !currentUser || isClaiming || isOnCooldown
+                  ? 'bg-slate-200/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 cursor-not-allowed opacity-80 border border-white/20 shadow-none'
+                  : 'bg-amber-400 hover:bg-amber-300 text-slate-950 active:scale-95'
+              }`}
             >
-              <Sparkles className="w-4 h-4" />
-              <span>Claim Today (+50 Pts)</span>
+              {isOnCooldown ? (
+                <>
+                  <Clock className="w-4 h-4 shrink-0" />
+                  <span className="tabular-nums">
+                    Claimed • Next in {formatDailyClaimCountdown(remainingMs)}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-4 h-4 shrink-0" />
+                  <span>{isClaiming ? 'Claiming...' : 'Claim Today (+50 Pts)'}</span>
+                </>
+              )}
             </button>
             <button
               onClick={() => onNavigate('games')}

@@ -114,6 +114,55 @@ const DEMO_CONVERSATIONS: Conversation[] = [
   },
 ];
 
+const DEMO_BASE_MS = Date.now() - 30 * 60 * 1000;
+
+function getMessageEpochMs(msg: Pick<Message, 'id' | 'createdAt' | 'createdAtMs'>): number {
+  if (typeof msg.createdAt === 'number' && Number.isFinite(msg.createdAt) && msg.createdAt > 0) {
+    return msg.createdAt;
+  }
+  if (typeof msg.createdAtMs === 'number' && Number.isFinite(msg.createdAtMs) && msg.createdAtMs > 0) {
+    return msg.createdAtMs;
+  }
+  if (typeof msg.createdAt === 'string') {
+    const trimmed = msg.createdAt.trim();
+    if (/^\d{10,}$/.test(trimmed)) {
+      const parsedNum = Number(trimmed);
+      if (Number.isFinite(parsedNum) && parsedNum > 0) return parsedNum;
+    }
+    const parsedDate = Date.parse(trimmed);
+    if (!Number.isNaN(parsedDate) && parsedDate > 0) return parsedDate;
+  }
+  const idMatch = String(msg.id || '').match(/(\d{12,15})/);
+  if (idMatch) {
+    const parsedIdMs = Number(idMatch[1]);
+    if (Number.isFinite(parsedIdMs) && parsedIdMs > 0) return parsedIdMs;
+  }
+  return 0;
+}
+
+function formatMessageTime(msg: Pick<Message, 'id' | 'createdAt' | 'createdAtMs' | 'createdAtLabel'>): string {
+  if (msg.createdAtLabel && msg.createdAtLabel.trim()) {
+    return msg.createdAtLabel;
+  }
+  if (typeof msg.createdAt === 'string' && msg.createdAt.trim() && !/^\d{10,}$/.test(msg.createdAt.trim())) {
+    return msg.createdAt;
+  }
+  const ms = getMessageEpochMs(msg);
+  if (ms > 0) {
+    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return 'Now';
+}
+
+function sortMessagesChronologically(list: Message[]): Message[] {
+  return [...list].sort((a, b) => {
+    const tA = getMessageEpochMs(a);
+    const tB = getMessageEpochMs(b);
+    if (tA !== tB) return tA - tB;
+    return String(a.id || '').localeCompare(String(b.id || ''));
+  });
+}
+
 const DEMO_SEED_MESSAGES: Message[] = [
   {
     id: 'msg_1',
@@ -121,7 +170,9 @@ const DEMO_SEED_MESSAGES: Message[] = [
     senderId: 'usr_jit_002',
     senderName: 'Priya Mukherjee',
     content: 'Hi! Have you checked out the new JIT GROUP gaming and calling features?',
-    createdAt: '10:30 AM',
+    createdAt: DEMO_BASE_MS,
+    createdAtMs: DEMO_BASE_MS,
+    createdAtLabel: '10:30 AM',
     status: 'read',
   },
   {
@@ -130,7 +181,9 @@ const DEMO_SEED_MESSAGES: Message[] = [
     senderId: 'usr_jit_primary_001',
     senderName: 'Prof. Ramesh Sharma',
     content: 'Yes! The WebRTC low-latency calling and real-time state synchronization work seamlessly.',
-    createdAt: '10:35 AM',
+    createdAt: DEMO_BASE_MS + 5 * 60 * 1000,
+    createdAtMs: DEMO_BASE_MS + 5 * 60 * 1000,
+    createdAtLabel: '10:35 AM',
     status: 'read',
   },
   {
@@ -139,7 +192,9 @@ const DEMO_SEED_MESSAGES: Message[] = [
     senderId: 'usr_jit_002',
     senderName: 'Priya Mukherjee',
     content: 'Are we still on for the Ludo tournament practice at 7 PM?',
-    createdAt: '10:45 AM',
+    createdAt: DEMO_BASE_MS + 15 * 60 * 1000,
+    createdAtMs: DEMO_BASE_MS + 15 * 60 * 1000,
+    createdAtLabel: '10:45 AM',
     status: 'delivered',
   },
 ];
@@ -248,13 +303,23 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          setAiMessages(parsed);
+          const normalized = parsed.map((m: Message, idx: number) => {
+            const ms = getMessageEpochMs(m) || Date.now() - (parsed.length - idx) * 1000;
+            return {
+              ...m,
+              createdAt: ms,
+              createdAtMs: ms,
+              createdAtLabel: formatMessageTime(m),
+            };
+          });
+          setAiMessages(sortMessagesChronologically(normalized));
           return;
         }
       }
     } catch {
       // ignore storage error
     }
+    const nowMs = Date.now();
     setAiMessages([
       {
         id: 'ai_welcome_1',
@@ -262,8 +327,9 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         senderId: 'jit_ai_assistant',
         senderName: 'JIT AI Assistant',
         content: `Hi ${currentUser.fullName.split(' ')[0]}! I am JIT AI, your study, computer science, coding, and campus companion. Ask me anything anytime!`,
-        createdAt: 'Now',
-        createdAtMs: Date.now(),
+        createdAt: nowMs,
+        createdAtMs: nowMs,
+        createdAtLabel: 'Now',
         status: 'read',
       },
     ]);
@@ -408,7 +474,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   }, [isNewDmOpen, dmUserQuery]);
 
   const jitAiConversation: Conversation = useMemo(() => {
-    const lastAiMsg = aiMessages[aiMessages.length - 1];
+    const sortedAi = sortMessagesChronologically(aiMessages);
+    const lastAiMsg = sortedAi[sortedAi.length - 1];
     return {
       id: JIT_AI_CONV_ID,
       type: 'direct',
@@ -418,7 +485,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       lastMessage: {
         text: lastAiMsg?.content?.slice(0, 70) || 'Ask studies, code, or campus questions anytime',
         senderId: lastAiMsg?.senderId || 'jit_ai_assistant',
-        createdAt: lastAiMsg?.createdAt || 'Online',
+        createdAt: lastAiMsg ? formatMessageTime(lastAiMsg) : 'Online',
         isRead: true,
       },
       unreadCount: 0,
@@ -450,7 +517,9 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   const activeMessages = useMemo(() => {
     if (!activeConv) return [];
-    if (activeConv.id === JIT_AI_CONV_ID) return aiMessages;
+    if (activeConv.id === JIT_AI_CONV_ID) {
+      return sortMessagesChronologically(aiMessages);
+    }
     const byId = new Map<string, Message>();
     for (const lm of localMessages) {
       if (lm.conversationId === activeConv.id) {
@@ -462,12 +531,20 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         byId.set(cm.id, cm);
       }
     }
-    return Array.from(byId.values());
+    return sortMessagesChronologically(Array.from(byId.values()));
   }, [activeConv, cloudMessages, localMessages, aiMessages]);
 
+  const lastActiveMessage = activeMessages[activeMessages.length - 1];
+  const lastActiveMessageKey = lastActiveMessage
+    ? `${lastActiveMessage.id}:${getMessageEpochMs(lastActiveMessage)}`
+    : '';
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeMessages.length, activeConv?.id]);
+    const rafId = window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [activeMessages.length, lastActiveMessageKey, activeConv?.id, mobileThreadOpen, aiThinking]);
 
   // Known peers pool for DM picker & Group member picker
   const selectablePeers = useMemo(() => {
@@ -554,14 +631,16 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   const handleClearAiChat = () => {
     if (!currentUser) return;
+    const nowMs = Date.now();
     const resetMsg: Message = {
-      id: `ai_welcome_${Date.now()}`,
+      id: `ai_welcome_${nowMs}`,
       conversationId: JIT_AI_CONV_ID,
       senderId: 'jit_ai_assistant',
       senderName: 'JIT AI Assistant',
       content: `Fresh chat started! Ask me about Computer Science, exams, coding errors, or general questions.`,
-      createdAt: 'Now',
-      createdAtMs: Date.now(),
+      createdAt: nowMs,
+      createdAtMs: nowMs,
+      createdAtLabel: 'Now',
       status: 'read',
     };
     setAiMessages([resetMsg]);
@@ -571,19 +650,21 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   const sendPromptToJitAi = async (promptText: string) => {
     if (!promptText.trim() || !currentUser || aiThinking) return;
     const clean = promptText.trim();
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const userCreatedAt = Date.now();
+    const nowTime = new Date(userCreatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const userMsg: Message = {
-      id: `ai_u_${Date.now()}`,
+      id: `ai_u_${userCreatedAt}`,
       conversationId: JIT_AI_CONV_ID,
       senderId: currentUser.id,
       senderName: currentUser.fullName,
       content: clean,
-      createdAt: nowTime,
-      createdAtMs: Date.now(),
+      createdAt: userCreatedAt,
+      createdAtMs: userCreatedAt,
+      createdAtLabel: nowTime,
       status: 'read',
     };
 
-    const historyTurns: JitAiChatTurn[] = aiMessages
+    const historyTurns: JitAiChatTurn[] = sortMessagesChronologically(aiMessages)
       .filter((m) => !m.id.startsWith('ai_welcome_'))
       .slice(-10)
       .map((m) => ({
@@ -591,7 +672,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         text: m.content,
       }));
 
-    setAiMessages((prev) => [...prev, userMsg]);
+    setAiMessages((prev) => sortMessagesChronologically([...prev, userMsg]));
     setAiThinking(true);
     setSendError(null);
 
@@ -603,17 +684,22 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         mode: aiMode,
       });
 
+      const replyCreatedAt = Math.max(Date.now(), userCreatedAt + 1);
       const replyMsg: Message = {
-        id: `ai_m_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`,
+        id: `ai_m_${replyCreatedAt}_${Math.random().toString(36).slice(2, 5)}`,
         conversationId: JIT_AI_CONV_ID,
         senderId: 'jit_ai_assistant',
         senderName: 'JIT AI Assistant',
         content: res.reply,
-        createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        createdAtMs: Date.now(),
+        createdAt: replyCreatedAt,
+        createdAtMs: replyCreatedAt,
+        createdAtLabel: new Date(replyCreatedAt).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
         status: 'read',
       };
-      setAiMessages((prev) => [...prev, replyMsg]);
+      setAiMessages((prev) => sortMessagesChronologically([...prev, replyMsg]));
     } catch (err: any) {
       setSendError(err?.message || 'Unable to reach JIT AI right now.');
     } finally {
@@ -673,8 +759,11 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         mediaType,
       });
 
+      const sentTimeLabel = formatMessageTime(sentMsg);
       setLocalMessages((prev) =>
-        prev.some((m) => m.id === sentMsg.id) ? prev : [...prev, sentMsg]
+        prev.some((m) => m.id === sentMsg.id)
+          ? prev
+          : sortMessagesChronologically([...prev, sentMsg])
       );
       setLocalConversations((prev) =>
         prev.map((c) =>
@@ -684,11 +773,11 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                 lastMessage: {
                   text: sentMsg.content || (mediaUrl ? '[Image Attachment]' : ''),
                   senderId: currentUser.id,
-                  createdAt: sentMsg.createdAt,
+                  createdAt: sentTimeLabel,
                   isRead: true,
                 },
-                updatedAt: sentMsg.createdAt,
-                updatedAtMs: Date.now(),
+                updatedAt: sentTimeLabel,
+                updatedAtMs: getMessageEpochMs(sentMsg) || Date.now(),
               }
             : c
         )
@@ -1159,7 +1248,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                         )}
                       </div>
                       <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-1 px-1">
-                        <span>{msg.createdAt}</span>
+                        <span>{formatMessageTime(msg)}</span>
                         {isMe && (
                           <span>
                             {msg.status === 'read' ? (

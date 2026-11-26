@@ -37,6 +37,7 @@ export interface UserProfile {
   status?: 'active' | 'suspended' | 'deleted';
   suspendedReason?: string;
   suspendedAt?: string;
+  lastDailyClaimAt?: number;
   stats: {
     friendsCount: number;
     followersCount: number;
@@ -187,8 +188,9 @@ export interface Message {
   content: string;
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'file';
-  createdAt: string;
+  createdAt: number | string;
   createdAtMs?: number;
+  createdAtLabel?: string;
   status: 'sent' | 'delivered' | 'read';
 }
 

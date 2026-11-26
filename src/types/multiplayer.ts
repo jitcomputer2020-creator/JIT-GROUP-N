@@ -90,6 +90,7 @@ export interface InGameChatMessage {
   text?: string;
   imageUrl?: string;
   timestamp: string;
+  createdAt?: number;
 }
 
 export interface RoomReaction {

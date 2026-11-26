@@ -1311,8 +1311,14 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
     const threads = allThreadIds.map((cid) => {
       const conv = convById.get(cid);
       const msgs = [...(msgsByConv.get(cid) || [])].sort((a, b) => {
-        const tA = a.createdAtMs || (a.timestampIso ? Date.parse(a.timestampIso) : 0);
-        const tB = b.createdAtMs || (b.timestampIso ? Date.parse(b.timestampIso) : 0);
+        const tA =
+          a.createdAtMs ||
+          (typeof a.createdAt === 'number' ? a.createdAt : 0) ||
+          (a.timestampIso ? Date.parse(a.timestampIso) : 0);
+        const tB =
+          b.createdAtMs ||
+          (typeof b.createdAt === 'number' ? b.createdAt : 0) ||
+          (b.timestampIso ? Date.parse(b.timestampIso) : 0);
         return tA - tB;
       });
 
@@ -1383,11 +1389,19 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
       }
 
       const updatedAtMs = Math.max(
-        lastMsg?.createdAtMs || (lastMsg?.timestampIso ? Date.parse(lastMsg.timestampIso) : 0) || 0,
+        lastMsg?.createdAtMs ||
+          (typeof lastMsg?.createdAt === 'number' ? lastMsg.createdAt : 0) ||
+          (lastMsg?.timestampIso ? Date.parse(lastMsg.timestampIso) : 0) ||
+          0,
         conv?.updatedAtMs || 0
       );
 
-      let lastMessageTime = lastMsg?.createdAt || conv?.lastMessage?.createdAt || conv?.updatedAt || '';
+      let lastMessageTime =
+        lastMsg?.createdAtLabel ||
+        (typeof lastMsg?.createdAt === 'string' ? lastMsg.createdAt : '') ||
+        conv?.lastMessage?.createdAt ||
+        conv?.updatedAt ||
+        '';
       if (updatedAtMs > 0) {
         const dt = formatDateTime(new Date(updatedAtMs).toISOString());
         lastMessageTime = dt.time ? `${dt.date} · ${dt.time}` : dt.date;
@@ -2813,12 +2827,17 @@ export const AdminView: React.FC<AdminViewProps> = ({ onExitAdmin }) => {
                                   ) : (
                                     activeThreadMessages.map((msg) => {
                                       const isInspectedSender = msg.senderId === inspectedUser.id;
-                                      const msgTime = msg.createdAtMs
+                                      const numericCreated =
+                                        msg.createdAtMs ||
+                                        (typeof msg.createdAt === 'number' ? msg.createdAt : 0);
+                                      const msgTime = msg.createdAtLabel
+                                        ? msg.createdAtLabel
+                                        : numericCreated
                                         ? (() => {
-                                            const dt = formatDateTime(new Date(msg.createdAtMs).toISOString());
+                                            const dt = formatDateTime(new Date(numericCreated).toISOString());
                                             return dt.time ? `${dt.date} ${dt.time}` : dt.date;
                                           })()
-                                        : msg.createdAt;
+                                        : String(msg.createdAt || '');
                                       return (
                                         <div
                                           key={msg.id}

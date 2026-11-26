@@ -148,6 +148,13 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
 
   const fullName = String(data.fullName || 'JIT Member');
   const contactNumber = String(data.contactNumber || '');
+  const lastDailyClaimAt =
+    typeof data.lastDailyClaimAt === 'number' &&
+    Number.isFinite(data.lastDailyClaimAt) &&
+    data.lastDailyClaimAt > 0
+      ? data.lastDailyClaimAt
+      : undefined;
+
   return {
     id: String(data.id),
     contactNumber,
@@ -168,6 +175,7 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     status: (data.status as UserProfile['status']) || 'active',
     suspendedReason: typeof data.suspendedReason === 'string' && data.suspendedReason ? data.suspendedReason : undefined,
     suspendedAt: typeof data.suspendedAt === 'string' && data.suspendedAt ? data.suspendedAt : undefined,
+    ...(lastDailyClaimAt ? { lastDailyClaimAt } : {}),
     stats: sanitizeStats(data.stats),
   };
 }
@@ -479,19 +487,24 @@ export async function updateCloudProfile(
     await batch.commit();
   }
 
-  if (hasStatsUpdate) {
+  if (hasStatsUpdate || (typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt))) {
     const mergedProfile: UserProfile = {
       ...profile,
       ...updates,
-      stats: sanitizeStats(updates.stats),
+      stats: sanitizeStats(updates.stats || profile.stats),
     };
-    const batch = writeBatch(dbLite);
-    batch.update(profileRef, {
-      stats: sanitizeStats(updates.stats),
+    const statsPatch: Record<string, any> = {
+      stats: sanitizeStats(updates.stats || profile.stats),
       lastLoginAt: nowIso,
       lastLogin: nowIso,
       lastActiveAt: serverTimestamp(),
-    });
+      ...(typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt)
+        ? { lastDailyClaimAt: updates.lastDailyClaimAt }
+        : {}),
+    };
+    const batch = writeBatch(dbLite);
+    batch.update(profileRef, statsPatch);
+    batch.set(doc(dbLite, 'users', profile.id), { id: profile.id, ...statsPatch }, { merge: true });
     batch.update(indexRef, { lastLoginAt: serverTimestamp() });
     batch.set(doc(dbLite, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
     await batch.commit();
