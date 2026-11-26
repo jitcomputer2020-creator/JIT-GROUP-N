@@ -40,6 +40,7 @@ export const NotificationsDrawer: React.FC<NotificationsDrawerProps> = ({
     acceptFriendRequest,
     rejectFriendRequest,
     openDirectChat,
+    joinInvitedGameRoom,
     setViewingUserId,
   } = useSocial();
 
@@ -73,6 +74,14 @@ export const NotificationsDrawer: React.FC<NotificationsDrawerProps> = ({
     if (notif.type === 'reward' || notif.type === 'achievement') {
       onNavigate('wallet');
     } else if (notif.type === 'game_invite') {
+      if (notif.roomId) {
+        joinInvitedGameRoom(notif.roomId, notif.gameId);
+      } else {
+        const match = notif.message.match(/#?([A-Za-z0-9_-]{4,24})/);
+        if (match?.[1]) {
+          joinInvitedGameRoom(match[1], notif.gameId);
+        }
+      }
       onNavigate('games');
     } else if (notif.type === 'tournament') {
       onNavigate('tournaments');
@@ -232,6 +241,22 @@ export const NotificationsDrawer: React.FC<NotificationsDrawerProps> = ({
                             <UserCheck className="w-3 h-3" />
                             Connected as Friends
                           </p>
+                        )}
+
+                        {notif.type === 'game_invite' && notif.roomId && (
+                          <div
+                            className="flex items-center gap-2 mt-2.5"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => handleAction(notif)}
+                              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[11px] font-bold flex items-center gap-1.5 shadow-sm"
+                            >
+                              <Gamepad2 className="w-3.5 h-3.5" />
+                              <span>Join Match · #{notif.roomId}</span>
+                            </button>
+                          </div>
                         )}
                       </div>
                       <ArrowRight className="w-3.5 h-3.5 text-slate-400 shrink-0 self-center" />

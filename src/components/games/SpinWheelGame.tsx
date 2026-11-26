@@ -11,7 +11,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Sparkles, RotateCw, Trophy, Users } from 'lucide-react';
 import { soundFx } from '../../utils/soundFx';
 import { GameMode, MultiplayerRoom, SpinSyncedState } from '../../types/multiplayer';
-import { subscribeToGameRoom } from '../../lib/firebase';
 
 interface WheelSlice {
   label: string;
@@ -45,7 +44,7 @@ interface SpinWheelGameProps {
   onSyncSpin?: (
     nextState: SpinSyncedState,
     nextTurnId: string,
-    status: 'active' | 'finished'
+    status: 'playing' | 'active' | 'finished'
   ) => void;
   onRequestRematch?: () => void;
   onSpinReward: (points: number, label: string) => Promise<void>;
@@ -91,24 +90,25 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
   const spinsUsedRef = useRef(spinsUsed);
   spinsUsedRef.current = spinsUsed;
 
-  const isMultiplayer = Boolean(currentRoom && gameMode !== 'ai');
+  const isMultiplayer = Boolean(currentRoom) || gameMode !== 'ai';
   const myId = activePlayerId || userId;
   const activePlayers = currentRoom?.players || [];
-  const currentTurnId = currentRoom?.currentTurn || activePlayers[0]?.id || currentRoom?.hostId || '';
+  const currentTurnId =
+    currentRoom?.currentTurnUserId ||
+    currentRoom?.currentTurn ||
+    activePlayers[0]?.id ||
+    currentRoom?.hostId ||
+    '';
 
   const isAuthorizedSpinner = (() => {
-    if (!isMultiplayer || !currentRoom) return true;
+    if (!isMultiplayer || !currentRoom) return gameMode === 'ai';
     if (isWaitingSpectator) return false;
     if (currentRoom.status === 'waiting' && !currentRoom.isOpenGroup) return false;
+    if (!currentRoom.isOpenGroup && !currentRoom.guest && !currentRoom.player2Id && activePlayers.length < 2) {
+      return false;
+    }
     if (currentRoom.status === 'finished') return false;
     if (currentTurnId !== myId) return false;
-    if (firebaseAuthUid && currentRoom.currentTurn && currentRoom.currentTurn !== firebaseAuthUid) {
-      return false;
-    }
-    const seatPlayer = activePlayers.find((p) => p.id === currentTurnId);
-    if (firebaseAuthUid && seatPlayer?.authUid && seatPlayer.authUid !== firebaseAuthUid) {
-      return false;
-    }
     return true;
   })();
 
@@ -190,25 +190,6 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
     applySpinSnapshot(syncedState);
   }, [isMultiplayer, syncedState, applySpinSnapshot]);
 
-  // Direct Firestore onSnapshot listener inside Lucky Spin when in a live room
-  useEffect(() => {
-    const roomCode = currentRoom?.roomCode;
-    if (!roomCode || !isMultiplayer) return;
-    const unsub = subscribeToGameRoom(roomCode, (room, moveAction) => {
-      const board = (room.boardState || room.gameState) as SpinSyncedState | null;
-      if (!board || moveAction === 'ROOM_CREATED') return;
-      if (
-        moveAction === 'SPIN_MOVE' ||
-        moveAction === 'REMATCH' ||
-        typeof board.spinAngle === 'number' ||
-        board.moveId
-      ) {
-        applySpinSnapshot(board);
-      }
-    });
-    return () => unsub();
-  }, [currentRoom?.roomCode, isMultiplayer, applySpinSnapshot]);
-
   const myUsedCount = isMultiplayer ? roomSpinsUsed[myId] || 0 : spinsUsed;
   const spinsRemaining = Math.max(0, MAX_DAILY_SPINS - myUsedCount);
 
@@ -254,7 +235,7 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
         currentTurn: currentTurnId,
       };
       // Hold turn on current spinner while wheel animates so both clients see live spin simultaneously
-      onSyncSpin(startState, currentTurnId, 'active');
+      onSyncSpin(startState, currentTurnId, 'playing');
     }
 
     // Synthesized tick sounds during spin deceleration
@@ -309,7 +290,7 @@ export const SpinWheelGame: React.FC<SpinWheelGameProps> = ({
             currentTurn: nextTurnId,
           },
           nextTurnId,
-          'active'
+          'playing'
         );
       } else {
         const nextUsed = spinsUsedRef.current + 1;

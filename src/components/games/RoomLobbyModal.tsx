@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { UserProfile } from '../../types';
 import { MultiplayerRoom } from '../../types/multiplayer';
 import { APP_CONFIG } from '../../constants/branding';
 import {
@@ -16,15 +17,18 @@ import {
   X,
   Shield,
   Loader2,
-  Sparkles,
   Bot,
   RefreshCw,
+  Search,
+  Send,
 } from 'lucide-react';
 
 interface RoomLobbyModalProps {
   isOpen: boolean;
   room: MultiplayerRoom | null;
   currentUserId: string;
+  friendsList?: UserProfile[];
+  onSendDirectInvite?: (friend: UserProfile) => Promise<boolean>;
   onStartGame: () => void;
   onKickPlayer: (playerId: string) => void;
   onLeaveRoom: () => void;
@@ -38,6 +42,8 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
   isOpen,
   room,
   currentUserId,
+  friendsList = [],
+  onSendDirectInvite,
   onStartGame,
   onKickPlayer,
   onLeaveRoom,
@@ -48,11 +54,31 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
 }) => {
   const [copied, setCopied] = useState(false);
   const [shareSuccess, setShareSuccess] = useState(false);
+  const [inviteSearch, setInviteSearch] = useState('');
+  const [sendingInviteId, setSendingInviteId] = useState<string | null>(null);
+  const [invitedIds, setInvitedIds] = useState<Record<string, boolean>>({});
+  const [inviteError, setInviteError] = useState<string | null>(null);
+
+  const filteredInvitees = useMemo(() => {
+    const seatedIds = new Set((room?.players || []).map((p) => p.id));
+    const q = inviteSearch.trim().toLowerCase();
+    return friendsList
+      .filter((f) => !seatedIds.has(f.id))
+      .filter(
+        (f) =>
+          !q ||
+          f.fullName.toLowerCase().includes(q) ||
+          (f.username || '').toLowerCase().includes(q)
+      )
+      .slice(0, 10);
+  }, [friendsList, inviteSearch, room?.players]);
 
   if (!isOpen || !room) return null;
 
   const isHost = room.hostId === currentUserId;
   const canStart = isHost && room.players.length >= 2;
+  const isMatchActive =
+    room.status === 'active' || room.status === 'playing' || room.status === 'in_game';
   const gameInfo = APP_CONFIG.games.find((g) => g.id === room.gameId);
 
   const copyTextSafe = async (value: string) => {
@@ -242,6 +268,91 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
           </div>
         </div>
 
+        {/* Direct Friend Invite List */}
+        {onSendDirectInvite && friendsList.length > 0 && room.players.length < room.maxPlayers && (
+          <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                Invite a Friend Directly
+              </span>
+              <div className="relative flex-1 max-w-[160px]">
+                <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={inviteSearch}
+                  onChange={(e) => setInviteSearch(e.target.value)}
+                  placeholder="Search name..."
+                  className="w-full pl-7 pr-2 py-1 text-[11px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+            {inviteError && (
+              <p className="text-[11px] text-rose-500 font-semibold">{inviteError}</p>
+            )}
+            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+              {filteredInvitees.length === 0 ? (
+                <p className="text-[11px] text-slate-400 text-center py-2">
+                  No matching friends to invite.
+                </p>
+              ) : (
+                filteredInvitees.map((friend) => {
+                  const alreadySent = Boolean(invitedIds[friend.id]);
+                  const isBusy = sendingInviteId === friend.id;
+                  return (
+                    <div
+                      key={friend.id}
+                      className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/70 flex items-center justify-between gap-2"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <img
+                          src={friend.avatarUrl || APP_CONFIG.logoUrl}
+                          alt={friend.fullName}
+                          className="w-7 h-7 rounded-full object-cover shrink-0"
+                        />
+                        <span className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                          {friend.fullName}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isBusy || alreadySent}
+                        onClick={async () => {
+                          setInviteError(null);
+                          setSendingInviteId(friend.id);
+                          try {
+                            const ok = await onSendDirectInvite(friend);
+                            if (ok) {
+                              setInvitedIds((prev) => ({ ...prev, [friend.id]: true }));
+                            } else {
+                              setInviteError('Could not deliver invite right now.');
+                            }
+                          } finally {
+                            setSendingInviteId(null);
+                          }
+                        }}
+                        className={`px-3 py-1 rounded-xl text-[11px] font-bold flex items-center gap-1 shrink-0 transition-colors ${
+                          alreadySent
+                            ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-blue-600 hover:bg-blue-700 text-white'
+                        }`}
+                      >
+                        {isBusy ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : alreadySent ? (
+                          <Check className="w-3 h-3" />
+                        ) : (
+                          <Send className="w-3 h-3" />
+                        )}
+                        <span>{isBusy ? 'Sending...' : alreadySent ? 'Invited ✓' : 'Send Invite'}</span>
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Live Waiting Status + Optional Manual AI Switch */}
         {room.players.length < 2 && onFallbackToAI && (
           <div className="p-3.5 rounded-2xl border bg-blue-50/70 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800/70 flex flex-wrap items-center justify-between gap-2">
@@ -271,7 +382,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
           </button>
 
           {isHost ? (
-            room.status === 'active' || room.status === 'in_game' ? (
+            isMatchActive ? (
               <button
                 type="button"
                 onClick={onClose}
@@ -300,7 +411,7 @@ export const RoomLobbyModal: React.FC<RoomLobbyModalProps> = ({
                 )}
               </button>
             )
-          ) : room.status === 'active' || room.status === 'in_game' ? (
+          ) : isMatchActive ? (
             <button
               type="button"
               onClick={onClose}

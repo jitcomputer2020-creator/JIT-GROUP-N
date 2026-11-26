@@ -59,12 +59,14 @@ interface TruthAndDareGameProps {
   currentUserId: string;
   firebaseAuthUid?: string | null;
   currentTurnId?: string;
+  isMultiplayerRoom?: boolean;
+  isOpenGroupRoom?: boolean;
   mutedVoiceIds?: string[];
   mutedChatIds?: string[];
   isHost: boolean;
   isSeatedActivePlayer: boolean;
   state: TruthAndDareState | null;
-  onUpdateState: (next: TruthAndDareState, status?: 'active' | 'in_game' | 'finished') => void;
+  onUpdateState: (next: TruthAndDareState, status?: 'playing' | 'active' | 'in_game' | 'finished') => void;
   onRoundAward: (points: number, summary: string) => void;
   onOpenHostPanel?: () => void;
 }
@@ -73,8 +75,9 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
   players,
   waitingCount,
   currentUserId,
-  firebaseAuthUid,
   currentTurnId,
+  isMultiplayerRoom = false,
+  isOpenGroupRoom = false,
   mutedVoiceIds = [],
   mutedChatIds = [],
   isHost,
@@ -98,31 +101,15 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
   }, []);
 
   const activePlayers = players.length > 0 ? players : [];
+  const needsFriendToJoin = isMultiplayerRoom && !isOpenGroupRoom && activePlayers.length < 2;
   const currentRound = state?.round || 1;
   const phase = state?.phase || 'spinning';
   const myPlayer = activePlayers.find((p) => p.id === currentUserId);
-  const isAuthIdentityValid = React.useCallback(
-    (player?: RoomPlayer | null): boolean => {
-      if (!player?.authUid || !firebaseAuthUid) return true;
-      return player.authUid === firebaseAuthUid;
-    },
-    [firebaseAuthUid]
-  );
-  const canOperateRound = (isHost || isSeatedActivePlayer) && isAuthIdentityValid(myPlayer);
+  const canOperateRound = !needsFriendToJoin && (isHost || isSeatedActivePlayer);
   const effectiveSelectedId = state?.selectedPlayerId || state?.activePlayerId || '';
-  const spotlightPlayer = state
-    ? activePlayers.find((p) => p.id === effectiveSelectedId)
-    : undefined;
-  const turnMatches =
-    !currentTurnId ||
-    currentTurnId === currentUserId ||
-    (firebaseAuthUid ? currentTurnId === firebaseAuthUid : false);
+  const turnMatches = !currentTurnId || currentTurnId === currentUserId;
   const isMyTurn = state
-    ? canOperateRound &&
-      ((effectiveSelectedId === currentUserId &&
-        turnMatches &&
-        isAuthIdentityValid(spotlightPlayer)) ||
-        isHost)
+    ? canOperateRound && ((effectiveSelectedId === currentUserId && turnMatches) || isHost)
     : canOperateRound;
 
   const pickRandomPlayer = (): RoomPlayer | null => {
@@ -164,7 +151,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
           history: state?.history || [],
           updatedAtMs: Date.now(),
         },
-        'active'
+        'playing'
       );
     }, 650);
   };
@@ -189,7 +176,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
         currentTurn: effectiveSelectedId,
         updatedAtMs: Date.now(),
       },
-      'active'
+      'playing'
     );
   };
 
@@ -210,7 +197,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
         currentTurn: effectiveSelectedId,
         updatedAtMs: Date.now(),
       },
-      'active'
+      'playing'
     );
   };
 
@@ -235,7 +222,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
         currentTurn: effectiveSelectedId,
         updatedAtMs: Date.now(),
       },
-      'active'
+      'playing'
     );
     setCustomPromptDraft('');
   };
@@ -270,7 +257,7 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
         history: nextHistory,
         updatedAtMs: Date.now(),
       },
-      'active'
+      'playing'
     );
 
     if (roundStatus === 'completed' && (state.activePlayerId === currentUserId || isHost)) {
@@ -291,7 +278,15 @@ export const TruthAndDareGame: React.FC<TruthAndDareGameProps> = ({
               Truth & Dare · Round #{currentRound}
             </p>
             <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
-              {activePlayers.length} Seated Players {waitingCount > 0 ? `· ${waitingCount} in Waiting Seat` : '· Open Group Live'}
+              {needsFriendToJoin
+                ? 'Waiting for friend to join room...'
+                : `${activePlayers.length} Seated Players ${
+                    waitingCount > 0
+                      ? `· ${waitingCount} in Waiting Seat`
+                      : isOpenGroupRoom
+                      ? '· Open Group Live'
+                      : '· Multiplayer Live'
+                  }`}
             </p>
           </div>
         </div>

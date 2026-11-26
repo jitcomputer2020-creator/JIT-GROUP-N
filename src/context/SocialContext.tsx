@@ -65,6 +65,12 @@ export interface ActiveChatPartner {
   avatarUrl?: string;
 }
 
+export interface PendingGameInvite {
+  roomId: string;
+  gameId?: string;
+  requestedAt: number;
+}
+
 interface SocialContextType {
   posts: Post[];
   stories: Story[];
@@ -76,6 +82,9 @@ interface SocialContextType {
   activeChatPartner: ActiveChatPartner | null;
   openDirectChat: (partner: ActiveChatPartner) => void;
   clearActiveChatPartner: () => void;
+  pendingGameInvite: PendingGameInvite | null;
+  joinInvitedGameRoom: (roomId: string, gameId?: string) => void;
+  clearPendingGameInvite: () => void;
   markNotificationRead: (notificationId: string) => void;
   markAllNotificationsRead: () => void;
   refreshAnnouncements: () => Promise<void>;
@@ -275,6 +284,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
   const [announcements, setAnnouncements] = useState<GlobalAnnouncement[]>([]);
   const [activeChatPartner, setActiveChatPartner] = useState<ActiveChatPartner | null>(null);
+  const [pendingGameInvite, setPendingGameInvite] = useState<PendingGameInvite | null>(null);
   const [cloudNotifications, setCloudNotifications] = useState<InAppNotification[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
   const postsHydratedRef = useRef(false);
@@ -1273,6 +1283,13 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         activeChatPartner,
         openDirectChat,
         clearActiveChatPartner,
+        pendingGameInvite,
+        joinInvitedGameRoom: (roomId: string, gameId?: string) => {
+          const clean = roomId.trim().replace(/^#/, '');
+          if (!clean) return;
+          setPendingGameInvite({ roomId: clean, gameId, requestedAt: Date.now() });
+        },
+        clearPendingGameInvite: () => setPendingGameInvite(null),
         markNotificationRead,
         markAllNotificationsRead,
         refreshAnnouncements,

@@ -16,7 +16,6 @@ import {
   CarromSyncedCoin,
 } from '../../types/multiplayer';
 import { soundFx } from '../../utils/soundFx';
-import { subscribeToGameRoom } from '../../lib/firebase';
 import { Target, RotateCcw, Sparkles } from 'lucide-react';
 
 interface Coin extends CarromSyncedCoin {
@@ -35,7 +34,7 @@ interface CarromBoardProps {
   onSyncMove?: (
     state: CarromSyncedState,
     nextTurnId: string,
-    status: 'active' | 'in_game' | 'finished'
+    status: 'playing' | 'active' | 'in_game' | 'finished'
   ) => void;
   onRequestRematch?: () => void;
   onMatchFinish: (outcome: 'win' | 'loss' | 'draw', summary: string, points: number) => void;
@@ -133,12 +132,21 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
   const currentRoomRef = useRef(currentRoom);
   currentRoomRef.current = currentRoom;
 
+  const isMultiplayer = Boolean(currentRoom) || gameMode !== 'ai';
   const mySide: 'player' | 'opponent' =
-    !currentRoom || gameMode === 'ai'
+    !isMultiplayer || !currentRoom
       ? 'player'
       : currentRoom.players[0]?.id === activePlayerId
       ? 'player'
       : 'opponent';
+
+  const hasFriendJoined = Boolean(
+    !currentRoom ||
+      currentRoom.isOpenGroup ||
+      currentRoom.guest?.id ||
+      currentRoom.player2Id ||
+      currentRoom.players.length >= 2
+  );
 
   const expectedTurnActorId = !currentRoom
     ? activePlayerId
@@ -147,19 +155,16 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     : currentRoom.players[1]?.id;
 
   const isAuthorizedMultiplayerActor = (() => {
-    if (!currentRoom || gameMode === 'ai') return turn === 'player';
+    if (!currentRoom && gameMode === 'ai') return turn === 'player';
+    if (!currentRoom) return false;
     if (isWaitingSpectator || !activePlayerId) return false;
+    if (!hasFriendJoined) return false;
     if (currentRoom.status === 'finished') return false;
+    if (currentRoom.status === 'waiting' && !currentRoom.isOpenGroup) return false;
     if (turn !== mySide) return false;
-    const roomTurn = currentRoom.currentTurn || expectedTurnActorId || '';
-    if (firebaseAuthUid && currentRoom.currentTurn && currentRoom.currentTurn !== firebaseAuthUid) {
-      return false;
-    }
+    const roomTurn =
+      currentRoom.currentTurnUserId || currentRoom.currentTurn || expectedTurnActorId || '';
     if (roomTurn !== activePlayerId || expectedTurnActorId !== activePlayerId) return false;
-    const seatPlayer = currentRoom.players.find((p) => p.id === roomTurn);
-    if (firebaseAuthUid && seatPlayer?.authUid && seatPlayer.authUid !== firebaseAuthUid) {
-      return false;
-    }
     return true;
   })();
 
@@ -417,25 +422,11 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     [activePlayerId, drawBoard, mySide, onMatchFinish]
   );
 
-  // Hydrate board state from parent syncedState
+  // Hydrate board state from parent syncedState (GamesView maintains the single room onSnapshot)
   useEffect(() => {
     if (!syncedState) return;
     applyCarromSnapshotState(syncedState);
   }, [syncedState, applyCarromSnapshotState]);
-
-  // Direct Firestore onSnapshot subscription for Carrom room document
-  useEffect(() => {
-    const roomCode = currentRoom?.roomCode;
-    if (!roomCode || gameMode === 'ai') return;
-    const unsub = subscribeToGameRoom(roomCode, (room, moveAction) => {
-      const board = (room.boardState || room.gameState) as CarromSyncedState | null;
-      if (!board || moveAction === 'ROOM_CREATED') return;
-      if (Array.isArray(board.coins) || board.moveId || moveAction === 'CARROM_MOVE' || moveAction === 'REMATCH') {
-        applyCarromSnapshotState(board);
-      }
-    });
-    return () => unsub();
-  }, [currentRoom?.roomCode, gameMode, applyCarromSnapshotState]);
 
   const executeStrike = useCallback(
     (
@@ -671,7 +662,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
               byPlayerId: activePlayerId,
             },
             nextTurnActorId,
-            finishedRef.current ? 'finished' : 'active'
+            finishedRef.current ? 'finished' : 'playing'
           );
         }
 
@@ -752,15 +743,15 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     <div className="max-w-md mx-auto flex flex-col items-center">
       <div className="flex items-center justify-between w-full mb-3 text-xs font-bold px-2">
         <span className={turn === 'player' ? 'text-blue-600' : 'text-slate-500'}>
-          {currentRoom ? `${currentRoom.players[0]?.name?.split(' ')[0] || 'P1'} (White)` : 'You (White)'}: {scores.player} pts
+          {currentRoom ? `${currentRoom.host?.name || currentRoom.players[0]?.name || 'P1'} (White)` : 'You (White)'}: {scores.player} pts
         </span>
         <span className="text-[11px] text-amber-600 font-semibold">
           {scores.queenHolder ? `Queen: ${scores.queenHolder}` : 'Queen: +30'}
         </span>
         <span className={turn === 'opponent' ? 'text-purple-600' : 'text-slate-500'}>
-          {gameMode === 'ai'
+          {gameMode === 'ai' && !currentRoom
             ? 'AI (Black)'
-            : `${currentRoom?.players[1]?.name?.split(' ')[0] || 'P2'} (Black)`}: {scores.opponent} pts
+            : `${currentRoom?.guest?.name || currentRoom?.players[1]?.name || 'Waiting...'} (Black)`}: {scores.opponent} pts
         </span>
       </div>
 
@@ -840,10 +831,16 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
             <span>
               {isSimulating
                 ? 'Simulating Shot...'
-                : turn === 'opponent' && gameMode === 'ai'
+                : turn === 'opponent' && gameMode === 'ai' && !currentRoom
                 ? 'AI Taking Shot...'
+                : currentRoom && !hasFriendJoined
+                ? 'Waiting for Friend to Join...'
                 : currentRoom && !isAuthorizedMultiplayerActor
-                ? 'Waiting for Opponent Turn...'
+                ? `Waiting for ${
+                    (turn === 'player'
+                      ? currentRoom.players[0]?.name
+                      : currentRoom.players[1]?.name) || 'Opponent'
+                  }'s Turn...`
                 : 'Strike Striker'}
             </span>
           </button>

@@ -18,7 +18,7 @@ import { StoryViewerModal } from './components/modals/StoryViewerModal';
 
 import { Loader2 } from 'lucide-react';
 import { APP_CONFIG } from './constants/branding';
-import { SocialProvider } from './context/SocialContext';
+import { SocialProvider, useSocial } from './context/SocialContext';
 
 // Views
 import { HomeView } from './views/HomeView';
@@ -43,6 +43,7 @@ function isAdminPathActive(): boolean {
 
 const MainLayout: React.FC = () => {
   const { isAuthenticated, isAuthLoading } = useAuth();
+  const { joinInvitedGameRoom } = useSocial();
   const [activeTab, setActiveTab] = useState<NavTab>(() => {
     if (isAdminPathActive()) return 'admin';
     return isAuthenticated ? 'home' : 'login';
@@ -77,6 +78,26 @@ const MainLayout: React.FC = () => {
       setActiveTab('login');
     }
   }, [isAuthenticated, isAuthLoading, activeTab]);
+
+  // Deep-link support for shared #room-XXXX invites
+  useEffect(() => {
+    if (!isAuthenticated || typeof window === 'undefined') return;
+    const consumeRoomHash = () => {
+      const match = window.location.hash.match(/^#room-([A-Za-z0-9_-]{4,64})$/i);
+      if (match?.[1]) {
+        joinInvitedGameRoom(match[1]);
+        setActiveTab('games');
+        try {
+          window.history.replaceState(null, '', window.location.pathname + window.location.search);
+        } catch {
+          // ignore
+        }
+      }
+    };
+    consumeRoomHash();
+    window.addEventListener('hashchange', consumeRoomHash);
+    return () => window.removeEventListener('hashchange', consumeRoomHash);
+  }, [isAuthenticated, joinInvitedGameRoom]);
 
   const handleOpenAdmin = () => {
     if (typeof window !== 'undefined' && !isAdminPathActive()) {

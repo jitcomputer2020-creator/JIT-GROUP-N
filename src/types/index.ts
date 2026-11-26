@@ -187,12 +187,17 @@ export interface Message {
   receiverId?: string;
   senderName: string;
   senderAvatar?: string;
-  type?: 'text' | 'image' | 'video' | 'file' | 'sticker';
+  type?: 'text' | 'image' | 'video' | 'file' | 'sticker' | 'game_invite';
   content: string;
   mediaUrl?: string;
   mediaType?: 'image' | 'video' | 'file';
   stickerId?: string;
   stickerData?: string;
+  gameInvite?: {
+    roomId: string;
+    gameId: string;
+    gameName: string;
+  };
   createdAt: number | string;
   createdAtMs?: number;
   clientCreatedAt?: number;
@@ -345,4 +350,7 @@ export interface InAppNotification {
   createdAtMs?: number;
   isRead: boolean;
   actionUrl?: string;
+  roomId?: string;
+  gameId?: string;
+  gameName?: string;
 }

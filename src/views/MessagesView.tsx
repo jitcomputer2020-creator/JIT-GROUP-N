@@ -251,6 +251,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   const {
     activeChatPartner,
     clearActiveChatPartner,
+    joinInvitedGameRoom,
     friendIds,
     friendRequestPeers,
   } = useSocial();
@@ -1586,6 +1587,10 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
               aiThinking={aiThinking}
               typingNames={activeTypingNames}
               onPromptChipClick={sendPromptToJitAi}
+              onJoinGameRoom={(roomId, gameId) => {
+                joinInvitedGameRoom(roomId, gameId);
+                onNavigate('games');
+              }}
               messagesEndRef={messagesEndRef}
             />
 

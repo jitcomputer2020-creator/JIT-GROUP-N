@@ -9,10 +9,10 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { doc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { Bot, RotateCcw, Sparkles } from 'lucide-react';
+import { Bot, RotateCcw, Sparkles, Users, Loader2 } from 'lucide-react';
 import { db, auth, handleFirestoreError, OperationType } from '../../lib/firebase';
 import { GameId } from '../../types';
-import { AIDifficulty, GameMode } from '../../types/multiplayer';
+import { AIDifficulty, GameMode, RoomParticipantInfo } from '../../types/multiplayer';
 import { checkTicTacToeWinner, getTicTacToeAIMove } from '../../services/gameAIEngine';
 import { soundFx } from '../../utils/soundFx';
 
@@ -64,12 +64,69 @@ function extractBoardFromSnapshot(
   return Array<CellValue>(9).fill(null);
 }
 
-function extractScoresFromSnapshot(data: Record<string, any>): { X: number; O: number } {
+function extractParticipantsFromSnapshot(data: Record<string, any>): {
+  host: RoomParticipantInfo | null;
+  guest: RoomParticipantInfo | null;
+} {
+  let parsedPlayers: Array<{ id?: string; name?: string; avatar?: string }> = [];
+  if (typeof data.playersJson === 'string') {
+    try {
+      const arr = JSON.parse(data.playersJson);
+      if (Array.isArray(arr)) parsedPlayers = arr;
+    } catch {
+      parsedPlayers = [];
+    }
+  }
+
+  const hostId = String(
+    data.host?.id || data.player1Id || data.player1 || data.hostId || parsedPlayers[0]?.id || ''
+  );
+  const hostName = String(
+    data.host?.name || data.player1Name || parsedPlayers[0]?.name || 'Player 1'
+  );
+  const guestId = String(
+    data.guest?.id || data.player2Id || data.player2 || parsedPlayers[1]?.id || ''
+  );
+  const guestName = String(
+    data.guest?.name || data.player2Name || parsedPlayers[1]?.name || ''
+  );
+
+  return {
+    host: hostId
+      ? {
+          id: hostId,
+          name: hostName,
+          symbol: 'X',
+          avatar: data.host?.avatar || parsedPlayers[0]?.avatar || '',
+        }
+      : null,
+    guest: guestId
+      ? {
+          id: guestId,
+          name: guestName || 'Opponent',
+          symbol: 'O',
+          avatar: data.guest?.avatar || parsedPlayers[1]?.avatar || '',
+        }
+      : null,
+  };
+}
+
+function extractScoresFromSnapshot(
+  data: Record<string, any>,
+  hostId: string,
+  guestId: string
+): { X: number; O: number } {
   const topScores = data.scores;
   if (topScores && typeof topScores === 'object') {
+    if (typeof topScores.X === 'number' || typeof topScores.O === 'number') {
+      return {
+        X: Number(topScores.X || 0),
+        O: Number(topScores.O || 0),
+      };
+    }
     return {
-      X: Number(topScores.X || 0),
-      O: Number(topScores.O || 0),
+      X: hostId ? Number(topScores[hostId] || 0) : 0,
+      O: guestId ? Number(topScores[guestId] || 0) : 0,
     };
   }
   const boardMapScores =
@@ -95,7 +152,8 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
   onOpenModeSelect,
   onAwardMatch,
 }) => {
-  const isMultiplayer = Boolean(roomId && gameMode !== 'ai');
+  // Strictly treat any room-backed session OR non-'ai' mode as multiplayer (never fall back to AI)
+  const isMultiplayer = Boolean(roomId) || gameMode !== 'ai';
 
   // Multiplayer Single Source of Truth hydrated ONLY by Firestore `onSnapshot`
   const [roomData, setRoomData] = useState<Record<string, any> | null>(null);
@@ -114,20 +172,25 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
   const awardedRoundRef = useRef<string | null>(null);
   const prevBoardJsonRef = useRef<string>('');
 
-  // Clear AI timers on unmount or mode change
+  // Clear AI timers immediately if entering a room or changing mode
   useEffect(() => {
+    if (isMultiplayer && aiTimerRef.current !== null) {
+      window.clearTimeout(aiTimerRef.current);
+      aiTimerRef.current = null;
+      setAiThinking(false);
+    }
     return () => {
       if (aiTimerRef.current !== null) {
         window.clearTimeout(aiTimerRef.current);
         aiTimerRef.current = null;
       }
     };
-  }, [gameMode, aiDifficulty]);
+  }, [gameMode, aiDifficulty, roomId, isMultiplayer]);
 
   // Real-Time Firestore Single-Source-of-Truth Subscription
   useEffect(() => {
     isWritingRef.current = false;
-    if (!roomId || gameMode === 'ai') {
+    if (!roomId) {
       setRoomData(null);
       setBoardState(Array<CellValue>(9).fill(null));
       setCurrentTurn('');
@@ -143,11 +206,12 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
+          const { host, guest } = extractParticipantsFromSnapshot(data);
           const nextBoard = extractBoardFromSnapshot(data.boardState, data.gameState);
           const nextTurn = String(
-            data.currentTurn || data.player1Id || data.player1 || data.hostId || ''
+            data.currentTurnUserId || data.currentTurn || host?.id || ''
           );
-          const nextScores = extractScoresFromSnapshot(data);
+          const nextScores = extractScoresFromSnapshot(data, host?.id || '', guest?.id || '');
 
           setRoomData(data);
           setBoardState(nextBoard);
@@ -178,7 +242,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       isWritingRef.current = false;
       unsub();
     };
-  }, [roomId, gameMode]);
+  }, [roomId]);
 
   const activeBoard = isMultiplayer ? boardState : aiBoard;
   const activeScores = isMultiplayer ? scores : aiScores;
@@ -187,27 +251,40 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
     [activeBoard]
   );
 
-  const actorUid = auth.currentUser?.uid || localPlayerId;
-  const p1Id = roomData
-    ? String(roomData.player1Id || roomData.player1 || roomData.hostId || '')
-    : '';
-  const p2Id = roomData ? String(roomData.player2Id || roomData.player2 || '') : '';
-  const isPlayer1 = Boolean(
-    isMultiplayer &&
-      roomData &&
-      (actorUid === p1Id || (roomData.player1AuthUid && actorUid === roomData.player1AuthUid))
+  const participants = useMemo(
+    () => (roomData ? extractParticipantsFromSnapshot(roomData) : { host: null, guest: null }),
+    [roomData]
   );
+  const hostInfo = participants.host;
+  const guestInfo = participants.guest;
+
+  const actorId = localPlayerId;
+  const p1Id = hostInfo?.id || '';
+  const p2Id = guestInfo?.id || '';
+  const isPlayer1 = Boolean(isMultiplayer && p1Id && actorId === p1Id);
   const mySymbol: 'X' | 'O' = isPlayer1 ? 'X' : 'O';
-  const resolvedTurnUid = currentTurn || String(roomData?.currentTurn || p1Id || '');
+  const roomStatus = String(roomData?.status || 'waiting');
+  const hasGuestJoined = Boolean(p2Id);
+  const isWaitingForFriend = Boolean(
+    isMultiplayer && (!roomData || !hasGuestJoined || roomStatus === 'waiting')
+  );
+  const resolvedTurnUserId =
+    currentTurn || String(roomData?.currentTurnUserId || roomData?.currentTurn || p1Id || '');
   const isMyMultiplayerTurn = Boolean(
     isMultiplayer &&
       roomData &&
       !isWaitingSpectator &&
-      actorUid &&
-      resolvedTurnUid &&
-      actorUid === resolvedTurnUid
+      !isWaitingForFriend &&
+      roomStatus !== 'finished' &&
+      !winner &&
+      actorId &&
+      resolvedTurnUserId &&
+      actorId === resolvedTurnUserId
   );
-  const isXTurn = isMultiplayer ? resolvedTurnUid === p1Id : aiIsXNext;
+  const isXTurn = isMultiplayer ? resolvedTurnUserId === p1Id : aiIsXNext;
+
+  const hostDisplayName = hostInfo?.name || 'Player 1';
+  const guestDisplayName = guestInfo?.name || 'Waiting...';
 
   // Award JIT Points once when a multiplayer match finishes via Firestore snapshot
   useEffect(() => {
@@ -226,7 +303,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       onAwardMatch({
         gameId: 'tictactoe',
         gameName: 'Tic Tac Toe',
-        mode: gameMode,
+        mode: gameMode === 'ai' ? 'friend' : gameMode,
         outcome: 'draw',
         pointsEarned: 10,
         scoreSummary: 'Draw (3x3)',
@@ -238,7 +315,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       onAwardMatch({
         gameId: 'tictactoe',
         gameName: 'Tic Tac Toe',
-        mode: gameMode,
+        mode: gameMode === 'ai' ? 'friend' : gameMode,
         outcome: iWon ? 'win' : 'loss',
         pointsEarned: iWon ? 25 : 5,
         scoreSummary: iWon ? `${winner} Victory` : 'Opponent Victory',
@@ -258,8 +335,8 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
     }
     return winner === mySymbol
       ? `You (${winner}) Won! +25 JIT Points`
-      : `Opponent (${winner}) Won! +5 Participation Points`;
-  }, [winner, isMultiplayer, aiDifficulty, mySymbol]);
+      : `${winner === 'X' ? hostDisplayName : guestDisplayName} (${winner}) Won! +5 Participation Points`;
+  }, [winner, isMultiplayer, aiDifficulty, mySymbol, hostDisplayName, guestDisplayName]);
 
   const handleCellClick = useCallback(
     async (index: number) => {
@@ -270,29 +347,36 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
           onWaitingSpectatorBlocked?.();
           return;
         }
+        if (isWaitingForFriend || !p1Id || !p2Id) {
+          soundFx.playError();
+          return;
+        }
         if (boardState[index] || winner) return;
 
-        // Mandatory Auth/Turn Verification
-        const currentActorUid = auth.currentUser?.uid || localPlayerId;
-        const activeTurnUid = currentTurn || String(roomData.currentTurn || '');
-        if (!currentActorUid || currentActorUid !== activeTurnUid) {
+        // Mandatory Turn Verification against canonical user IDs
+        const activeTurnUid =
+          currentTurn || String(roomData.currentTurnUserId || roomData.currentTurn || '');
+        if (!actorId || actorId !== activeTurnUid) {
           soundFx.playError();
           return;
         }
 
-        const player1Id = String(roomData.player1Id || roomData.player1 || roomData.hostId || '');
-        const player2Id = String(roomData.player2Id || roomData.player2 || '');
-        if (!player1Id || !player2Id) return;
-
         const nextBoard = [...boardState];
         nextBoard[index] = mySymbol;
 
-        const nextTurn = currentActorUid === player1Id ? player2Id : player1Id;
+        const nextTurn = actorId === p1Id ? p2Id : p1Id;
         const { winner: nextWinner } = checkTicTacToeWinner(nextBoard);
-        const nextScores =
+        const nextPairScores =
           nextWinner === 'X' || nextWinner === 'O'
             ? { ...scores, [nextWinner]: scores[nextWinner] + 1 }
             : scores;
+        const nextUserScores: Record<string, number> = {
+          [p1Id]: nextPairScores.X,
+          [p2Id]: nextPairScores.O,
+        };
+        const nextWinnerId =
+          nextWinner === 'X' ? p1Id : nextWinner === 'O' ? p2Id : null;
+        const nextIsDraw = nextWinner === 'draw';
 
         soundFx.playMove();
         isWritingRef.current = true;
@@ -300,14 +384,26 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
           // Direct Firestore Write ONLY — onSnapshot handles UI updates on both devices
           const roomRef = doc(db, 'gameRooms', roomId);
           await updateDoc(roomRef, {
-            boardState: nextBoard,
+            boardState: {
+              board: nextBoard,
+              scores: nextPairScores,
+              result: nextWinner || null,
+            },
+            gameStateJson: JSON.stringify({
+              board: nextBoard,
+              scores: nextPairScores,
+              byPlayerId: actorId,
+            }),
             currentTurn: nextTurn,
-            scores: nextScores,
-            status: nextWinner ? 'finished' : 'active',
+            currentTurnUserId: nextTurn,
+            scores: nextUserScores,
+            winnerId: nextWinnerId,
+            isDraw: nextIsDraw,
+            status: nextWinner ? 'finished' : 'playing',
             moveAction: 'TTT_MOVE',
             lastMove: {
               action: 'TTT_MOVE',
-              byPlayerId: currentActorUid,
+              byPlayerId: actorId,
               byAuthUid: auth.currentUser?.uid || null,
               summary: `${mySymbol} -> cell ${index + 1}`,
               timestampMs: Date.now(),
@@ -326,7 +422,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
         return;
       }
 
-      // Offline / Solo AI Mode
+      // Offline / Solo AI Mode (strictly only when no roomId & gameMode === 'ai')
       if (aiBoard[index] || winner || aiThinking || !aiIsXNext) return;
       const nextAiBoard = [...aiBoard];
       nextAiBoard[index] = 'X';
@@ -367,6 +463,10 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       }
       aiTimerRef.current = window.setTimeout(() => {
         aiTimerRef.current = null;
+        if (roomId || gameMode !== 'ai') {
+          setAiThinking(false);
+          return;
+        }
         const botBoard = [...nextAiBoard];
         const moveIdx = getTicTacToeAIMove(botBoard, aiDifficulty);
         if (moveIdx !== -1) {
@@ -407,15 +507,19 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       roomData,
       isWaitingSpectator,
       onWaitingSpectatorBlocked,
+      isWaitingForFriend,
+      p1Id,
+      p2Id,
       boardState,
       winner,
-      localPlayerId,
       currentTurn,
+      actorId,
       mySymbol,
       scores,
       aiBoard,
       aiThinking,
       aiIsXNext,
+      gameMode,
       aiDifficulty,
       onAwardMatch,
     ]
@@ -424,20 +528,37 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
   const handleRematch = useCallback(async () => {
     if (isMultiplayer) {
       if (!roomId || !roomData || isWaitingSpectator || isWritingRef.current) return;
-      const firstTurn = String(roomData.player1Id || roomData.player1 || roomData.hostId || '');
+      const firstTurn = p1Id || String(roomData.hostId || '');
       if (!firstTurn) return;
       isWritingRef.current = true;
+      const preservedScores: Record<string, number> = {
+        ...(p1Id ? { [p1Id]: scores.X } : {}),
+        ...(p2Id ? { [p2Id]: scores.O } : {}),
+      };
+      const emptyBoard = Array<CellValue>(9).fill(null);
       try {
         const roomRef = doc(db, 'gameRooms', roomId);
         await updateDoc(roomRef, {
-          boardState: Array<CellValue>(9).fill(null),
+          boardState: {
+            board: emptyBoard,
+            scores,
+            result: null,
+          },
+          gameStateJson: JSON.stringify({
+            board: emptyBoard,
+            scores,
+            byPlayerId: actorId,
+          }),
           currentTurn: firstTurn,
-          scores,
-          status: 'active',
+          currentTurnUserId: firstTurn,
+          scores: preservedScores,
+          winnerId: null,
+          isDraw: false,
+          status: p2Id ? 'playing' : 'waiting',
           moveAction: 'REMATCH',
           lastMove: {
             action: 'REMATCH',
-            byPlayerId: auth.currentUser?.uid || localPlayerId,
+            byPlayerId: actorId,
             byAuthUid: auth.currentUser?.uid || null,
             summary: 'TicTacToe rematch started',
             timestampMs: Date.now(),
@@ -463,7 +584,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
     setAiBoard(Array<CellValue>(9).fill(null));
     setAiIsXNext(true);
     setAiThinking(false);
-  }, [isMultiplayer, roomId, roomData, isWaitingSpectator, scores]);
+  }, [isMultiplayer, roomId, roomData, isWaitingSpectator, p1Id, p2Id, scores, actorId]);
 
   return (
     <div className="max-w-sm mx-auto flex flex-col items-center">
@@ -473,15 +594,19 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
           onClick={onOpenModeSelect}
           className="px-3 py-1.5 rounded-xl text-xs font-semibold border flex items-center gap-1.5 bg-blue-50 dark:bg-blue-950/40 text-blue-600 border-blue-200 dark:border-blue-800"
         >
-          <Bot className="w-3.5 h-3.5" />
-          <span className="capitalize">
-            {gameMode === 'ai' ? `${aiDifficulty} AI` : gameMode}
+          {isMultiplayer ? <Users className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+          <span>
+            {isMultiplayer
+              ? roomId
+                ? `Multiplayer Room #${roomId}`
+                : 'Multiplayer'
+              : `Vs ${aiDifficulty.charAt(0).toUpperCase() + aiDifficulty.slice(1)} AI`}
           </span>
         </button>
         <button
           type="button"
           onClick={handleRematch}
-          disabled={isWaitingSpectator}
+          disabled={isWaitingSpectator || (isMultiplayer && isWaitingForFriend)}
           className="text-xs text-slate-600 dark:text-slate-300 hover:text-blue-600 disabled:opacity-40 flex items-center gap-1 font-semibold px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800"
         >
           <RotateCcw className="w-3.5 h-3.5" />
@@ -489,30 +614,34 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
         </button>
       </div>
 
-      <div className="flex items-center justify-between w-full mb-3 px-2 text-xs font-bold">
-        <span className={isXTurn && !winner ? 'text-blue-600' : 'text-slate-400'}>
-          {isMultiplayer ? (isPlayer1 ? 'You (X)' : 'P1 (X)') : 'You (X)'}: {activeScores.X}
+      {isMultiplayer && isWaitingForFriend && (
+        <div className="w-full mb-3 p-2.5 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-xs font-semibold text-blue-700 dark:text-blue-300 flex items-center justify-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+          <span>Waiting for friend to join Room #{roomId}...</span>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between w-full mb-3 px-2 text-xs font-bold gap-2">
+        <span className={`truncate ${isXTurn && !winner ? 'text-blue-600' : 'text-slate-400'}`}>
+          {isMultiplayer ? `${hostDisplayName} (X)` : 'You (X)'}: {activeScores.X}
         </span>
-        <span className="text-slate-400 text-[11px]">
-          {aiThinking
+        <span className="text-slate-400 text-[11px] shrink-0">
+          {!isMultiplayer && aiThinking
             ? 'AI thinking...'
             : winner
             ? 'Finished'
             : isMultiplayer
-            ? isMyMultiplayerTurn
+            ? isWaitingForFriend
+              ? 'Waiting...'
+              : isMyMultiplayerTurn
               ? `Your Turn (${mySymbol})`
-              : `Opponent Turn (${isPlayer1 ? 'O' : 'X'})`
+              : `${isXTurn ? hostDisplayName.split(' ')[0] : guestDisplayName.split(' ')[0]}'s Turn`
             : isXTurn
             ? 'X Turn'
             : 'O Turn'}
         </span>
-        <span className={!isXTurn && !winner ? 'text-emerald-500' : 'text-slate-400'}>
-          {gameMode === 'ai'
-            ? 'AI Bot (O)'
-            : !isPlayer1 && isMultiplayer
-            ? 'You (O)'
-            : 'Opponent (O)'}
-          : {activeScores.O}
+        <span className={`truncate ${!isXTurn && !winner ? 'text-emerald-500' : 'text-slate-400'}`}>
+          {isMultiplayer ? `${guestDisplayName} (O)` : 'AI Bot (O)'}: {activeScores.O}
         </span>
       </div>
 
@@ -556,7 +685,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
             onClick={handleRematch}
             className="px-3 py-1 bg-blue-600 text-white rounded-lg text-[11px] font-bold shrink-0"
           >
-            Play Again
+            Rematch
           </button>
         </div>
       )}

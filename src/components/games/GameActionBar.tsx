@@ -72,7 +72,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
           <div className="flex items-center gap-1.5 bg-blue-50 dark:bg-blue-950/70 border border-blue-200 dark:border-blue-800 px-2.5 py-1 rounded-xl">
             <KeyRound className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
             <span className="text-xs font-bold text-blue-700 dark:text-blue-300 whitespace-nowrap">
-              Room #{roomCode}
+              Multiplayer Room #{roomCode}
             </span>
             <button
               type="button"
@@ -115,7 +115,7 @@ export const GameActionBar: React.FC<GameActionBarProps> = ({
           </div>
         )}
 
-        {gameMode === 'ai' && (
+        {gameMode === 'ai' && !roomCode && (
           <div className="flex items-center gap-1.5 bg-emerald-50 dark:bg-emerald-950/70 border border-emerald-200 dark:border-emerald-800 px-2.5 py-1 rounded-xl">
             <Bot className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
             <span className="text-xs font-bold text-emerald-700 dark:text-emerald-300 capitalize whitespace-nowrap">

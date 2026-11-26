@@ -76,6 +76,7 @@ import {
 } from '../types';
 import {
   MultiplayerRoom,
+  RoomParticipantInfo,
   RoomPlayer,
   RoomLastMove,
   InGameChatMessage,
@@ -1760,6 +1761,49 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     data.lastMove && typeof data.lastMove === 'object'
       ? (data.lastMove as RoomLastMove)
       : null;
+  const resolvedHost: RoomParticipantInfo =
+    data.host && typeof data.host === 'object' && data.host.id
+      ? {
+          id: String(data.host.id),
+          name: String(data.host.name || resolvedPlayer1Name || 'Player 1'),
+          symbol: data.host.symbol === 'O' ? 'O' : 'X',
+          ...(typeof data.host.avatar === 'string' && data.host.avatar ? { avatar: data.host.avatar } : {}),
+        }
+      : {
+          id: String(data.hostId || resolvedPlayer1Id || ''),
+          name: resolvedPlayer1Name || 'Player 1',
+          symbol: 'X',
+          ...(players[0]?.avatar ? { avatar: players[0].avatar } : {}),
+        };
+  const resolvedGuest: RoomParticipantInfo | null =
+    data.guest && typeof data.guest === 'object' && data.guest.id
+      ? {
+          id: String(data.guest.id),
+          name: String(data.guest.name || resolvedPlayer2Name || 'Player 2'),
+          symbol: data.guest.symbol === 'X' ? 'X' : 'O',
+          ...(typeof data.guest.avatar === 'string' && data.guest.avatar ? { avatar: data.guest.avatar } : {}),
+        }
+      : resolvedPlayer2Id
+      ? {
+          id: resolvedPlayer2Id,
+          name: resolvedPlayer2Name || 'Player 2',
+          symbol: 'O',
+          ...(players[1]?.avatar ? { avatar: players[1].avatar } : {}),
+        }
+      : null;
+  const resolvedTurnUserId = String(
+    data.currentTurnUserId || data.currentTurn || resolvedPlayer1Id || ''
+  );
+  const resolvedScores: Record<string, number> | undefined =
+    data.scores && typeof data.scores === 'object'
+      ? Object.fromEntries(
+          Object.entries(data.scores).map(([k, v]) => [k, Number(v || 0)])
+        )
+      : gameState?.scores && typeof gameState.scores === 'object'
+      ? Object.fromEntries(
+          Object.entries(gameState.scores).map(([k, v]) => [k, Number(v || 0)])
+        )
+      : undefined;
 
   return {
     roomCode: String(data.roomCode || resolvedRoomId),
@@ -1767,6 +1811,8 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     gameId: resolvedGameType,
     gameType: resolvedGameType,
     hostId: String(data.hostId || resolvedPlayer1Id || ''),
+    host: resolvedHost,
+    guest: resolvedGuest,
     player1: resolvedPlayer1Id,
     player1Id: resolvedPlayer1Id,
     player1AuthUid: resolvedPlayer1AuthUid,
@@ -1789,7 +1835,11 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     mutedChatIds,
     boardState: parsedBoardField,
     gameState,
-    currentTurn: String(data.currentTurn || resolvedPlayer1Id || ''),
+    currentTurn: resolvedTurnUserId,
+    currentTurnUserId: resolvedTurnUserId,
+    scores: resolvedScores,
+    winnerId: typeof data.winnerId === 'string' ? data.winnerId : null,
+    isDraw: Boolean(data.isDraw),
     diceRoll: resolvedDiceRoll,
     lastMove: resolvedLastMove,
     messages,
@@ -2076,14 +2126,20 @@ export async function createFirestoreGameRoom(
     },
   ];
 
-  const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'active' : 'waiting';
+  const initialStatus: MultiplayerRoom['status'] = isOpenGroup ? 'playing' : 'waiting';
 
   let lastErr: any = null;
   for (let createAttempt = 0; createAttempt < 12; createAttempt++) {
     const chosenCode = await pickAvailableRoomCodeAndCleanStale(hostPlayer.id);
     const hostDisplayName = (hostPlayer.name || 'JIT Player').slice(0, 80);
     const hostAuthUid = auth.currentUser?.uid || null;
-    const initState = isOpenGroup ? buildInitialGameStateForGame(gameId, `start_${Date.now()}`) : {};
+    const hostInfo: RoomParticipantInfo = {
+      id: hostPlayer.id,
+      name: hostDisplayName,
+      symbol: 'X',
+      avatar: sanitizeRoomAvatarUrl(hostPlayer.avatar),
+    };
+    const initState = buildInitialGameStateForGame(gameId, `start_${Date.now()}`);
     const unifiedFields = buildUnifiedBoardAndMoveFields(initState, 'ROOM_CREATED', hostPlayer.id, null);
     const payload = {
       roomCode: chosenCode,
@@ -2091,6 +2147,8 @@ export async function createFirestoreGameRoom(
       gameId,
       gameType: gameId,
       hostId: hostPlayer.id,
+      host: hostInfo,
+      guest: null,
       player1: hostPlayer.id,
       player1Id: hostPlayer.id,
       player1AuthUid: hostAuthUid,
@@ -2112,9 +2170,13 @@ export async function createFirestoreGameRoom(
       mutedChatIdsJson: '[]',
       gameStateJson: JSON.stringify(initState),
       ...unifiedFields,
+      scores: { [hostPlayer.id]: 0 },
+      winnerId: null,
+      isDraw: false,
       messagesJson: '[]',
       moveAction: 'ROOM_CREATED',
       currentTurn: hostPlayer.id,
+      currentTurnUserId: hostPlayer.id,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       lastUpdated: serverTimestamp(),
@@ -2138,6 +2200,8 @@ export async function createFirestoreGameRoom(
           gameId,
           gameType: gameId,
           hostId: hostPlayer.id,
+          host: hostInfo,
+          guest: null,
           player1: hostPlayer.id,
           player1Id: hostPlayer.id,
           player1AuthUid: hostAuthUid,
@@ -2158,9 +2222,13 @@ export async function createFirestoreGameRoom(
           reactions: [],
           mutedVoiceIds: [],
           mutedChatIds: [],
-          boardState: isOpenGroup ? initState : null,
-          gameState: isOpenGroup ? initState : null,
+          boardState: initState,
+          gameState: initState,
           currentTurn: hostPlayer.id,
+          currentTurnUserId: hostPlayer.id,
+          scores: { [hostPlayer.id]: 0 },
+          winnerId: null,
+          isDraw: false,
           diceRoll: unifiedFields.diceRoll,
           lastMove: unifiedFields.lastMove,
           messages: [],
@@ -2293,10 +2361,10 @@ export async function joinFirestoreGameRoom(
         },
       ];
 
-      // Auto-start as soon as the room reaches capacity (e.g. 2/2 players)
+      // Auto-start as soon as 2nd player joins (or room reaches capacity)
       const nextStatus: MultiplayerRoom['status'] =
-        nextPlayers.length >= parsed.maxPlayers ? 'active' : parsed.status;
-      const isStarting = nextStatus === 'active' || nextStatus === 'in_game';
+        nextPlayers.length >= 2 ? 'playing' : parsed.status;
+      const isStarting = nextStatus === 'playing' || nextStatus === 'active' || nextStatus === 'in_game';
       const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       const nextGameState =
         isStarting && !parsed.gameState?._startId
@@ -2309,6 +2377,26 @@ export async function joinFirestoreGameRoom(
       const p2Id = nextPlayers[1]?.id || '';
       const p2Name = nextPlayers[1]?.name || '';
       const p2AuthUid = nextPlayers[1]?.authUid || auth.currentUser?.uid || null;
+      const hostInfo: RoomParticipantInfo = {
+        id: p1Id,
+        name: p1Name || 'Player 1',
+        symbol: 'X',
+        avatar: nextPlayers[0]?.avatar || '',
+      };
+      const guestInfo: RoomParticipantInfo | null = p2Id
+        ? {
+            id: p2Id,
+            name: p2Name || 'Player 2',
+            symbol: 'O',
+            avatar: nextPlayers[1]?.avatar || '',
+          }
+        : null;
+      const mergedScores: Record<string, number> = {
+        ...(parsed.scores || {}),
+        ...(p1Id ? { [p1Id]: Number(parsed.scores?.[p1Id] || 0) } : {}),
+        ...(p2Id ? { [p2Id]: Number(parsed.scores?.[p2Id] || 0) } : {}),
+      };
+      const firstTurnId = nextPlayers[0]?.id || parsed.hostId;
       const unifiedStartFields = isStarting
         ? buildUnifiedBoardAndMoveFields(nextGameState, 'GAME_START', player.id)
         : null;
@@ -2317,6 +2405,8 @@ export async function joinFirestoreGameRoom(
         roomId: parsed.roomCode,
         gameType: parsed.gameId,
         playersJson: JSON.stringify(nextPlayers),
+        host: hostInfo,
+        guest: guestInfo,
         player1: p1Id,
         player1Id: p1Id,
         player1AuthUid: p1AuthUid,
@@ -2327,13 +2417,17 @@ export async function joinFirestoreGameRoom(
         player2Name: p2Name,
         playerCount: nextPlayers.length,
         hostId: parsed.hostId,
+        scores: mergedScores,
+        winnerId: null,
+        isDraw: false,
         status: nextStatus,
         ...(isStarting && unifiedStartFields
           ? {
               gameStateJson: JSON.stringify(nextGameState),
               ...unifiedStartFields,
               moveAction: 'GAME_START',
-              currentTurn: parsed.players[0]?.id || parsed.hostId,
+              currentTurn: firstTurnId,
+              currentTurnUserId: firstTurnId,
             }
           : {}),
         lastUpdated: serverTimestamp(),
@@ -2344,6 +2438,8 @@ export async function joinFirestoreGameRoom(
         ...parsed,
         roomId: parsed.roomCode,
         gameType: parsed.gameId,
+        host: hostInfo,
+        guest: guestInfo,
         player1: p1Id,
         player1Id: p1Id,
         player1AuthUid: p1AuthUid,
@@ -2352,6 +2448,9 @@ export async function joinFirestoreGameRoom(
         player2Id: p2Id,
         player2AuthUid: p2AuthUid,
         player2Name: p2Name,
+        scores: mergedScores,
+        winnerId: null,
+        isDraw: false,
         status: nextStatus,
         players: nextPlayers,
         ...(isStarting && unifiedStartFields
@@ -2360,7 +2459,8 @@ export async function joinFirestoreGameRoom(
               gameState: nextGameState,
               diceRoll: unifiedStartFields.diceRoll,
               lastMove: unifiedStartFields.lastMove,
-              currentTurn: parsed.players[0]?.id || parsed.hostId,
+              currentTurn: firstTurnId,
+              currentTurnUserId: firstTurnId,
             }
           : {}),
       };
@@ -3031,15 +3131,30 @@ export async function tryAtomicallyJoinWaitingRoom(
     const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
     const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
     const joinedPlayer2AuthUid = nextPlayers[1]?.authUid || auth.currentUser?.uid || null;
-    const nextStatus: MultiplayerRoom['status'] = 'active';
+    const nextStatus: MultiplayerRoom['status'] = 'playing';
     const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const nextGameState = buildInitialGameStateForGame(gameId, startId, parsed.gameState || {});
     const unifiedJoin = buildUnifiedBoardAndMoveFields(nextGameState, 'GAME_START', player.id);
+    const hostInfo: RoomParticipantInfo = {
+      id: joinedPlayer1Id,
+      name: joinedPlayer1Name || 'Player 1',
+      symbol: 'X',
+      avatar: nextPlayers[0]?.avatar || '',
+    };
+    const guestInfo: RoomParticipantInfo = {
+      id: joinedPlayer2Id,
+      name: joinedPlayer2Name || 'Player 2',
+      symbol: 'O',
+      avatar: cleanAvatar,
+    };
+    const initialScores = { [joinedPlayer1Id]: 0, [joinedPlayer2Id]: 0 };
 
     tx.update(roomRef, {
       roomId: cleanCode,
       gameType: gameId,
       playersJson: JSON.stringify(nextPlayers),
+      host: hostInfo,
+      guest: guestInfo,
       player1: joinedPlayer1Id,
       player1Id: joinedPlayer1Id,
       player1AuthUid: joinedPlayer1AuthUid,
@@ -3051,11 +3166,15 @@ export async function tryAtomicallyJoinWaitingRoom(
       playerCount: nextPlayers.length,
       hostId: parsed.hostId,
       isPublicMatch: true,
+      scores: initialScores,
+      winnerId: null,
+      isDraw: false,
       status: nextStatus,
       gameStateJson: JSON.stringify(nextGameState),
       ...unifiedJoin,
       moveAction: 'GAME_START',
       currentTurn: joinedPlayer1Id,
+      currentTurnUserId: joinedPlayer1Id,
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3074,6 +3193,8 @@ export async function tryAtomicallyJoinWaitingRoom(
       roomCode: cleanCode,
       roomId: cleanCode,
       gameType: gameId,
+      host: hostInfo,
+      guest: guestInfo,
       player1: joinedPlayer1Id,
       player1Id: joinedPlayer1Id,
       player1AuthUid: joinedPlayer1AuthUid,
@@ -3083,6 +3204,9 @@ export async function tryAtomicallyJoinWaitingRoom(
       player2AuthUid: joinedPlayer2AuthUid,
       player2Name: joinedPlayer2Name,
       isPublicMatch: true,
+      scores: initialScores,
+      winnerId: null,
+      isDraw: false,
       status: nextStatus,
       players: nextPlayers,
       boardState: nextGameState,
@@ -3090,6 +3214,7 @@ export async function tryAtomicallyJoinWaitingRoom(
       diceRoll: unifiedJoin.diceRoll,
       lastMove: unifiedJoin.lastMove,
       currentTurn: joinedPlayer1Id,
+      currentTurnUserId: joinedPlayer1Id,
     };
   });
 }
@@ -3190,12 +3315,28 @@ export async function quickMatchFirestoreRoom(
                 },
               ];
               const joinedPlayer1Id = hostPlayer?.id || parsedWaiting.hostId;
-              const joinedPlayer1Name = hostPlayer?.name || parsedWaiting.player1Name || '';
+              const joinedPlayer1Name = hostPlayer?.name || parsedWaiting.player1Name || 'Player 1';
               const joinedPlayer1AuthUid = hostPlayer?.authUid || parsedWaiting.player1AuthUid || null;
               const joinedPlayer2Id = nextPlayers[1]?.id || player.id;
               const joinedPlayer2Name = nextPlayers[1]?.name || cleanName;
               const joinedPlayer2AuthUid = nextPlayers[1]?.authUid || auth.currentUser?.uid || null;
-              const nextStatus: MultiplayerRoom['status'] = 'active';
+              const nextStatus: MultiplayerRoom['status'] = 'playing';
+              const hostObj = {
+                id: joinedPlayer1Id,
+                name: joinedPlayer1Name,
+                symbol: 'X' as const,
+                avatar: hostPlayer?.avatar || parsedWaiting.host?.avatar || '',
+              };
+              const guestObj = {
+                id: joinedPlayer2Id,
+                name: joinedPlayer2Name,
+                symbol: 'O' as const,
+                avatar: cleanAvatar,
+              };
+              const initialScores: Record<string, number> = {
+                [joinedPlayer1Id]: 0,
+                [joinedPlayer2Id]: 0,
+              };
               const updatedGameState = buildInitialGameStateForGame(
                 gameId,
                 startId,
@@ -3207,6 +3348,8 @@ export async function quickMatchFirestoreRoom(
                 roomId: slotRoomId,
                 gameType: gameId,
                 playersJson: JSON.stringify(nextPlayers),
+                host: hostObj,
+                guest: guestObj,
                 player1: joinedPlayer1Id,
                 player1Id: joinedPlayer1Id,
                 player1AuthUid: joinedPlayer1AuthUid,
@@ -3218,11 +3361,15 @@ export async function quickMatchFirestoreRoom(
                 playerCount: nextPlayers.length,
                 hostId: parsedWaiting.hostId,
                 isPublicMatch: true,
+                scores: initialScores,
+                winnerId: null,
+                isDraw: false,
                 status: nextStatus,
                 gameStateJson: JSON.stringify(updatedGameState),
                 ...unifiedForceJoin,
                 moveAction: 'GAME_START',
                 currentTurn: joinedPlayer1Id,
+                currentTurnUserId: joinedPlayer1Id,
                 lastUpdated: serverTimestamp(),
                 updatedAt: serverTimestamp(),
               });
@@ -3241,6 +3388,8 @@ export async function quickMatchFirestoreRoom(
                   roomCode: slotRoomId,
                   roomId: slotRoomId,
                   gameType: gameId,
+                  host: hostObj,
+                  guest: guestObj,
                   player1: joinedPlayer1Id,
                   player1Id: joinedPlayer1Id,
                   player1AuthUid: joinedPlayer1AuthUid,
@@ -3250,6 +3399,9 @@ export async function quickMatchFirestoreRoom(
                   player2AuthUid: joinedPlayer2AuthUid,
                   player2Name: joinedPlayer2Name,
                   isPublicMatch: true,
+                  scores: initialScores,
+                  winnerId: null,
+                  isDraw: false,
                   status: nextStatus,
                   players: nextPlayers,
                   boardState: updatedGameState,
@@ -3257,6 +3409,7 @@ export async function quickMatchFirestoreRoom(
                   diceRoll: unifiedForceJoin.diceRoll,
                   lastMove: unifiedForceJoin.lastMove,
                   currentTurn: joinedPlayer1Id,
+                  currentTurnUserId: joinedPlayer1Id,
                 } as MultiplayerRoom,
               };
             }
@@ -3285,6 +3438,13 @@ export async function quickMatchFirestoreRoom(
           roomId: generatedRoomId,
           gameId,
           gameType: gameId,
+          host: {
+            id: player.id,
+            name: cleanName,
+            symbol: 'X',
+            avatar: cleanAvatar,
+          },
+          guest: null,
           hostId: player.id,
           player1: player.id,
           player1Id: player.id,
@@ -3294,6 +3454,9 @@ export async function quickMatchFirestoreRoom(
           player2Id: null,
           player2AuthUid: null,
           player2Name: '',
+          scores: { [player.id]: 0 },
+          winnerId: null,
+          isDraw: false,
           status: 'waiting',
           maxPlayers: safeMax,
           playerCount: 1,
@@ -3310,6 +3473,7 @@ export async function quickMatchFirestoreRoom(
           messagesJson: '[]',
           moveAction: 'ROOM_CREATED',
           currentTurn: player.id,
+          currentTurnUserId: player.id,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
           lastUpdated: serverTimestamp(),
@@ -3552,12 +3716,16 @@ export async function startFirestoreGameRoom(
     const gameId = snap?.exists() ? String(snap.data().gameType || snap.data().gameId || '') : '';
     const hydratedState = buildInitialGameStateForGame(gameId, startId, initialGameState);
     const unified = buildUnifiedBoardAndMoveFields(hydratedState, 'GAME_START', firstTurnId);
+    const turnId = String(firstTurnId || '').slice(0, 64);
     await updateDoc(roomRef, {
-      status: 'active',
+      status: 'playing',
       gameType: gameId || 'tictactoe',
       gameStateJson: JSON.stringify(hydratedState),
       ...unified,
-      currentTurn: String(firstTurnId || '').slice(0, 64),
+      winnerId: null,
+      isDraw: false,
+      currentTurn: turnId,
+      currentTurnUserId: turnId,
       moveAction: 'GAME_START',
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -3575,13 +3743,19 @@ export async function pushFirestoreGameMove(
   moveAction: string,
   newGameState: Record<string, any>,
   nextTurnId?: string,
-  status: 'active' | 'in_game' | 'finished' = 'active',
-  options?: { diceRoll?: number | null; summary?: string }
+  status: 'playing' | 'active' | 'in_game' | 'finished' = 'playing',
+  options?: {
+    diceRoll?: number | null;
+    summary?: string;
+    scores?: Record<string, number>;
+    winnerId?: string | null;
+    isDraw?: boolean;
+  }
 ): Promise<void> {
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return;
   const actorId = String(newGameState?.byPlayerId || '');
-  const normalizedStatus: 'active' | 'finished' = status === 'finished' ? 'finished' : 'active';
+  const normalizedStatus: 'playing' | 'finished' = status === 'finished' ? 'finished' : 'playing';
   const unified = buildUnifiedBoardAndMoveFields(
     newGameState,
     moveAction,
@@ -3589,12 +3763,35 @@ export async function pushFirestoreGameMove(
     options?.diceRoll,
     options?.summary
   );
+  const turnId = String(nextTurnId || '').slice(0, 64);
+  const resolvedScores =
+    options?.scores ||
+    (newGameState?.userScores && typeof newGameState.userScores === 'object'
+      ? newGameState.userScores
+      : undefined);
+  const resolvedWinnerId =
+    options?.winnerId !== undefined
+      ? options.winnerId
+      : typeof newGameState?.winnerId === 'string' || newGameState?.winnerId === null
+      ? newGameState.winnerId
+      : undefined;
+  const resolvedIsDraw =
+    options?.isDraw !== undefined
+      ? options.isDraw
+      : typeof newGameState?.isDraw === 'boolean'
+      ? newGameState.isDraw
+      : undefined;
+
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
       gameStateJson: JSON.stringify(newGameState),
       ...unified,
+      ...(resolvedScores ? { scores: resolvedScores } : {}),
+      ...(resolvedWinnerId !== undefined ? { winnerId: resolvedWinnerId } : {}),
+      ...(resolvedIsDraw !== undefined ? { isDraw: resolvedIsDraw } : {}),
       moveAction: String(moveAction).slice(0, 40),
-      currentTurn: String(nextTurnId || '').slice(0, 64),
+      currentTurn: turnId,
+      currentTurnUserId: turnId,
       status: normalizedStatus,
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -3659,7 +3856,7 @@ export async function pushFirestoreQuizAnswer(
       const isLastQ = currentIndex >= qList.length - 1;
       const nextIndex = allAnswered && !isLastQ && currentIndex === params.questionIndex ? currentIndex + 1 : currentIndex;
       const nextFinished = Boolean(existing.finished) || (allAnswered && isLastQ && currentIndex === params.questionIndex);
-      const status: 'active' | 'finished' = nextFinished ? 'finished' : 'active';
+      const status: 'playing' | 'finished' = nextFinished ? 'finished' : 'playing';
       const resolvedSeed =
         typeof existing.questionSeed === 'number'
           ? existing.questionSeed
@@ -3685,8 +3882,10 @@ export async function pushFirestoreQuizAnswer(
       tx.update(roomRef, {
         gameStateJson: JSON.stringify(nextState),
         ...unified,
+        scores: mergedScores,
         moveAction: 'QUIZ_MOVE',
         currentTurn: '',
+        currentTurnUserId: '',
         status,
         lastUpdated: serverTimestamp(),
         updatedAt: serverTimestamp(),
@@ -3710,15 +3909,19 @@ export async function rematchFirestoreGameRoom(
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return;
   const moveId = `rematch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const stampedReset = { ...resetState, moveId, moveSeq: 0 };
+  const stampedReset = { ...resetState, moveId, moveSeq: 0, winnerId: null, isDraw: false };
   const unified = buildUnifiedBoardAndMoveFields(stampedReset, 'REMATCH', firstTurnId);
+  const turnId = String(firstTurnId || '').slice(0, 64);
   try {
     await updateDoc(doc(db, 'gameRooms', cleanCode), {
-      status: 'active',
+      status: 'playing',
       gameStateJson: JSON.stringify(stampedReset),
       ...unified,
+      winnerId: null,
+      isDraw: false,
       moveAction: 'REMATCH',
-      currentTurn: String(firstTurnId || '').slice(0, 64),
+      currentTurn: turnId,
+      currentTurnUserId: turnId,
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3883,6 +4086,22 @@ export async function hostRotateRoomPlayers(
     await updateDoc(roomRef, {
       playersJson: JSON.stringify(nextActive),
       waitingPlayersJson: JSON.stringify(nextWaiting),
+      host: nextActive[0]
+        ? {
+            id: nextActive[0].id,
+            name: nextActive[0].name,
+            symbol: 'X',
+            avatar: nextActive[0].avatar || '',
+          }
+        : parsed.host || null,
+      guest: nextActive[1]
+        ? {
+            id: nextActive[1].id,
+            name: nextActive[1].name,
+            symbol: 'O',
+            avatar: nextActive[1].avatar || '',
+          }
+        : null,
       player1: nextActive[0]?.id || parsed.hostId,
       player1Id: nextActive[0]?.id || parsed.hostId,
       player1AuthUid: nextActive[0]?.authUid || null,
@@ -3893,11 +4112,14 @@ export async function hostRotateRoomPlayers(
       player2Name: nextActive[1]?.name || '',
       playerCount: Math.min(500, nextActive.length + nextWaiting.length),
       hostId: parsed.hostId,
-      status: 'active',
+      winnerId: null,
+      isDraw: false,
+      status: 'playing',
       gameStateJson: JSON.stringify(stampedRotate),
       ...unifiedRotate,
       moveAction: 'REMATCH',
       currentTurn: nextTurnId,
+      currentTurnUserId: nextTurnId,
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3953,9 +4175,31 @@ export async function kickOrLeaveFirestoreRoom(
       isHost: p.id === nextHostId,
     }));
 
+    const nextStatusAfterLeave =
+      updatedActive.length < 2 &&
+      !parsed.isOpenGroup &&
+      (parsed.status === 'active' || parsed.status === 'playing' || parsed.status === 'in_game')
+        ? 'waiting'
+        : parsed.status;
     await updateDoc(roomRef, {
       playersJson: JSON.stringify(updatedActive),
       waitingPlayersJson: JSON.stringify(updatedWaiting),
+      host: updatedActive[0]
+        ? {
+            id: updatedActive[0].id,
+            name: updatedActive[0].name,
+            symbol: 'X',
+            avatar: updatedActive[0].avatar || '',
+          }
+        : null,
+      guest: updatedActive[1]
+        ? {
+            id: updatedActive[1].id,
+            name: updatedActive[1].name,
+            symbol: 'O',
+            avatar: updatedActive[1].avatar || '',
+          }
+        : null,
       player1: updatedActive[0]?.id || nextHostId,
       player1Id: updatedActive[0]?.id || nextHostId,
       player1AuthUid: updatedActive[0]?.authUid || null,
@@ -3966,7 +4210,9 @@ export async function kickOrLeaveFirestoreRoom(
       player2Name: updatedActive[1]?.name || '',
       playerCount: Math.min(500, updatedActive.length + updatedWaiting.length),
       hostId: nextHostId,
-      status: updatedActive.length < 2 && parsed.status === 'active' ? 'waiting' : parsed.status,
+      currentTurn: nextHostId,
+      currentTurnUserId: nextHostId,
+      status: nextStatusAfterLeave,
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -4482,6 +4728,9 @@ export function subscribeToFirestoreNotifications(
           createdAtIso: iso,
           createdAtMs: ms,
           isRead: Boolean(data.isRead),
+          ...(typeof data.roomId === 'string' ? { roomId: data.roomId } : {}),
+          ...(typeof data.gameId === 'string' ? { gameId: data.gameId } : {}),
+          ...(typeof data.gameName === 'string' ? { gameName: data.gameName } : {}),
         });
       });
       items.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
@@ -4928,6 +5177,17 @@ export function subscribeToFirestoreMessages(
           mediaType: data.mediaType as Message['mediaType'],
           stickerId: typeof data.stickerId === 'string' ? data.stickerId : undefined,
           stickerData: typeof data.stickerData === 'string' ? data.stickerData : undefined,
+          ...(data.gameInvite &&
+          typeof data.gameInvite === 'object' &&
+          typeof data.gameInvite.roomId === 'string'
+            ? {
+                gameInvite: {
+                  roomId: String(data.gameInvite.roomId),
+                  gameId: String(data.gameInvite.gameId || 'tictactoe'),
+                  gameName: String(data.gameInvite.gameName || 'Multiplayer Match'),
+                },
+              }
+            : {}),
           time: typeof data.time === 'string' ? data.time : undefined,
           date: typeof data.date === 'string' ? data.date : undefined,
           timestamp: data.timestamp || data.createdAtTs,
@@ -5024,6 +5284,11 @@ export async function sendFirestoreDirectMessage(
     mediaType?: 'image' | 'video' | 'file';
     stickerId?: string;
     stickerData?: string;
+    gameInvite?: {
+      roomId: string;
+      gameId: string;
+      gameName: string;
+    };
   }
 ): Promise<Message> {
   const clientCreatedAt =
@@ -5043,11 +5308,27 @@ export async function sendFirestoreDirectMessage(
   const safeMediaUrl =
     payload.mediaUrl && payload.mediaUrl.length <= 400000 ? payload.mediaUrl : undefined;
   const resolvedType: Message['type'] =
-    payload.type || (payload.stickerId ? 'sticker' : safeMediaUrl ? payload.mediaType || 'image' : 'text');
+    payload.type ||
+    (payload.gameInvite
+      ? 'game_invite'
+      : payload.stickerId
+      ? 'sticker'
+      : safeMediaUrl
+      ? payload.mediaType || 'image'
+      : 'text');
   const safeStickerId = payload.stickerId ? String(payload.stickerId).slice(0, 64) : undefined;
   const safeStickerData = payload.stickerData ? String(payload.stickerData).slice(0, 8000) : undefined;
+  const safeGameInvite = payload.gameInvite
+    ? {
+        roomId: String(payload.gameInvite.roomId || '').slice(0, 64),
+        gameId: String(payload.gameInvite.gameId || 'tictactoe').slice(0, 32),
+        gameName: String(payload.gameInvite.gameName || 'Multiplayer Match').slice(0, 80),
+      }
+    : undefined;
   const previewText = (
-    resolvedType === 'sticker'
+    resolvedType === 'game_invite'
+      ? cleanContent || `🎮 Invited you to ${safeGameInvite?.gameName || 'Game'} (Room #${safeGameInvite?.roomId || ''})`
+      : resolvedType === 'sticker'
       ? cleanContent || '[Sticker]'
       : cleanContent || '[Media Attachment]'
   ).slice(0, 500);
@@ -5074,6 +5355,7 @@ export async function sendFirestoreDirectMessage(
     ...(safeMediaUrl ? { mediaUrl: safeMediaUrl, mediaType: payload.mediaType || 'image' } : {}),
     ...(safeStickerId ? { stickerId: safeStickerId } : {}),
     ...(safeStickerData ? { stickerData: safeStickerData } : {}),
+    ...(safeGameInvite ? { gameInvite: safeGameInvite } : {}),
     status: 'sent',
     readBy: [sender.id],
     timestamp: serverTimestamp(),
@@ -5116,7 +5398,7 @@ export async function sendFirestoreDirectMessage(
       });
     }
 
-    if (conversation.type === 'direct') {
+    if (conversation.type === 'direct' && resolvedType !== 'game_invite') {
       const recipientId = directRecipientId || participants.find((pid) => pid !== sender.id);
       if (recipientId && recipientId.length >= 8) {
         const notifId = `notif_dm_${clientCreatedAt}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
@@ -5160,6 +5442,7 @@ export async function sendFirestoreDirectMessage(
     mediaType: safeMediaUrl ? payload.mediaType || 'image' : undefined,
     stickerId: safeStickerId,
     stickerData: safeStickerData,
+    ...(safeGameInvite ? { gameInvite: safeGameInvite } : {}),
     clientCreatedAt,
     createdAt: clientCreatedAt,
     createdAtLabel: timeLabel,
@@ -5167,6 +5450,59 @@ export async function sendFirestoreDirectMessage(
     status: 'sent',
     readBy: [sender.id],
   };
+}
+
+export async function sendGameInviteToFriend(params: {
+  fromUser: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl' | 'contactNumber'>;
+  friend: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl' | 'contactNumber'>;
+  roomId: string;
+  gameId: string;
+  gameName: string;
+}): Promise<void> {
+  const { fromUser, friend, roomId, gameId, gameName } = params;
+  const cleanRoom = normalizeRoomId(roomId);
+  if (!fromUser?.id || !friend?.id || !cleanRoom) return;
+
+  const nowMs = Date.now();
+  const senderName = (fromUser.fullName || 'JIT Player').trim().slice(0, 120) || 'JIT Player';
+  const senderAvatar = sanitizeAvatarUrl(fromUser.avatarUrl);
+  const cleanGameName = (gameName || gameId || 'Multiplayer Match').slice(0, 80);
+  const inviteMsg = `${senderName} invited you to play ${cleanGameName} (Room #${cleanRoom})`;
+
+  const notifId = `notif_gi_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+  await setDoc(doc(db, 'notifications', notifId), {
+    id: notifId,
+    userId: friend.id,
+    fromUserId: fromUser.id,
+    fromUserName: senderName,
+    fromUserAvatar: senderAvatar,
+    type: 'game_invite',
+    title: `Game Invite: ${cleanGameName}`,
+    message: inviteMsg.slice(0, 390),
+    roomId: cleanRoom,
+    gameId: String(gameId).slice(0, 32),
+    gameName: cleanGameName,
+    isRead: false,
+    createdAtIso: new Date(nowMs).toISOString(),
+    createdAtMs: nowMs,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+
+  try {
+    const conv = await ensureFirestoreDirectConversation(fromUser, friend);
+    await sendFirestoreDirectMessage(conv, fromUser, {
+      type: 'game_invite',
+      content: `🎮 Join my ${cleanGameName} match in Room #${cleanRoom}!`,
+      gameInvite: {
+        roomId: cleanRoom,
+        gameId: String(gameId).slice(0, 32),
+        gameName: cleanGameName,
+      },
+    });
+  } catch (err) {
+    console.warn('Game invite DM notice:', err);
+  }
 }
 
 // ============================================================================

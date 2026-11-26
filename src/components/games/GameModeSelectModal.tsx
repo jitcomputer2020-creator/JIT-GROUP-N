@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
-import { GameId } from '../../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { GameId, UserProfile } from '../../types';
 import { GameMode, AIDifficulty, MultiplayerRoom } from '../../types/multiplayer';
 import { APP_CONFIG } from '../../constants/branding';
 import { listPublicOpenGroupRooms } from '../../lib/firebase';
@@ -21,6 +21,8 @@ import {
   Loader2,
   Flame,
   RefreshCw,
+  Search,
+  Send,
 } from 'lucide-react';
 
 interface GameModeSelectModalProps {
@@ -32,6 +34,9 @@ interface GameModeSelectModalProps {
   onPlayRandom: () => void;
   onCreateOpenGroupRoom: (activeSeatLimit: number) => void;
   onPlayAI: (difficulty: AIDifficulty) => void;
+  friendsList?: UserProfile[];
+  invitingFriendId?: string | null;
+  onInviteFriendAndStart?: (friend: UserProfile) => void;
   joinError?: string | null;
   isSubmitting?: boolean;
 }
@@ -45,17 +50,33 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
   onPlayRandom,
   onCreateOpenGroupRoom,
   onPlayAI,
+  friendsList = [],
+  invitingFriendId = null,
+  onInviteFriendAndStart,
   joinError,
   isSubmitting = false,
 }) => {
   const [selectedTab, setSelectedTab] = useState<GameMode>('friend');
   const [friendAction, setFriendAction] = useState<'create' | 'join'>('create');
+  const [friendQuery, setFriendQuery] = useState('');
   const [enteredCode, setEnteredCode] = useState('');
   const [selectedDifficulty, setSelectedDifficulty] = useState<AIDifficulty>('medium');
   const [seatLimit, setSeatLimit] = useState<number>(6);
   const [openRooms, setOpenRooms] = useState<MultiplayerRoom[]>([]);
   const [loadingOpenRooms, setLoadingOpenRooms] = useState(false);
   const [codeValidationError, setCodeValidationError] = useState<string | null>(null);
+
+  const filteredFriends = useMemo(() => {
+    const q = friendQuery.trim().toLowerCase();
+    if (!q) return friendsList.slice(0, 12);
+    return friendsList
+      .filter(
+        (f) =>
+          f.fullName.toLowerCase().includes(q) ||
+          (f.username || '').toLowerCase().includes(q)
+      )
+      .slice(0, 12);
+  }, [friendsList, friendQuery]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -228,23 +249,86 @@ export const GameModeSelectModal: React.FC<GameModeSelectModalProps> = ({
             </div>
 
             {friendAction === 'create' ? (
-              <div className="p-5 bg-gradient-to-br from-blue-50 to-indigo-50/50 dark:from-blue-950/30 dark:to-indigo-950/20 border border-blue-100 dark:border-blue-900/40 rounded-3xl space-y-3">
-                <div className="flex items-center gap-2.5 text-blue-700 dark:text-blue-300 font-bold text-sm">
-                  <KeyRound className="w-4 h-4" />
-                  <span>Host a Private 4-Digit Room</span>
+              <div className="space-y-3">
+                <div className="p-5 bg-gradient-to-br from-blue-50 to-indigo-50/50 dark:from-blue-950/30 dark:to-indigo-950/20 border border-blue-100 dark:border-blue-900/40 rounded-3xl space-y-3">
+                  <div className="flex items-center gap-2.5 text-blue-700 dark:text-blue-300 font-bold text-sm">
+                    <KeyRound className="w-4 h-4" />
+                    <span>Host a Private 4-Digit Room</span>
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                    Generate a unique 4-digit code (e.g. <strong>4829</strong>) for {gameName} or invite a friend directly with a clickable Join Match button.
+                  </p>
+                  <button
+                    type="button"
+                    disabled={isSubmitting}
+                    onClick={onCreateFriendRoom}
+                    className="w-full py-3 min-h-[44px] bg-blue-600 hover:bg-blue-700 disabled:opacity-60 active:scale-[0.99] text-white font-bold text-xs rounded-2xl shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2 transition-all"
+                  >
+                    {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                    <span>{isSubmitting ? 'Creating 4-Digit Room...' : 'Create Room & Get 4-Digit Code'}</span>
+                  </button>
                 </div>
-                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                  Generate a unique 4-digit code (e.g. <strong>4829</strong>) for {gameName}. Share the code with your campus friends to start real-time play with live chat and calling!
-                </p>
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={onCreateFriendRoom}
-                  className="w-full py-3 min-h-[44px] bg-blue-600 hover:bg-blue-700 disabled:opacity-60 active:scale-[0.99] text-white font-bold text-xs rounded-2xl shadow-lg shadow-blue-500/25 flex items-center justify-center gap-2 transition-all"
-                >
-                  {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                  <span>{isSubmitting ? 'Creating 4-Digit Room...' : 'Create Room & Get 4-Digit Code'}</span>
-                </button>
+
+                {onInviteFriendAndStart && friendsList.length > 0 && (
+                  <div className="p-4 rounded-3xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                        <Send className="w-3.5 h-3.5 text-blue-600" />
+                        Quick Invite a Friend
+                      </span>
+                      <div className="relative flex-1 max-w-[170px]">
+                        <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          value={friendQuery}
+                          onChange={(e) => setFriendQuery(e.target.value)}
+                          placeholder="Filter friends..."
+                          className="w-full pl-7 pr-2 py-1 text-[11px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-1 focus:ring-blue-500 text-slate-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {filteredFriends.map((friend) => {
+                        const isInviting = invitingFriendId === friend.id;
+                        return (
+                          <div
+                            key={friend.id}
+                            className="p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/70 flex items-center justify-between gap-2"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <img
+                                src={friend.avatarUrl || APP_CONFIG.logoUrl}
+                                alt={friend.fullName}
+                                className="w-7 h-7 rounded-full object-cover shrink-0"
+                              />
+                              <div className="min-w-0">
+                                <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                                  {friend.fullName}
+                                </p>
+                                <p className="text-[10px] text-slate-400 truncate">
+                                  {friend.username ? `@${friend.username}` : 'JIT Member'}
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={isSubmitting || Boolean(invitingFriendId)}
+                              onClick={() => onInviteFriendAndStart(friend)}
+                              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[11px] font-bold flex items-center gap-1 shrink-0"
+                            >
+                              {isInviting ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Send className="w-3 h-3" />
+                              )}
+                              <span>{isInviting ? 'Sending...' : 'Invite & Play'}</span>
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <form onSubmit={handleJoinSubmit} className="p-5 bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 rounded-3xl space-y-3">

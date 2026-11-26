@@ -6,6 +6,13 @@
 export type GameMode = 'friend' | 'random' | 'open_group' | 'ai';
 export type AIDifficulty = 'easy' | 'medium' | 'hard';
 
+export interface RoomParticipantInfo {
+  id: string;
+  name: string;
+  symbol: 'X' | 'O';
+  avatar?: string;
+}
+
 export interface RoomPlayer {
   id: string;
   authUid?: string;
@@ -162,6 +169,8 @@ export interface MultiplayerRoom {
   gameId: string;
   gameType?: string;
   hostId: string;
+  host?: RoomParticipantInfo;
+  guest?: RoomParticipantInfo | null;
   player1?: string;
   player1Id?: string;
   player1AuthUid?: string | null;
@@ -172,7 +181,7 @@ export interface MultiplayerRoom {
   player2Name?: string;
   createdAt: number;
   lastUpdated?: number;
-  status: 'waiting' | 'active' | 'in_game' | 'finished';
+  status: 'waiting' | 'playing' | 'active' | 'in_game' | 'finished';
   maxPlayers: number;
   isPublicMatch?: boolean;
   isOpenGroup?: boolean;
@@ -185,6 +194,10 @@ export interface MultiplayerRoom {
   boardState?: any;
   gameState: any;
   currentTurn: string;
+  currentTurnUserId?: string;
+  scores?: Record<string, number>;
+  winnerId?: string | null;
+  isDraw?: boolean;
   diceRoll?: number | null;
   lastMove?: RoomLastMove | null;
   messages: InGameChatMessage[];

@@ -8,7 +8,7 @@ import { Message } from '../../types';
 import { ResponsiveImage } from '../common/ResponsiveImage';
 import { ResilientVideo } from '../common/ResilientVideo';
 import { ChatStickerGraphic } from './chatStickersAndEmojis';
-import { Check, CheckCheck, Loader2, ShieldCheck, Sparkles } from 'lucide-react';
+import { Check, CheckCheck, Gamepad2, Loader2, ShieldCheck, Sparkles } from 'lucide-react';
 
 import {
   normalizeTimestamp,
@@ -32,11 +32,13 @@ interface ChatMessageItemProps {
   msg: Message;
   isMe: boolean;
   currentUserId: string;
+  onJoinGameRoom?: (roomId: string, gameId?: string) => void;
 }
 
 const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(
-  ({ msg, isMe, currentUserId }) => {
+  ({ msg, isMe, currentUserId, onJoinGameRoom }) => {
     const isSticker = msg.type === 'sticker' || Boolean(msg.stickerId);
+    const isGameInvite = Boolean(msg.gameInvite?.roomId);
     const isRead =
       msg.status === 'read' ||
       (Array.isArray(msg.readBy) && msg.readBy.some((uid) => uid && uid !== currentUserId));
@@ -88,6 +90,37 @@ const ChatMessageItem: React.FC<ChatMessageItemProps> = React.memo(
             )}
 
             {msg.content && <p className="whitespace-pre-wrap break-words">{msg.content}</p>}
+
+            {isGameInvite && msg.gameInvite && (
+              <div
+                className={`mt-2 p-2.5 rounded-xl border flex flex-col gap-2 ${
+                  isMe
+                    ? 'bg-blue-700/60 border-blue-400/40 text-white'
+                    : 'bg-blue-50 dark:bg-blue-950/40 border-blue-200 dark:border-blue-800 text-slate-900 dark:text-white'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 text-[11px] font-bold">
+                  <span className="flex items-center gap-1.5">
+                    <Gamepad2 className="w-3.5 h-3.5 shrink-0" />
+                    <span>{msg.gameInvite.gameName}</span>
+                  </span>
+                  <span className="font-mono opacity-85">#{msg.gameInvite.roomId}</span>
+                </div>
+                {onJoinGameRoom && (
+                  <button
+                    type="button"
+                    onClick={() => onJoinGameRoom(msg.gameInvite!.roomId, msg.gameInvite!.gameId)}
+                    className={`w-full py-1.5 px-3 rounded-lg text-[11px] font-bold transition-colors ${
+                      isMe
+                        ? 'bg-white text-blue-700 hover:bg-blue-50'
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    }`}
+                  >
+                    Join Match
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -123,6 +156,7 @@ interface ChatMessageListProps {
   aiThinking: boolean;
   typingNames?: string[];
   onPromptChipClick: (prompt: string) => void;
+  onJoinGameRoom?: (roomId: string, gameId?: string) => void;
   messagesEndRef: React.RefObject<HTMLDivElement | null>;
 }
 
@@ -142,6 +176,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = React.memo(
     aiThinking,
     typingNames = [],
     onPromptChipClick,
+    onJoinGameRoom,
     messagesEndRef,
   }) => {
     return (
@@ -189,6 +224,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = React.memo(
               msg={msg}
               isMe={msg.senderId === currentUserId}
               currentUserId={currentUserId}
+              onJoinGameRoom={onJoinGameRoom}
             />
           ))
         )}

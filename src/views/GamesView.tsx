@@ -10,7 +10,8 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { GameId, NavTab } from '../types';
+import { useSocial } from '../context/SocialContext';
+import { GameId, NavTab, UserProfile } from '../types';
 import {
   GameMode,
   AIDifficulty,
@@ -45,6 +46,7 @@ import {
   hostRotateRoomPlayers,
   kickOrLeaveFirestoreRoom,
   fetchFirestoreGameRoomByCode,
+  sendGameInviteToFriend,
 } from '../lib/firebase';
 import {
   getPieceColor,
@@ -136,7 +138,9 @@ function getSlCenterPct(squareNum: number): { x: number; y: number } {
 }
 
 export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
-  const { currentUser, awardGameResult } = useAuth();
+  const { currentUser, registeredProfiles, awardGameResult } = useAuth();
+  const { friendIds, friendRequestPeers, pendingGameInvite, clearPendingGameInvite } = useSocial();
+  const [invitingFriendId, setInvitingFriendId] = useState<string | null>(null);
 
   // Top-level navigation inside Games Hub
   const [subView, setSubView] = useState<'play' | 'leaderboard'>('play');
@@ -196,12 +200,28 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const activePlayer = useMemo(
     () => ({
-      id: fbAuthUid || currentUser?.id || guestPlayerId,
+      id: currentUser?.id || fbAuthUid || guestPlayerId,
       name: currentUser?.fullName || 'Campus Guest',
       avatar: currentUser?.avatarUrl || APP_CONFIG.logoUrl,
     }),
-    [fbAuthUid, currentUser?.id, currentUser?.fullName, currentUser?.avatarUrl, guestPlayerId]
+    [currentUser?.id, currentUser?.fullName, currentUser?.avatarUrl, fbAuthUid, guestPlayerId]
   );
+
+  const friendsList = useMemo(() => {
+    const byId = new Map<string, UserProfile>();
+    [...registeredProfiles, ...friendRequestPeers].forEach((u) => {
+      if (u?.id && u.id !== currentUser?.id && u.id !== activePlayer.id && !byId.has(u.id)) {
+        byId.set(u.id, u);
+      }
+    });
+    const friendSet = new Set(friendIds);
+    return Array.from(byId.values()).sort((a, b) => {
+      const af = friendSet.has(a.id) ? 0 : 1;
+      const bf = friendSet.has(b.id) ? 0 : 1;
+      if (af !== bf) return af - bf;
+      return a.fullName.localeCompare(b.fullName);
+    });
+  }, [registeredProfiles, friendRequestPeers, friendIds, currentUser?.id, activePlayer.id]);
 
   const activePlayerIdRef = useRef<string>(activePlayer.id);
   useEffect(() => {
@@ -225,7 +245,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const isRoomHost = Boolean(currentRoom && currentRoom.hostId === activePlayer.id);
   const isRoomMatchStarted = useCallback((room: MultiplayerRoom | null | undefined): boolean => {
     if (!room) return false;
-    if (room.status === 'active' || room.status === 'in_game' || room.isOpenGroup) {
+    if (
+      room.status === 'active' ||
+      room.status === 'playing' ||
+      room.status === 'in_game' ||
+      room.isOpenGroup
+    ) {
       return true;
     }
     const hasPlayer2 = Boolean(
@@ -631,7 +656,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               answersByQ: {},
               finished: false,
             };
-            broadcastRoomMove('QUIZ_MOVE', syncedQuiz, '', 'active', {
+            broadcastRoomMove('QUIZ_MOVE', syncedQuiz, '', 'playing', {
               bypassTurnGuard: true,
             });
           }
@@ -1067,6 +1092,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           );
           const isRoomActive =
             room.status === 'active' ||
+            room.status === 'playing' ||
             hasPlayer2 ||
             isRoomMatchStarted(room);
           prevRoomStartedRef.current = isRoomActive;
@@ -1387,6 +1413,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     if (!currentRoom) return;
     if (
       currentRoom.status === 'active' ||
+      currentRoom.status === 'playing' ||
       currentRoom.status === 'in_game' ||
       Boolean(currentRoom.player2Id && currentRoom.player2Id.trim().length > 0) ||
       isRoomMatchStarted(currentRoom)
@@ -1751,6 +1778,100 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       setJoinError(err?.message || `Room #${code} not found. Please check the 4-digit code.`);
     } finally {
       setIsRoomSubmitting(false);
+    }
+  };
+
+  const handleJoinFriendRoomRef = useRef(handleJoinFriendRoom);
+  handleJoinFriendRoomRef.current = handleJoinFriendRoom;
+
+  // Auto-join any invited room triggered from Notifications Drawer, DM bubble, or URL hash
+  useEffect(() => {
+    if (!pendingGameInvite?.roomId) return;
+    const { roomId } = pendingGameInvite;
+    clearPendingGameInvite();
+    setSubView('play');
+    void handleJoinFriendRoomRef.current(roomId);
+  }, [pendingGameInvite, clearPendingGameInvite]);
+
+  const handleSendDirectInviteInLobby = async (friend: UserProfile): Promise<boolean> => {
+    if (!currentRoom) return false;
+    const gameMeta = APP_CONFIG.games.find((g) => g.id === currentRoom.gameId);
+    try {
+      await sendGameInviteToFriend({
+        fromUser: {
+          id: activePlayer.id,
+          fullName: activePlayer.name,
+          avatarUrl: activePlayer.avatar,
+          contactNumber: currentUser?.contactNumber || '',
+        },
+        friend: {
+          id: friend.id,
+          fullName: friend.fullName,
+          avatarUrl: friend.avatarUrl,
+          contactNumber: friend.contactNumber || '',
+        },
+        roomId: currentRoom.roomCode,
+        gameId: currentRoom.gameId,
+        gameName: gameMeta?.name || 'Multiplayer Game',
+      });
+      showRewardToast(`Invite sent to ${friend.fullName} for Room #${currentRoom.roomCode}!`);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const handleInviteFriendAndStart = async (friend: UserProfile) => {
+    if (isRoomSubmitting || invitingFriendId) return;
+    clearAiTimers();
+    setInvitingFriendId(friend.id);
+    setIsRoomSubmitting(true);
+    gameModeRef.current = 'friend';
+    setGameMode('friend');
+    setWaiting(true);
+    setGameStarted(false);
+    setJoinError(null);
+    setChatMessages([]);
+    try {
+      await cleanupActiveRoomBeforeSwitch();
+      const maxP = selectedGame === 'ludo' ? 4 : 2;
+      const room = await createFirestoreGameRoom(selectedGame, maxP, activePlayer, false);
+      currentRoomRef.current = room;
+      setCurrentRoom(room);
+      attachFirestoreRoomSubscription(room.roomCode);
+      setIsModeSelectOpen(false);
+      setIsLobbyOpen(true);
+      const gameMeta = APP_CONFIG.games.find((g) => g.id === selectedGame);
+      try {
+        await sendGameInviteToFriend({
+          fromUser: {
+            id: activePlayer.id,
+            fullName: activePlayer.name,
+            avatarUrl: activePlayer.avatar,
+            contactNumber: currentUser?.contactNumber || '',
+          },
+          friend: {
+            id: friend.id,
+            fullName: friend.fullName,
+            avatarUrl: friend.avatarUrl,
+            contactNumber: friend.contactNumber || '',
+          },
+          roomId: room.roomCode,
+          gameId: selectedGame,
+          gameName: gameMeta?.name || 'Multiplayer Game',
+        });
+        showRewardToast(
+          `Room #${room.roomCode} created & invite sent to ${friend.fullName}!`
+        );
+      } catch {
+        showRewardToast(`Room #${room.roomCode} created! Share the 4-digit code with ${friend.fullName}.`);
+      }
+    } catch (err: any) {
+      setWaiting(false);
+      setJoinError(err?.message || 'Could not create room and invite friend.');
+    } finally {
+      setIsRoomSubmitting(false);
+      setInvitingFriendId(null);
     }
   };
 
@@ -2304,6 +2425,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         scoreSummary: `${color.name} won Ludo`,
       });
       if (currentRoomRef.current) {
+        const ludoScores: Record<string, number> = {};
+        currentRoomRef.current.players.forEach((p, idx) => {
+          const seatIdx = currentRoomRef.current!.players.length <= 2 ? (idx === 0 ? 0 : 2) : idx;
+          ludoScores[p.id] = (updated[seatIdx] || []).filter((pos) => pos === 56).length;
+        });
+        const winPlayerId = getPlayerIdForLudoSeat(playerIdx) || null;
         broadcastRoomMove(
           'LUDO_MOVE',
           {
@@ -2319,8 +2446,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             log: newLog,
             winner: playerIdx,
           },
-          getPlayerIdForLudoSeat(playerIdx),
-          'finished'
+          winPlayerId || '',
+          'finished',
+          {
+            scores: ludoScores,
+            winnerId: winPlayerId,
+            isDraw: false,
+          }
         );
       }
       return;
@@ -2362,7 +2494,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           winner: null,
         },
         getPlayerIdForLudoSeat(nextTurn),
-        'active'
+        'playing'
       );
     }
 
@@ -2377,8 +2509,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       soundFx.playError();
       return;
     }
-    if (gameMode === 'ai' && ludoStateRef.current.turn !== 0) return;
+    if (gameMode === 'ai' && !currentRoom && ludoStateRef.current.turn !== 0) return;
     if (gameMode !== 'ai' && currentRoom) {
+      if (!currentRoom.isOpenGroup && currentRoom.players.length < 2) {
+        soundFx.playError();
+        return;
+      }
       const seatOwnerId = getPlayerIdForLudoSeat(ludoStateRef.current.turn);
       if (!isAuthorizedTurnActor(seatOwnerId) || ludoStateRef.current.turn !== myLudoSeat) {
         soundFx.playError();
@@ -2458,7 +2594,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               winner: null,
             },
             getPlayerIdForLudoSeat(nextTurn),
-            'active'
+            'playing'
           );
         }
         if (gameModeRef.current === 'ai' && !currentRoomRef.current && nextTurn !== 0) {
@@ -2508,7 +2644,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               winner: null,
             },
             getPlayerIdForLudoSeat(nextTurn),
-            'active'
+            'playing'
           );
         }
         if (gameModeRef.current === 'ai' && !currentRoomRef.current && nextTurn !== 0) {
@@ -2554,7 +2690,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               winner: null,
             },
             getPlayerIdForLudoSeat(cur.turn),
-            'active'
+            'playing'
           );
         }
       }
@@ -2669,7 +2805,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               finished: nextFin,
             } satisfies QuizSyncedState,
             '',
-            nextFin ? 'finished' : 'active',
+            nextFin ? 'finished' : 'playing',
             { bypassTurnGuard: true }
           );
         });
@@ -2900,6 +3036,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
     if (currentRoom) {
       const nextTurnId = nextTurn === 'white' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
+      const winPlayerId =
+        winnerResult === 'white'
+          ? currentRoom.players[0]?.id || null
+          : winnerResult === 'black'
+          ? currentRoom.players[1]?.id || null
+          : null;
       broadcastRoomMove(
         'CHESS_MOVE',
         {
@@ -2912,7 +3054,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           capturedPieces: nextCapturedPieces,
         },
         nextTurnId,
-        winnerResult ? 'finished' : 'active'
+        winnerResult ? 'finished' : 'playing',
+        winnerResult
+          ? {
+              winnerId: winPlayerId,
+              isDraw: winnerResult === 'draw',
+            }
+          : undefined
       );
     }
 
@@ -3105,7 +3253,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           });
 
           if (room) {
-            const winnerId = side === 'p1' ? room.players[0]?.id : room.players[1]?.id;
+            const p1Id = room.players[0]?.id || '';
+            const p2Id = room.players[1]?.id || '';
+            const winnerId = (side === 'p1' ? p1Id : p2Id) || null;
+            const slScores: Record<string, number> = {
+              ...(p1Id ? { [p1Id]: updatedPos.p1 } : {}),
+              ...(p2Id ? { [p2Id]: updatedPos.p2 } : {}),
+            };
             broadcastRoomMove(
               'SL_MOVE',
               {
@@ -3117,8 +3271,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 message: msg,
                 finished: true,
               },
-              winnerId,
-              'finished'
+              winnerId || '',
+              'finished',
+              {
+                scores: slScores,
+                winnerId,
+                isDraw: false,
+              }
             );
           }
           return;
@@ -3131,7 +3290,13 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         setSlMessage(finalMsg);
 
         if (room) {
-          const nextTurnId = nextTurn === 'p1' ? room.players[0]?.id : room.players[1]?.id;
+          const p1Id = room.players[0]?.id || '';
+          const p2Id = room.players[1]?.id || '';
+          const nextTurnId = nextTurn === 'p1' ? p1Id : p2Id;
+          const slScores: Record<string, number> = {
+            ...(p1Id ? { [p1Id]: updatedPos.p1 } : {}),
+            ...(p2Id ? { [p2Id]: updatedPos.p2 } : {}),
+          };
           broadcastRoomMove(
             'SL_MOVE',
             {
@@ -3144,7 +3309,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               finished: false,
             },
             nextTurnId,
-            'active'
+            'playing',
+            { scores: slScores }
           );
         }
 
@@ -3549,7 +3715,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             {/* ----------------------------------------------------------- */}
             {selectedGame === 'tictactoe' && (
               <TicTacToeGame
-                roomId={gameMode !== 'ai' ? currentRoom?.roomCode : undefined}
+                roomId={currentRoom?.roomCode}
                 gameMode={gameMode}
                 aiDifficulty={aiDifficulty}
                 localPlayerId={activePlayer.id}
@@ -3571,10 +3737,19 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
               <div className="max-w-xl mx-auto flex flex-col items-center space-y-3 sm:space-y-4">
                 <div className="flex items-center justify-between w-full px-1">
                   <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                    Turn: <span className={LUDO_COLORS[ludoTurn].text}>{LUDO_COLORS[ludoTurn].name}</span>
+                    Turn:{' '}
+                    <span className={LUDO_COLORS[ludoTurn].text}>
+                      {currentRoom
+                        ? currentRoom.players.length <= 2
+                          ? (ludoTurn === 0
+                              ? currentRoom.players[0]?.name
+                              : currentRoom.players[1]?.name) || LUDO_COLORS[ludoTurn].name
+                          : currentRoom.players[ludoTurn]?.name || LUDO_COLORS[ludoTurn].name
+                        : LUDO_COLORS[ludoTurn].name}
+                    </span>
                     {gameMode !== 'ai' && currentRoom && (
                       <span className="ml-1.5 text-[11px] font-semibold text-slate-400">
-                        ({ludoTurn === myLudoSeat ? 'Your Turn' : 'Opponent Turn'})
+                        ({ludoTurn === myLudoSeat ? 'Your Turn' : 'Waiting'})
                       </span>
                     )}
                   </span>
@@ -3731,13 +3906,25 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                     >
                       {ludoRolling
                         ? 'Rolling Dice...'
-                        : gameMode === 'ai' && ludoTurn !== 0
+                        : gameMode === 'ai' && !currentRoom && ludoTurn !== 0
                         ? `${LUDO_COLORS[ludoTurn].name} AI Playing...`
+                        : currentRoom &&
+                          !currentRoom.isOpenGroup &&
+                          !currentRoom.guest &&
+                          !currentRoom.player2Id &&
+                          currentRoom.players.length < 2
+                        ? 'Waiting for Friend to Join...'
                         : currentRoom &&
                           (ludoTurn !== myLudoSeat ||
                             !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn)))
-                        ? `Waiting for ${LUDO_COLORS[ludoTurn].name}...`
-                        : `Roll for ${LUDO_COLORS[ludoTurn].name} 🎲`}
+                        ? `Waiting for ${
+                            (currentRoom.players.length <= 2
+                              ? ludoTurn === 0
+                                ? currentRoom.players[0]?.name
+                                : currentRoom.players[1]?.name
+                              : currentRoom.players[ludoTurn]?.name) || LUDO_COLORS[ludoTurn].name
+                          }...`
+                        : `Roll Dice 🎲`}
                     </button>
                   </div>
                 )}
@@ -3957,7 +4144,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         : 'text-slate-400'
                     }
                   >
-                    White (♔){' '}
+                    {currentRoom
+                      ? `${currentRoom.host?.name || currentRoom.players[0]?.name || 'White'} (♔)`
+                      : 'White (♔)'}{' '}
                     {chessTurn === 'white' && chessStatus === 'check' ? '· IN CHECK!' : ''}
                   </span>
                   <button
@@ -3975,9 +4164,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         : 'text-slate-400'
                     }
                   >
-                    {chessAiThinking
+                    {chessAiThinking && !currentRoom
                       ? 'AI Thinking...'
-                      : `Black (♚)${chessTurn === 'black' && chessStatus === 'check' ? ' · CHECK!' : ''}`}
+                      : `${
+                          currentRoom
+                            ? currentRoom.guest?.name || currentRoom.players[1]?.name || 'Waiting...'
+                            : gameMode === 'ai'
+                            ? 'AI Bot'
+                            : 'Black'
+                        } (♚)${chessTurn === 'black' && chessStatus === 'check' ? ' · CHECK!' : ''}`}
                   </span>
                 </div>
 
@@ -3985,7 +4180,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                   <p className="mb-2 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
                     {isMyChessTurn
                       ? `Your Turn (${myChessColor === 'white' ? 'White ♔' : 'Black ♚'})`
-                      : `Waiting for ${chessTurn === 'white' ? 'White ♔' : 'Black ♚'} to move...`}
+                      : `Waiting for ${
+                          chessTurn === 'white'
+                            ? currentRoom.players[0]?.name || 'White ♔'
+                            : currentRoom.players[1]?.name || 'Black ♚'
+                        } to move...`}
                   </p>
                 )}
 
@@ -4242,14 +4441,32 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                       ? 'Match Complete'
                       : slRolling
                       ? 'Rolling...'
-                      : gameMode === 'ai' && slTurn === 'p2'
+                      : gameMode === 'ai' && !currentRoom && slTurn === 'p2'
                       ? 'AI Rolling...'
+                      : currentRoom &&
+                        !currentRoom.isOpenGroup &&
+                        !currentRoom.guest &&
+                        !currentRoom.player2Id &&
+                        currentRoom.players.length < 2
+                      ? 'Waiting for Friend to Join...'
                       : currentRoom &&
                         !isAuthorizedTurnActor(
                           slTurn === 'p1' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id
                         )
-                      ? `Waiting for ${slTurn === 'p1' ? 'Player 1 (📍)' : 'Player 2 (⭐)'}...`
-                      : `Roll for ${slTurn === 'p1' ? 'Player 1 (📍)' : 'Player 2 (⭐)'} 🎲`}
+                      ? `Waiting for ${
+                          slTurn === 'p1'
+                            ? currentRoom.players[0]?.name || 'Player 1 (📍)'
+                            : currentRoom.players[1]?.name || 'Player 2 (⭐)'
+                        }...`
+                      : `Roll for ${
+                          currentRoom
+                            ? slTurn === 'p1'
+                              ? currentRoom.players[0]?.name || 'Player 1 (📍)'
+                              : currentRoom.players[1]?.name || 'Player 2 (⭐)'
+                            : slTurn === 'p1'
+                            ? 'You (📍)'
+                            : 'Player 2 (⭐)'
+                        } 🎲`}
                   </button>
                 </div>
 
@@ -4339,13 +4556,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 waitingCount={currentRoom?.waitingPlayers?.length || 0}
                 currentUserId={activePlayer.id}
                 firebaseAuthUid={firebaseAuthUid}
-                currentTurnId={currentRoom?.currentTurn}
+                currentTurnId={currentRoom?.currentTurnUserId || currentRoom?.currentTurn}
+                isMultiplayerRoom={Boolean(currentRoom)}
+                isOpenGroupRoom={Boolean(currentRoom?.isOpenGroup)}
                 mutedVoiceIds={currentRoom?.mutedVoiceIds || []}
                 mutedChatIds={currentRoom?.mutedChatIds || []}
                 isHost={currentRoom ? isRoomHost : true}
                 isSeatedActivePlayer={isSeatedActivePlayer}
                 state={truthDareState}
-                onUpdateState={(next, status = 'active') => {
+                onUpdateState={(next, status = 'playing') => {
                   setTruthDareState(next);
                   if (currentRoom) {
                     const nextTurnId =
@@ -4427,6 +4646,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         onPlayRandom={handlePlayRandom}
         onCreateOpenGroupRoom={handleCreateOpenGroupRoom}
         onPlayAI={handlePlayAI}
+        friendsList={friendsList}
+        invitingFriendId={invitingFriendId}
+        onInviteFriendAndStart={handleInviteFriendAndStart}
         joinError={joinError}
         isSubmitting={isRoomSubmitting}
       />
@@ -4457,6 +4679,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         isOpen={isLobbyOpen}
         room={currentRoom}
         currentUserId={activePlayer.id}
+        friendsList={friendsList}
+        onSendDirectInvite={handleSendDirectInviteInLobby}
         onStartGame={handleStartRoomGame}
         onKickPlayer={handleKickPlayer}
         onLeaveRoom={handleLeaveRoom}

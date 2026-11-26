@@ -95,15 +95,15 @@ export function useMultiplayerRoom({
   /**
    * Strict turn authorization guard across all multiplayer boards:
    * 1. Rejects waiting-seat spectators and non-seated players.
-   * 2. Rejects actions while room is still 'waiting' (unstarted) unless explicitly allowed.
-   * 3. Verifies room.currentTurn matches activePlayerId AND expectedSeatPlayerId (if given).
-   * 4. Verifies Firebase Auth UID (auth.currentUser.uid) matches the seat's bound authUid when present.
+   * 2. Rejects actions while room is still 'waiting' or guest hasn't joined yet.
+   * 3. Verifies room.currentTurnUserId / room.currentTurn matches activePlayerId AND expectedSeatPlayerId.
    */
   const isAuthorizedTurnActor = useCallback((expectedSeatPlayerId?: string): boolean => {
     const room = currentRoomRef.current;
     if (!room) return true;
 
     const myId = activePlayerIdRef.current;
+    if (!myId) return false;
     if ((room.waitingPlayers || []).some((p) => p.id === myId)) {
       return false;
     }
@@ -116,33 +116,17 @@ export function useMultiplayerRoom({
     if (room.status === 'waiting' && !room.isOpenGroup) {
       return false;
     }
+    if (!room.isOpenGroup && !room.guest && !room.player2Id && room.players.length < 2) {
+      return false;
+    }
 
-    const turnOwnerId = room.currentTurn || expectedSeatPlayerId || room.players[0]?.id || '';
+    const turnOwnerId =
+      room.currentTurnUserId || room.currentTurn || expectedSeatPlayerId || room.players[0]?.id || '';
     if (!turnOwnerId) return false;
     if (expectedSeatPlayerId && turnOwnerId !== expectedSeatPlayerId) {
       return false;
     }
     if (turnOwnerId !== myId) {
-      return false;
-    }
-
-    const seatPlayer = room.players.find((p) => p.id === turnOwnerId);
-    const seatAuthUid =
-      seatPlayer?.authUid ||
-      (turnOwnerId === room.player1Id
-        ? room.player1AuthUid
-        : turnOwnerId === room.player2Id
-        ? room.player2AuthUid
-        : undefined);
-    const liveFbUid = auth.currentUser?.uid || firebaseAuthUidRef.current || null;
-
-    if (liveFbUid && room.currentTurn && room.currentTurn !== liveFbUid) {
-      return false;
-    }
-    if (seatAuthUid && liveFbUid !== seatAuthUid) {
-      return false;
-    }
-    if (liveFbUid && seatPlayer?.authUid && seatPlayer.authUid !== liveFbUid) {
       return false;
     }
 
@@ -176,8 +160,13 @@ export function useMultiplayerRoom({
       moveAction: string,
       newGameState: Record<string, any>,
       nextTurnId?: string,
-      status: 'active' | 'in_game' | 'finished' = 'active',
-      options?: { bypassTurnGuard?: boolean }
+      status: 'playing' | 'active' | 'in_game' | 'finished' = 'playing',
+      options?: {
+        bypassTurnGuard?: boolean;
+        scores?: Record<string, number>;
+        winnerId?: string | null;
+        isDraw?: boolean;
+      }
     ): boolean => {
       const room = currentRoomRef.current;
       if (!room) return false;
@@ -202,12 +191,18 @@ export function useMultiplayerRoom({
         ...(liveFbUid ? { byAuthUid: liveFbUid } : {}),
       };
       const resolvedNextTurn = String(nextTurnId || '');
+      const normalizedStatus: 'playing' | 'finished' =
+        status === 'finished' ? 'finished' : 'playing';
       const unified = buildUnifiedBoardAndMoveFields(stampedState, moveAction, myId);
 
       const optimisticRoom: MultiplayerRoom = {
         ...room,
         currentTurn: resolvedNextTurn,
-        status,
+        currentTurnUserId: resolvedNextTurn,
+        ...(options?.scores ? { scores: options.scores } : {}),
+        ...(options?.winnerId !== undefined ? { winnerId: options.winnerId } : {}),
+        ...(options?.isDraw !== undefined ? { isDraw: options.isDraw } : {}),
+        status: normalizedStatus,
         gameState: stampedState,
         boardState: unified.boardState,
         diceRoll: unified.diceRoll,
@@ -221,9 +216,11 @@ export function useMultiplayerRoom({
       );
 
       multiplayerSocket.sendMove(room.roomCode, moveAction, stampedState, nextTurnId);
-      pushFirestoreGameMove(room.roomCode, moveAction, stampedState, nextTurnId, status).catch(
-        () => {}
-      );
+      pushFirestoreGameMove(room.roomCode, moveAction, stampedState, nextTurnId, normalizedStatus, {
+        scores: options?.scores,
+        winnerId: options?.winnerId,
+        isDraw: options?.isDraw,
+      }).catch(() => {});
       return true;
     },
     [currentRoomRef, isAuthorizedTurnActor, setCurrentRoom]
