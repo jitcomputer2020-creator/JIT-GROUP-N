@@ -181,6 +181,21 @@ service cloud.firestore {
       }
     }
 
+    // 14b. Canonical Unified Chats & Server-Timestamped Messages
+    match /chats/{chatId} {
+      allow get: if isValidDocId(chatId);
+      allow list: if isBoundedQuery();
+      allow create, update: if isValidDocWrite(chatId);
+      allow delete: if isValidExistingDoc(chatId);
+
+      match /messages/{messageId} {
+        allow get: if isValidDocId(chatId) && isValidDocId(messageId);
+        allow list: if isValidDocId(chatId) && isBoundedQuery();
+        allow create, update: if isValidDocId(chatId) && isValidDocWrite(messageId);
+        allow delete: if isValidDocId(chatId) && isValidExistingDoc(messageId);
+      }
+    }
+
     // CollectionGroup query support for DM inspection across senderId / receiverId
     match /{path=**}/messages/{messageId} {
       allow list: if isBoundedQuery();

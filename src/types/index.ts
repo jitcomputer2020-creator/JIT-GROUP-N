@@ -180,6 +180,7 @@ export interface Conversation {
 
 export interface Message {
   id: string;
+  chatId?: string;
   conversationId: string;
   senderId: string;
   receiverId?: string;
@@ -193,6 +194,7 @@ export interface Message {
   stickerData?: string;
   createdAt: number | string;
   createdAtMs?: number;
+  clientCreatedAt?: number;
   createdAtLabel?: string;
   timestamp?: unknown;
   time?: string;

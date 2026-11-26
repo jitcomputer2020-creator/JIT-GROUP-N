@@ -213,14 +213,22 @@ const MainLayout: React.FC = () => {
         )}
 
         {/* Center Main Viewport */}
-        <main className="flex-1 py-4 sm:py-6 min-w-0">
+        <main
+          className={`flex-1 min-w-0 w-full ${
+            activeTab === 'messages' ? 'py-3 sm:py-5 overflow-hidden' : 'py-4 sm:py-6'
+          }`}
+        >
           {renderActiveView()}
         </main>
 
-        {/* Right Desktop Widgets (Only on large screens, when authenticated, not on Reels/Auth/Admin) */}
-        {isAuthenticated && activeTab !== 'reels' && !isAuthScreen && !isAdminScreen && (
-          <RightWidgetPanel onNavigate={handleNavigate} />
-        )}
+        {/* Right Desktop Widgets (Hidden on Reels, Messages, Auth, and Admin for full workspace width) */}
+        {isAuthenticated &&
+          activeTab !== 'reels' &&
+          activeTab !== 'messages' &&
+          !isAuthScreen &&
+          !isAdminScreen && (
+            <RightWidgetPanel onNavigate={handleNavigate} />
+          )}
       </div>
 
       {/* 3. Mobile Fixed Bottom Navigation (only when authenticated) */}

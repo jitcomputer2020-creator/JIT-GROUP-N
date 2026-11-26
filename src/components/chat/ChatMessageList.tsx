@@ -10,35 +10,22 @@ import { ResilientVideo } from '../common/ResilientVideo';
 import { ChatStickerGraphic } from './chatStickersAndEmojis';
 import { Check, CheckCheck, Loader2, ShieldCheck, Sparkles } from 'lucide-react';
 
-import { normalizeTimestamp, sortMessagesChronologically } from '../../lib/chatTimestamp';
+import {
+  normalizeTimestamp,
+  resolveServerTimeLabel,
+  sortMessagesChronologically,
+} from '../../lib/chatTimestamp';
 
-export { normalizeTimestamp, sortMessagesChronologically };
+export { normalizeTimestamp, resolveServerTimeLabel, sortMessagesChronologically };
 export const getMessageTime = normalizeTimestamp;
 
 export function formatMessageTime(
   msg: Pick<
     Message,
-    'id' | 'createdAt' | 'createdAtMs' | 'createdAtLabel' | 'timestamp' | 'time' | 'date'
+    'id' | 'createdAt' | 'createdAtMs' | 'clientCreatedAt' | 'createdAtLabel' | 'timestamp' | 'time' | 'date'
   >
 ): string {
-  if (msg.createdAtLabel && msg.createdAtLabel.trim()) {
-    return msg.createdAtLabel;
-  }
-  if (typeof msg.time === 'string' && msg.time.trim()) {
-    return msg.time;
-  }
-  if (
-    typeof msg.createdAt === 'string' &&
-    msg.createdAt.trim() &&
-    !/^\d{10,}$/.test(msg.createdAt.trim())
-  ) {
-    return msg.createdAt;
-  }
-  const ms = normalizeTimestamp(msg);
-  if (ms > 0) {
-    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return 'Now';
+  return resolveServerTimeLabel(msg);
 }
 
 interface ChatMessageItemProps {
@@ -146,7 +133,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = React.memo(
     messagesEndRef,
   }) => {
     return (
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 no-scrollbar">
+      <div className="flex-1 min-h-0 w-full min-w-0 box-border overflow-y-auto overflow-x-hidden p-4 sm:p-6 space-y-3 no-scrollbar">
         <div className="flex justify-center my-2">
           <span className="text-[10px] text-slate-500 bg-slate-100 dark:bg-slate-800/80 px-3 py-1 rounded-full flex items-center gap-1.5 border border-slate-200 dark:border-slate-700">
             {isAiThread ? (

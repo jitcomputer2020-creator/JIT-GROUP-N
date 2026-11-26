@@ -58,7 +58,7 @@ import {
   isValidVideoUrl,
   sanitizeVideoUrl,
 } from './mediaValidation';
-import { normalizeTimestamp, sortMessagesChronologically } from './chatTimestamp';
+import { normalizeTimestamp, resolveServerTimeLabel, sortMessagesChronologically } from './chatTimestamp';
 import {
   UserProfile,
   LeaderboardEntry,
@@ -4498,11 +4498,26 @@ export async function markAllFirestoreNotificationsRead(notificationIds: string[
 // PERSONAL MESSAGING (DMs) & GROUP CONVERSATIONS (FIRESTORE)
 // ============================================================================
 
-export function buildDirectConversationId(uidA: string, uidB: string): string {
-  const cleanA = (uidA || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-  const cleanB = (uidB || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+export function buildCanonicalChatId(
+  userA: { id?: string; phone?: string; contactNumber?: string } | string,
+  userB: { id?: string; phone?: string; contactNumber?: string } | string
+): string {
+  const rawA =
+    typeof userA === 'string'
+      ? userA.trim()
+      : String(userA?.id || userA?.phone || userA?.contactNumber || '').trim();
+  const rawB =
+    typeof userB === 'string'
+      ? userB.trim()
+      : String(userB?.id || userB?.phone || userB?.contactNumber || '').trim();
+  const cleanA = rawA.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+  const cleanB = rawB.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
   const sorted = [cleanA, cleanB].sort();
-  return `dm_${sorted[0]}__${sorted[1]}`.slice(0, 140);
+  return `${sorted[0]}_${sorted[1]}`.slice(0, 140);
+}
+
+export function buildDirectConversationId(uidA: string, uidB: string): string {
+  return buildCanonicalChatId(uidA, uidB);
 }
 
 function parseParticipantsMap(jsonStr?: string): Record<string, { name: string; avatar?: string }> {
@@ -4515,11 +4530,13 @@ function parseParticipantsMap(jsonStr?: string): Record<string, { name: string; 
 }
 
 export async function ensureFirestoreDirectConversation(
-  me: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl'>,
-  partner: { id: string; fullName?: string; avatarUrl?: string }
+  me: Pick<UserProfile, 'id' | 'fullName' | 'avatarUrl' | 'contactNumber'> & { phone?: string },
+  partner: { id: string; fullName?: string; avatarUrl?: string; contactNumber?: string; phone?: string }
 ): Promise<Conversation> {
-  const convId = buildDirectConversationId(me.id, partner.id);
-  const convRef = doc(db, 'conversations', convId);
+  const myKey = String(me.id || me.phone || me.contactNumber || '').trim();
+  const partnerKey = String(partner.id || partner.phone || partner.contactNumber || '').trim();
+  const chatId = buildCanonicalChatId(myKey, partnerKey);
+  const chatRef = doc(db, 'chats', chatId);
 
   let partnerName = (partner.fullName || '').trim();
   let partnerAvatar = partner.avatarUrl || '';
@@ -4548,41 +4565,58 @@ export async function ensureFirestoreDirectConversation(
       avatar: partnerAvatar,
     },
   };
+  const sortedParticipants = Array.from(new Set([me.id, partner.id].filter(Boolean))).sort();
 
   try {
-    const existing = await getDocFromServer(convRef).catch(() => getDoc(convRef));
+    const existing = await getDocFromServer(chatRef).catch(() => getDoc(chatRef));
     if (existing.exists()) {
       const data = existing.data();
       const map = { ...parseParticipantsMap(data.participantsJson), ...participantsMap };
+      const resolvedUpdatedMs =
+        data.updatedAt && typeof data.updatedAt.toMillis === 'function'
+          ? data.updatedAt.toMillis()
+          : Number(data.updatedAtMs || Date.now());
+      const resolvedUpdatedLabel =
+        data.updatedAt && typeof data.updatedAt.toDate === 'function'
+          ? data.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : String(data.lastMessageAt || 'Just now');
+      const lastText = String(data.lastMessage ?? data.lastMessageText ?? '');
+
       return {
-        id: convId,
+        id: chatId,
         type: 'direct',
         name: partnerName,
         avatarUrl: partnerAvatar,
-        participantIds: Array.isArray(data.participantIds) ? data.participantIds : [me.id, partner.id],
+        participantIds: Array.isArray(data.participants)
+          ? data.participants
+          : Array.isArray(data.participantIds)
+          ? data.participantIds
+          : sortedParticipants,
         participantsMap: map,
-        lastMessage: data.lastMessageText
+        lastMessage: lastText
           ? {
-              text: String(data.lastMessageText),
+              text: lastText,
               senderId: String(data.lastMessageSenderId || ''),
-              createdAt: String(data.lastMessageAt || ''),
+              createdAt: resolvedUpdatedLabel,
               isRead: true,
             }
           : undefined,
         unreadCount: 0,
-        updatedAt: String(data.lastMessageAt || 'Just now'),
-        updatedAtMs: Number(data.updatedAtMs || Date.now()),
+        updatedAt: resolvedUpdatedLabel,
+        updatedAtMs: resolvedUpdatedMs,
       };
     }
 
     const nowMs = Date.now();
-    await setDoc(convRef, {
-      id: convId,
+    await setDoc(chatRef, {
+      id: chatId,
       type: 'direct',
       name: partnerName,
       avatarUrl: partnerAvatar,
-      participantIds: [me.id, partner.id].sort(),
-      participantsJson: JSON.stringify(participantsMap),
+      participants: sortedParticipants,
+      participantIds: sortedParticipants,
+      participantsJson: JSON.stringify(participantsMap).slice(0, 29500),
+      lastMessage: '',
       lastMessageText: '',
       lastMessageSenderId: '',
       lastMessageAt: 'Just now',
@@ -4592,17 +4626,17 @@ export async function ensureFirestoreDirectConversation(
     });
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.WRITE, `conversations/${convId}`);
+      handleFirestoreError(err, OperationType.WRITE, `chats/${chatId}`);
     }
     throw err;
   }
 
   return {
-    id: convId,
+    id: chatId,
     type: 'direct',
     name: partnerName,
     avatarUrl: partnerAvatar,
-    participantIds: [me.id, partner.id].sort(),
+    participantIds: sortedParticipants,
     participantsMap,
     unreadCount: 0,
     updatedAt: 'Just now',
@@ -4616,19 +4650,21 @@ export async function createFirestoreGroupConversation(
   memberIds: string[],
   participantsMap: Record<string, { name: string; avatar?: string }>
 ): Promise<Conversation> {
-  const convId = `conv_grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`.slice(0, 120);
+  const chatId = `chat_grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`.slice(0, 120);
   const cleanName = name.trim().slice(0, 120) || 'JIT Group Chat';
   const participantIds = Array.from(new Set([creator.id, ...memberIds])).slice(0, 50);
   const nowMs = Date.now();
 
   try {
-    await setDoc(doc(db, 'conversations', convId), {
-      id: convId,
+    await setDoc(doc(db, 'chats', chatId), {
+      id: chatId,
       type: 'group',
       name: cleanName,
       avatarUrl: '/assets/aistudio/image_e64e54f2.png',
+      participants: participantIds,
       participantIds,
       participantsJson: JSON.stringify(participantsMap).slice(0, 29500),
+      lastMessage: 'Group created. Welcome!',
       lastMessageText: 'Group created. Welcome!',
       lastMessageSenderId: creator.id,
       lastMessageAt: 'Just now',
@@ -4638,13 +4674,13 @@ export async function createFirestoreGroupConversation(
     });
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.CREATE, `conversations/${convId}`);
+      handleFirestoreError(err, OperationType.CREATE, `chats/${chatId}`);
     }
     throw err;
   }
 
   return {
-    id: convId,
+    id: chatId,
     type: 'group',
     name: cleanName,
     avatarUrl: '/assets/aistudio/image_e64e54f2.png',
@@ -4662,55 +4698,136 @@ export async function createFirestoreGroupConversation(
   };
 }
 
+function mapChatDocToConversation(
+  docId: string,
+  data: Record<string, any>,
+  currentUserId: string
+): Conversation {
+  const participantIds: string[] = Array.isArray(data.participants)
+    ? data.participants
+    : Array.isArray(data.participantIds)
+    ? data.participantIds
+    : [];
+  const pMap = parseParticipantsMap(data.participantsJson);
+  const type = data.type === 'group' ? 'group' : 'direct';
+  const peerId = type === 'direct' ? participantIds.find((pid) => pid !== currentUserId) : undefined;
+  const peerInfo = peerId ? pMap[peerId] : undefined;
+
+  const serverUpdatedMs =
+    data.updatedAt && typeof data.updatedAt.toMillis === 'function'
+      ? data.updatedAt.toMillis()
+      : Number(data.updatedAtMs || 0);
+  const serverUpdatedLabel =
+    data.updatedAt && typeof data.updatedAt.toDate === 'function'
+      ? data.updatedAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : String(data.lastMessageAt || 'Just now');
+  const lastText = String(data.lastMessage ?? data.lastMessageText ?? '');
+
+  return {
+    id: String(data.id || docId),
+    type,
+    name: peerInfo?.name || String(data.name || 'JIT Member'),
+    avatarUrl: peerInfo?.avatar || (typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
+    participantIds,
+    participantsMap: pMap,
+    lastMessage: lastText
+      ? {
+          text: lastText,
+          senderId: String(data.lastMessageSenderId || ''),
+          createdAt: serverUpdatedLabel,
+          isRead: true,
+        }
+      : undefined,
+    unreadCount: 0,
+    updatedAt: serverUpdatedLabel,
+    updatedAtMs: serverUpdatedMs,
+  };
+}
+
 export function subscribeToFirestoreConversations(
   userId: string,
   onConversations: (convs: Conversation[]) => void
 ): Unsubscribe {
   if (!userId) return () => {};
-  const q = query(
+
+  let chatsList: Conversation[] = [];
+  let legacyList: Conversation[] = [];
+
+  const emitMerged = () => {
+    const byId = new Map<string, Conversation>();
+    const directPeerToChat = new Map<string, Conversation>();
+
+    for (const c of chatsList) {
+      byId.set(c.id, c);
+      if (c.type === 'direct') {
+        const peerId = c.participantIds.find((pid) => pid !== userId);
+        if (peerId) directPeerToChat.set(peerId, c);
+      }
+    }
+
+    for (const lc of legacyList) {
+      if (lc.type === 'direct') {
+        const peerId = lc.participantIds.find((pid) => pid !== userId);
+        if (peerId && directPeerToChat.has(peerId)) {
+          continue;
+        }
+      }
+      if (!byId.has(lc.id)) {
+        byId.set(lc.id, lc);
+      }
+    }
+
+    const merged = Array.from(byId.values()).sort(
+      (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0)
+    );
+    onConversations(merged);
+  };
+
+  const qChats = query(
+    collection(db, 'chats'),
+    where('participants', 'array-contains', userId),
+    limit(60)
+  );
+  const qLegacy = query(
     collection(db, 'conversations'),
     where('participantIds', 'array-contains', userId),
     limit(60)
   );
-  return onSnapshot(
-    q,
-    (snap) => {
-      const list: Conversation[] = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
-        const pMap = parseParticipantsMap(data.participantsJson);
-        const type = data.type === 'group' ? 'group' : 'direct';
-        const peerId = type === 'direct' ? participantIds.find((pid) => pid !== userId) : undefined;
-        const peerInfo = peerId ? pMap[peerId] : undefined;
 
-        list.push({
-          id: String(data.id || d.id),
-          type,
-          name: peerInfo?.name || String(data.name || 'JIT Member'),
-          avatarUrl: peerInfo?.avatar || (typeof data.avatarUrl === 'string' ? data.avatarUrl : undefined),
-          participantIds,
-          participantsMap: pMap,
-          lastMessage: data.lastMessageText
-            ? {
-                text: String(data.lastMessageText),
-                senderId: String(data.lastMessageSenderId || ''),
-                createdAt: String(data.lastMessageAt || ''),
-                isRead: true,
-              }
-            : undefined,
-          unreadCount: 0,
-          updatedAt: String(data.lastMessageAt || 'Just now'),
-          updatedAtMs: Number(data.updatedAtMs || 0),
-        });
+  const unsubChats = onSnapshot(
+    qChats,
+    (snap) => {
+      const next: Conversation[] = [];
+      snap.forEach((d) => {
+        next.push(mapChatDocToConversation(d.id, d.data(), userId));
       });
-      list.sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
-      onConversations(list);
+      chatsList = next;
+      emitMerged();
+    },
+    (err) => {
+      console.warn('chats onSnapshot notice:', err);
+    }
+  );
+
+  const unsubLegacy = onSnapshot(
+    qLegacy,
+    (snap) => {
+      const next: Conversation[] = [];
+      snap.forEach((d) => {
+        next.push(mapChatDocToConversation(d.id, d.data(), userId));
+      });
+      legacyList = next;
+      emitMerged();
     },
     (err) => {
       console.warn('conversations onSnapshot notice:', err);
     }
   );
+
+  return () => {
+    unsubChats();
+    unsubLegacy();
+  };
 }
 
 export function extractMessageEpochMs(data: Record<string, any>, docId?: string): number {
@@ -4720,42 +4837,49 @@ export function extractMessageEpochMs(data: Record<string, any>, docId?: string)
   });
 }
 
-function resolveMessageLabel(data: Record<string, any>, epochMs: number): string {
-  if (typeof data.createdAtLabel === 'string' && data.createdAtLabel.trim()) {
-    return data.createdAtLabel;
+function resolveMessageLabel(data: Record<string, any>, docId?: string): string {
+  return resolveServerTimeLabel({
+    ...data,
+    id: String(data.id || docId || ''),
+  });
+}
+
+function getChatCollectionRoot(chatId: string): 'chats' | 'conversations' {
+  if (chatId.startsWith('dm_') || chatId.startsWith('conv_')) {
+    return 'conversations';
   }
-  if (typeof data.time === 'string' && data.time.trim()) {
-    return data.time;
-  }
-  if (typeof data.createdAt === 'string' && data.createdAt.trim() && !/^\d{10,}$/.test(data.createdAt.trim())) {
-    return data.createdAt;
-  }
-  if (epochMs > 0) {
-    return new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return 'Just now';
+  return 'chats';
 }
 
 export function subscribeToFirestoreMessages(
-  conversationId: string,
+  chatId: string,
   onMessages: (msgs: Message[]) => void
 ): Unsubscribe {
-  if (!conversationId) return () => {};
-  const q = query(
-    collection(db, 'conversations', conversationId, 'messages'),
-    limit(300)
-  );
+  if (!chatId) return () => {};
+  const rootCol = getChatCollectionRoot(chatId);
+  const messagesRef = collection(db, rootCol, chatId, 'messages');
+
   return onSnapshot(
-    q,
+    messagesRef,
+    { includeMetadataChanges: true },
     (snap) => {
       const list: Message[] = [];
       snap.forEach((d) => {
         const data = d.data();
-        const epochMs = extractMessageEpochMs(data, d.id);
+        const msgId = String(data.id || d.id);
+        const epochMs = extractMessageEpochMs(data, msgId);
         const msgType = (data.type as Message['type']) || (data.stickerId ? 'sticker' : undefined);
+        const clientCreatedAt =
+          typeof data.clientCreatedAt === 'number' && Number.isFinite(data.clientCreatedAt)
+            ? data.clientCreatedAt
+            : typeof data.createdAtMs === 'number' && Number.isFinite(data.createdAtMs)
+            ? data.createdAtMs
+            : undefined;
+
         list.push({
-          id: String(data.id || d.id),
-          conversationId: String(data.conversationId || conversationId),
+          id: msgId,
+          chatId,
+          conversationId: String(data.conversationId || data.chatId || chatId),
           senderId: String(data.senderId || ''),
           senderName: String(data.senderName || 'JIT Member'),
           senderAvatar: typeof data.senderAvatar === 'string' ? data.senderAvatar : undefined,
@@ -4767,15 +4891,15 @@ export function subscribeToFirestoreMessages(
           stickerData: typeof data.stickerData === 'string' ? data.stickerData : undefined,
           time: typeof data.time === 'string' ? data.time : undefined,
           date: typeof data.date === 'string' ? data.date : undefined,
-          timestamp: data.timestamp,
-          createdAt: epochMs > 0 ? epochMs : 0,
+          timestamp: data.timestamp || data.createdAtTs,
+          clientCreatedAt,
+          createdAt: epochMs,
           createdAtMs: epochMs,
-          createdAtLabel: resolveMessageLabel(data, epochMs),
+          createdAtLabel: resolveMessageLabel(data, msgId),
           status: (data.status as Message['status']) || 'delivered',
         });
       });
-      const sorted = sortMessagesChronologically(list);
-      onMessages(sorted.slice(-50));
+      onMessages(sortMessagesChronologically(list));
     },
     (err) => {
       console.warn('messages onSnapshot notice:', err);
@@ -4797,13 +4921,16 @@ export async function sendFirestoreDirectMessage(
     stickerData?: string;
   }
 ): Promise<Message> {
-  const nowMs =
+  const clientCreatedAt =
     typeof payload.createdAtMs === 'number' && Number.isFinite(payload.createdAtMs) && payload.createdAtMs > 0
       ? payload.createdAtMs
       : Date.now();
-  const timeLabel = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const timeLabel = new Date(clientCreatedAt).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
   const msgId = (
-    payload.id || `msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`
+    payload.id || `msg_${clientCreatedAt}_${Math.random().toString(36).slice(2, 7)}`
   ).slice(0, 120);
   const senderName = (sender.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
   const senderAvatar = sanitizeAvatarUrl(sender.avatarUrl);
@@ -4820,32 +4947,19 @@ export async function sendFirestoreDirectMessage(
       : cleanContent || '[Media Attachment]'
   ).slice(0, 500);
 
-  const convRef = doc(db, 'conversations', conversation.id);
-  const existingConv = await getDoc(convRef).catch(() => null);
-  if (!existingConv || !existingConv.exists()) {
-    const pIds =
-      conversation.participantIds?.length >= 2
-        ? conversation.participantIds
-        : [sender.id, conversation.id.replace(/^dm_/, '')];
-    await setDoc(convRef, {
-      id: conversation.id,
-      type: conversation.type || 'direct',
-      name: (conversation.name || 'JIT Chat').slice(0, 120),
-      avatarUrl: sanitizeAvatarUrl(conversation.avatarUrl),
-      participantIds: pIds,
-      participantsJson: JSON.stringify(conversation.participantsMap || {}).slice(0, 29500),
-      lastMessageText: previewText,
-      lastMessageSenderId: sender.id,
-      lastMessageAt: timeLabel,
-      updatedAtMs: nowMs,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-  }
+  const chatId = conversation.id;
+  const rootCol = getChatCollectionRoot(chatId);
+  const chatRef = doc(db, rootCol, chatId);
+  const participants = Array.from(
+    new Set(
+      (conversation.participantIds?.length ? conversation.participantIds : [sender.id]).filter(Boolean)
+    )
+  ).sort();
 
   const msgDoc: Record<string, any> = {
     id: msgId,
-    conversationId: conversation.id,
+    chatId,
+    conversationId: chatId,
     senderId: sender.id,
     senderName,
     senderAvatar,
@@ -4855,16 +4969,13 @@ export async function sendFirestoreDirectMessage(
     ...(safeStickerId ? { stickerId: safeStickerId } : {}),
     ...(safeStickerData ? { stickerData: safeStickerData } : {}),
     status: 'delivered',
-    createdAt: nowMs,
-    createdAtLabel: timeLabel,
-    createdAtMs: nowMs,
-    createdAtTs: serverTimestamp(),
     timestamp: serverTimestamp(),
+    clientCreatedAt,
   };
 
   const directRecipientId =
     conversation.type !== 'group'
-      ? (conversation.participantIds || []).find((pid) => pid !== sender.id)
+      ? participants.find((pid) => pid !== sender.id)
       : undefined;
   if (directRecipientId && directRecipientId.length <= 64) {
     msgDoc.receiverId = directRecipientId;
@@ -4872,19 +4983,31 @@ export async function sendFirestoreDirectMessage(
 
   try {
     const batch = writeBatch(db);
-    batch.set(doc(db, 'conversations', conversation.id, 'messages', msgId), msgDoc);
-    batch.update(convRef, {
-      lastMessageText: previewText,
-      lastMessageSenderId: sender.id,
-      lastMessageAt: timeLabel,
-      updatedAtMs: nowMs,
-      updatedAt: serverTimestamp(),
-    });
+    batch.set(doc(db, rootCol, chatId, 'messages', msgId), msgDoc);
+    batch.set(
+      chatRef,
+      {
+        id: chatId,
+        type: conversation.type || 'direct',
+        name: (conversation.name || 'JIT Chat').slice(0, 120),
+        avatarUrl: sanitizeAvatarUrl(conversation.avatarUrl),
+        participants,
+        participantIds: participants,
+        participantsJson: JSON.stringify(conversation.participantsMap || {}).slice(0, 29500),
+        lastMessage: previewText,
+        lastMessageText: previewText,
+        lastMessageSenderId: sender.id,
+        lastMessageAt: timeLabel,
+        updatedAtMs: clientCreatedAt,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
 
     if (conversation.type === 'direct') {
-      const recipientId = directRecipientId || conversation.participantIds.find((pid) => pid !== sender.id);
+      const recipientId = directRecipientId || participants.find((pid) => pid !== sender.id);
       if (recipientId && recipientId.length >= 8) {
-        const notifId = `notif_dm_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
+        const notifId = `notif_dm_${clientCreatedAt}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
         batch.set(doc(db, 'notifications', notifId), {
           id: notifId,
           userId: recipientId,
@@ -4895,8 +5018,8 @@ export async function sendFirestoreDirectMessage(
           title: `Message from ${senderName}`,
           message: (resolvedType === 'sticker' ? 'Sent a sticker' : cleanContent || 'Sent an attachment').slice(0, 390),
           isRead: false,
-          createdAtIso: new Date(nowMs).toISOString(),
-          createdAtMs: nowMs,
+          createdAtIso: new Date(clientCreatedAt).toISOString(),
+          createdAtMs: clientCreatedAt,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -4906,18 +5029,15 @@ export async function sendFirestoreDirectMessage(
     await batch.commit();
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(
-        err,
-        OperationType.WRITE,
-        `conversations/${conversation.id}/messages/${msgId}`
-      );
+      handleFirestoreError(err, OperationType.WRITE, `${rootCol}/${chatId}/messages/${msgId}`);
     }
     throw err;
   }
 
   return {
     id: msgId,
-    conversationId: conversation.id,
+    chatId,
+    conversationId: chatId,
     senderId: sender.id,
     ...(directRecipientId ? { receiverId: directRecipientId } : {}),
     senderName,
@@ -4928,9 +5048,10 @@ export async function sendFirestoreDirectMessage(
     mediaType: safeMediaUrl ? payload.mediaType || 'image' : undefined,
     stickerId: safeStickerId,
     stickerData: safeStickerData,
-    createdAt: nowMs,
+    clientCreatedAt,
+    createdAt: clientCreatedAt,
     createdAtLabel: timeLabel,
-    createdAtMs: nowMs,
+    createdAtMs: clientCreatedAt,
     status: 'delivered',
   };
 }
@@ -5945,9 +6066,11 @@ export async function adminFetchUserChatActivityClient(
   const toMsg = (id: string, fallbackConvId: string, data: Record<string, any>): Message & { createdAtMs?: number } => {
     const epochMs = extractMessageEpochMs(data, id);
     const msgType = (data.type as Message['type']) || (data.stickerId ? 'sticker' : undefined);
+    const label = resolveMessageLabel(data, id);
     return {
       id: String(data.id || id),
-      conversationId: String(data.conversationId || fallbackConvId),
+      chatId: String(data.chatId || data.conversationId || fallbackConvId),
+      conversationId: String(data.conversationId || data.chatId || fallbackConvId),
       senderId: String(data.senderId || ''),
       receiverId: typeof data.receiverId === 'string' ? data.receiverId : undefined,
       senderName: String(data.senderName || 'JIT Member'),
@@ -5960,24 +6083,34 @@ export async function adminFetchUserChatActivityClient(
       stickerData: typeof data.stickerData === 'string' ? data.stickerData : undefined,
       time: typeof data.time === 'string' ? data.time : undefined,
       date: typeof data.date === 'string' ? data.date : undefined,
-      timestamp: data.timestamp,
-      createdAt: epochMs > 0 ? epochMs : resolveMessageLabel(data, epochMs),
-      createdAtLabel: resolveMessageLabel(data, epochMs),
+      timestamp: data.timestamp || data.createdAtTs,
+      clientCreatedAt:
+        typeof data.clientCreatedAt === 'number' ? data.clientCreatedAt : undefined,
+      createdAt: epochMs > 0 ? epochMs : label,
+      createdAtLabel: label,
       createdAtMs: epochMs,
       status: (data.status as Message['status']) || 'delivered',
     };
   };
 
-  // 1. Primary conversation queries (participantIds array-contains + recent threads scan)
-  const [partRes, recentRes] = await Promise.allSettled([
+  // 1. Primary conversation queries across both canonical /chats and legacy /conversations
+  const [chatsRes, partRes, recentRes] = await Promise.allSettled([
+    getDocs(query(collection(db, 'chats'), where('participants', 'array-contains', userId), limit(100))),
     getDocs(query(collection(db, 'conversations'), where('participantIds', 'array-contains', userId), limit(100))),
     getDocs(query(collection(db, 'conversations'), limit(100))),
   ]);
 
+  if (chatsRes.status === 'fulfilled') {
+    chatsRes.value.forEach((d) => {
+      const conv = toConv(d.id, d.data());
+      convMap.set(conv.id, conv);
+    });
+  }
+
   if (partRes.status === 'fulfilled') {
     partRes.value.forEach((d) => {
       const conv = toConv(d.id, d.data());
-      convMap.set(conv.id, conv);
+      if (!convMap.has(conv.id)) convMap.set(conv.id, conv);
     });
   }
 
@@ -5998,16 +6131,17 @@ export async function adminFetchUserChatActivityClient(
     });
   }
 
-  // 2. Fetch all messages inside every matched conversation
+  // 2. Fetch all messages inside every matched conversation (/chats or /conversations)
   const convIds = Array.from(convMap.keys());
   const CHUNK = 10;
   for (let i = 0; i < convIds.length; i += CHUNK) {
     const slice = convIds.slice(i, i + CHUNK);
     await Promise.all(
       slice.map(async (cid) => {
+        const rootCol = getChatCollectionRoot(cid);
         try {
           const snap = await getDocs(
-            query(collection(db, 'conversations', cid, 'messages'), limit(300))
+            query(collection(db, rootCol, cid, 'messages'), limit(300))
           );
           snap.forEach((d) => {
             const msg = toMsg(d.id, cid, d.data());

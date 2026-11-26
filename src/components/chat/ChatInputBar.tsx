@@ -183,7 +183,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
     const combinedError = attachError || externalError;
 
     return (
-      <div ref={containerRef} className="relative shrink-0">
+      <div ref={containerRef} className="relative shrink-0 w-full box-border">
         {pickerOpen && (
           <EmojiStickerPicker
             onSelectEmoji={handleInsertEmoji}
@@ -195,12 +195,12 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
         )}
 
         {attachedPreview && (
-          <div className="px-4 py-2 bg-slate-100 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
-            <div className="flex items-center gap-2">
+          <div className="w-full box-border px-3 sm:px-4 py-2 bg-slate-100 dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
               <img
                 src={attachedPreview}
                 alt="Upload preview"
-                className="w-10 h-10 rounded-lg object-cover border border-slate-300 dark:border-slate-600"
+                className="w-10 h-10 rounded-lg object-cover border border-slate-300 dark:border-slate-600 shrink-0"
               />
               <span className="text-xs text-slate-700 dark:text-slate-300 truncate max-w-[200px]">
                 {attachedFile?.name}
@@ -209,7 +209,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
             <button
               type="button"
               onClick={clearAttachment}
-              className="p-1 text-slate-400 hover:text-red-500"
+              className="p-1 text-slate-400 hover:text-red-500 shrink-0"
             >
               <X className="w-4 h-4" />
             </button>
@@ -217,15 +217,15 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
         )}
 
         {combinedError && (
-          <div className="px-4 py-1.5 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 flex items-center justify-between">
-            <span>{combinedError}</span>
+          <div className="w-full box-border px-3 sm:px-4 py-1.5 text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/40 flex items-center justify-between gap-2">
+            <span className="truncate">{combinedError}</span>
             <button
               type="button"
               onClick={() => {
                 setAttachError(null);
                 onClearExternalError();
               }}
-              className="p-0.5"
+              className="p-0.5 shrink-0"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -234,14 +234,14 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
 
         <form
           onSubmit={handleSubmit}
-          className="p-3 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1.5 sm:gap-2"
+          className="w-full box-border p-2.5 sm:p-3 bg-white dark:bg-slate-900 border-t border-slate-100 dark:border-slate-800 flex items-center gap-1.5 sm:gap-2 min-w-0"
         >
           {!isAiThread && (
             <>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
                 title="Attach Image"
               >
                 <Paperclip className="w-4 h-4" />
@@ -259,7 +259,7 @@ export const ChatInputBar: React.FC<ChatInputBarProps> = React.memo(
           <button
             type="button"
             onClick={() => setPickerOpen((prev) => !prev)}
-            className={`p-2 rounded-xl transition-colors ${
+            className={`p-2 rounded-xl transition-colors shrink-0 ${
               pickerOpen
                 ? 'text-blue-500 bg-blue-50 dark:bg-blue-950/50'
                 : 'text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'

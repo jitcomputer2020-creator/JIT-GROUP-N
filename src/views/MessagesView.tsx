@@ -536,12 +536,12 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     }
     const byId = new Map<string, Message>();
     for (const lm of localMessages) {
-      if (lm.conversationId === activeConv.id) {
+      if (lm.conversationId === activeConv.id || lm.chatId === activeConv.id) {
         byId.set(lm.id, lm);
       }
     }
     for (const cm of cloudMessages) {
-      if (cm.conversationId === activeConv.id) {
+      if (cm.conversationId === activeConv.id || cm.chatId === activeConv.id) {
         byId.set(cm.id, cm);
       }
     }
@@ -736,6 +736,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
       const optimisticMsg: Message = {
         id: optimisticId,
+        chatId: activeConv.id,
         conversationId: activeConv.id,
         senderId: currentUser.id,
         senderName: currentUser.fullName,
@@ -744,6 +745,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         content: contentToSend.trim(),
         mediaUrl,
         mediaType,
+        clientCreatedAt: nowMs,
         createdAt: nowMs,
         createdAtMs: nowMs,
         createdAtLabel: timeLabel,
@@ -824,6 +826,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
       const stickerMsg: Message = {
         id: optimisticId,
+        chatId: activeConv.id,
         conversationId: activeConv.id,
         senderId: currentUser.id,
         senderName: currentUser.fullName,
@@ -832,6 +835,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         stickerId: sticker.id,
         stickerData: sticker.id,
         content: '',
+        clientCreatedAt: nowMs,
         createdAt: nowMs,
         createdAtMs: nowMs,
         createdAtLabel: timeLabel,
@@ -994,12 +998,12 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   );
 
   return (
-    <div className="relative bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-140px)] min-h-[460px] flex">
+    <div className="relative w-full flex-1 min-w-0 box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl sm:rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-136px)] min-h-[460px] flex flex-col md:grid md:grid-cols-[280px_1fr]">
       {/* 1. Left Conversation List */}
       <div
-        className={`w-full sm:w-80 md:w-96 border-r border-slate-100 dark:border-slate-800 ${
-          mobileThreadOpen ? 'hidden sm:flex' : 'flex'
-        } flex-col shrink-0`}
+        className={`w-full h-full min-h-0 min-w-0 border-r border-slate-100 dark:border-slate-800 ${
+          mobileThreadOpen ? 'hidden md:flex' : 'flex'
+        } flex-col overflow-hidden box-border`}
       >
         <div className="p-4 border-b border-slate-100 dark:border-slate-800">
           <div className="flex items-center justify-between mb-3">
@@ -1109,8 +1113,8 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       {/* 2. Active Chat Thread */}
       <div
         className={`${
-          mobileThreadOpen ? 'flex' : 'hidden sm:flex'
-        } flex-1 flex-col justify-between bg-slate-50/40 dark:bg-slate-950/20`}
+          mobileThreadOpen ? 'flex' : 'hidden md:flex'
+        } w-full flex-1 h-full min-h-0 min-w-0 flex-col justify-between bg-slate-50/40 dark:bg-slate-950/20 overflow-hidden box-border`}
       >
         {!activeConv ? (
           <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-3">
@@ -1131,14 +1135,16 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
         ) : (
           <>
             {/* Thread Header */}
-            <div className="p-3.5 px-4 sm:px-5 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
+            <div className="w-full box-border shrink-0 p-3 sm:p-3.5 px-3.5 sm:px-5 bg-white dark:bg-slate-900 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2 min-w-0">
               <div className="flex items-center gap-2 sm:gap-3 min-w-0">
                 <button
+                  type="button"
                   onClick={() => setMobileThreadOpen(false)}
-                  className="sm:hidden p-1.5 -ml-1 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors shrink-0"
-                  title="Back to conversations"
+                  className="md:hidden inline-flex items-center gap-1 px-2.5 py-1.5 -ml-1 text-[11px] font-bold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl transition-colors shrink-0"
+                  title="Back to Chats"
                 >
-                  <ArrowLeft className="w-4 h-4" />
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back to Chats</span>
                 </button>
                 {activeConv.id === JIT_AI_CONV_ID ? (
                   <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-600 via-blue-600 to-cyan-500 text-white flex items-center justify-center shrink-0 shadow-sm">

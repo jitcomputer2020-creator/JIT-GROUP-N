@@ -577,6 +577,52 @@
       },
       "required": ["id", "conversationId", "senderId", "senderName", "content", "status", "createdAt", "createdAtMs", "createdAtTs"]
     },
+    "UnifiedChat": {
+      "title": "UnifiedChat",
+      "description": "Canonical 1-on-1 DM or group chat room keyed by sorted participant IDs.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 4, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "type": { "type": "string", "enum": ["direct", "group"] },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "avatarUrl": { "type": "string", "maxLength": 400000 },
+        "participants": { "type": "array", "description": "Sorted participant IDs." },
+        "participantIds": { "type": "array", "description": "Participant IDs alias." },
+        "participantsJson": { "type": "string", "maxLength": 30000 },
+        "lastMessage": { "type": "string", "maxLength": 500 },
+        "lastMessageText": { "type": "string", "maxLength": 500 },
+        "lastMessageSenderId": { "type": "string", "maxLength": 64 },
+        "lastMessageAt": { "type": "string", "maxLength": 40 },
+        "updatedAtMs": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "type", "participants", "lastMessage", "updatedAt"]
+    },
+    "UnifiedChatMessage": {
+      "title": "UnifiedChatMessage",
+      "description": "Message stored inside chats/{chatId}/messages with authoritative server timestamp.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 4, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "chatId": { "type": "string", "minLength": 4, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "minLength": 4, "maxLength": 140, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "minLength": 4, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "receiverId": { "type": "string", "maxLength": 64 },
+        "senderName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "senderAvatar": { "type": "string", "maxLength": 400000 },
+        "content": { "type": "string", "maxLength": 4000 },
+        "type": { "type": "string", "enum": ["text", "image", "video", "file", "sticker"] },
+        "stickerId": { "type": "string", "maxLength": 64 },
+        "stickerData": { "type": "string", "maxLength": 8000 },
+        "mediaUrl": { "type": "string", "maxLength": 400000 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "file"] },
+        "status": { "type": "string", "enum": ["sent", "delivered", "read"] },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Authoritative Firestore serverTimestamp()." },
+        "clientCreatedAt": { "type": "integer", "description": "Client fallback timestamp while serverTimestamp is pending." }
+      },
+      "required": ["id", "chatId", "senderId", "senderName", "content", "status", "timestamp", "clientCreatedAt"]
+    },
     "ReelItem": {
       "title": "ReelItem",
       "description": "Short video reel with generated thumbnail and 40-day auto-expiry.",
@@ -738,6 +784,14 @@
     "/conversations/{conversationId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/ChatMessage" },
       "description": "Messages inside a direct or group conversation."
+    },
+    "/chats/{chatId}": {
+      "schema": { "$ref": "#/entities/UnifiedChat" },
+      "description": "Canonical 1-on-1 DM and group chat documents."
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/UnifiedChatMessage" },
+      "description": "Real-time messages inside a canonical chat ordered by server timestamp."
     },
     "/reels/{reelId}": {
       "schema": { "$ref": "#/entities/ReelItem" },

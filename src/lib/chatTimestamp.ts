@@ -5,11 +5,12 @@
 
 export interface TimestampedMessageLike {
   id?: string;
+  timestamp?: unknown;
+  clientCreatedAt?: unknown;
+  createdAtTs?: unknown;
   createdAt?: unknown;
   createdAtMs?: unknown;
-  createdAtTs?: unknown;
   createdAtLabel?: unknown;
-  timestamp?: unknown;
   timestampIso?: unknown;
   time?: unknown;
   date?: unknown;
@@ -26,7 +27,34 @@ function readToMillis(val: unknown): number {
       return 0;
     }
   }
+  if (val && typeof (val as { toDate?: unknown }).toDate === 'function') {
+    try {
+      const d = (val as { toDate: () => Date }).toDate();
+      const ms = d?.getTime?.();
+      if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) {
+        return ms;
+      }
+    } catch {
+      return 0;
+    }
+  }
   return 0;
+}
+
+function readToDate(val: unknown): Date | null {
+  if (val && typeof (val as { toDate?: unknown }).toDate === 'function') {
+    try {
+      const d = (val as { toDate: () => Date }).toDate();
+      if (d instanceof Date && !Number.isNaN(d.getTime())) {
+        return d;
+      }
+    } catch {
+      return null;
+    }
+  }
+  const ms = readToMillis(val);
+  if (ms > 0) return new Date(ms);
+  return null;
 }
 
 function resolveBaseDate(dateHint: unknown): Date {
@@ -55,7 +83,6 @@ function parseTimeOrDateString(raw: unknown, dateHint?: unknown): number {
     if (Number.isFinite(asNum) && asNum > 0) return asNum;
   }
 
-  // Match time-only strings like "09:07 AM", "9:07 pm", "14:30", "09:07:15 AM"
   const timeOnlyMatch = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
   if (timeOnlyMatch) {
     const base = resolveBaseDate(dateHint);
@@ -101,30 +128,35 @@ function parseTimeOrDateString(raw: unknown, dateHint?: unknown): number {
 }
 
 /**
- * Strict timestamp normalizer used identically when fetching from Firestore
- * and when sorting/rendering unified chat messages in the UI.
+ * Authoritative server-timestamp-first normalizer:
+ * 1. Resolved Firestore server Timestamp (`timestamp.toMillis()` / `createdAtTs.toMillis()`)
+ * 2. Local `clientCreatedAt` ONLY while server timestamp is pending (`hasPendingWrites`)
+ * 3. Legacy numeric/string timestamp fallbacks
  */
 export function normalizeTimestamp(msg: TimestampedMessageLike | null | undefined): number {
   if (!msg) return 0;
 
-  // 1. Numeric epoch milliseconds in createdAt
+  // 1. Authoritative Firestore serverTimestamp() on `timestamp`
+  const serverTimestampMs = readToMillis(msg.timestamp);
+  if (serverTimestampMs > 0) return serverTimestampMs;
+
+  // 2. Authoritative Firestore serverTimestamp() on `createdAtTs`
+  const createdAtTsMs = readToMillis(msg.createdAtTs);
+  if (createdAtTsMs > 0) return createdAtTsMs;
+
+  // 3. Firestore Timestamp on `createdAt`
+  const createdAtTimestampMs = readToMillis(msg.createdAt);
+  if (createdAtTimestampMs > 0) return createdAtTimestampMs;
+
+  // 4. Local fallback `clientCreatedAt` while serverTimestamp() is pending
+  if (typeof msg.clientCreatedAt === 'number' && Number.isFinite(msg.clientCreatedAt) && msg.clientCreatedAt > 0) {
+    return msg.clientCreatedAt;
+  }
+
+  // 5. Legacy numeric fields
   if (typeof msg.createdAt === 'number' && Number.isFinite(msg.createdAt) && msg.createdAt > 0) {
     return msg.createdAt;
   }
-
-  // 2. Firestore Timestamp on createdAt
-  const createdAtMillis = readToMillis(msg.createdAt);
-  if (createdAtMillis > 0) return createdAtMillis;
-
-  // 3. Firestore Timestamp on timestamp
-  const timestampMillis = readToMillis(msg.timestamp);
-  if (timestampMillis > 0) return timestampMillis;
-
-  // 4. Firestore Timestamp on createdAtTs (serverTimestamp field)
-  const createdAtTsMillis = readToMillis(msg.createdAtTs);
-  if (createdAtTsMillis > 0) return createdAtTsMillis;
-
-  // 5. Numeric createdAtMs or numeric timestamp
   if (typeof msg.createdAtMs === 'number' && Number.isFinite(msg.createdAtMs) && msg.createdAtMs > 0) {
     return msg.createdAtMs;
   }
@@ -132,7 +164,7 @@ export function normalizeTimestamp(msg: TimestampedMessageLike | null | undefine
     return msg.timestamp;
   }
 
-  // 6. Formatted time or date strings (msg.time, msg.createdAt, msg.timestampIso, msg.timestamp, msg.createdAtLabel)
+  // 6. Legacy formatted date/time strings
   const dateHint = msg.date ?? msg.timestampIso ?? msg.createdAtTs;
   const fromTime = parseTimeOrDateString(msg.time, dateHint);
   if (fromTime > 0) return fromTime;
@@ -149,7 +181,7 @@ export function normalizeTimestamp(msg: TimestampedMessageLike | null | undefine
   const fromLabel = parseTimeOrDateString(msg.createdAtLabel, dateHint);
   if (fromLabel > 0) return fromLabel;
 
-  // 7. Embedded numeric epoch in generated message ID (e.g. msg_17326... )
+  // 7. Embedded numeric epoch in generated message ID
   const idMatch = String(msg.id || '').match(/(\d{12,15})/);
   if (idMatch) {
     const idMs = Number(idMatch[1]);
@@ -159,10 +191,48 @@ export function normalizeTimestamp(msg: TimestampedMessageLike | null | undefine
   return 0;
 }
 
+/**
+ * Formats display time from the resolved Firestore server timestamp `timestamp.toDate()`
+ * so both users see the exact same server time, falling back to `clientCreatedAt` only
+ * while the server timestamp is still pending.
+ */
+export function resolveServerTimeLabel(msg: TimestampedMessageLike | null | undefined): string {
+  if (!msg) return 'Now';
+
+  const serverDate =
+    readToDate(msg.timestamp) ||
+    readToDate(msg.createdAtTs) ||
+    readToDate(msg.createdAt);
+  if (serverDate) {
+    return serverDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  if (typeof msg.clientCreatedAt === 'number' && Number.isFinite(msg.clientCreatedAt) && msg.clientCreatedAt > 0) {
+    return new Date(msg.clientCreatedAt).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
+  const ms = normalizeTimestamp(msg);
+  if (ms > 0) {
+    return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  if (typeof msg.time === 'string' && msg.time.trim()) {
+    return msg.time;
+  }
+  if (typeof msg.createdAtLabel === 'string' && msg.createdAtLabel.trim()) {
+    return msg.createdAtLabel;
+  }
+  return 'Now';
+}
+
 export function sortMessagesChronologically<T extends TimestampedMessageLike>(list: T[]): T[] {
   return [...list].sort((a, b) => {
-    const diff = normalizeTimestamp(a) - normalizeTimestamp(b);
-    if (diff !== 0) return diff;
+    const aMs = normalizeTimestamp(a);
+    const bMs = normalizeTimestamp(b);
+    if (aMs !== bMs) return aMs - bMs;
     return String(a.id || '').localeCompare(String(b.id || ''));
   });
 }

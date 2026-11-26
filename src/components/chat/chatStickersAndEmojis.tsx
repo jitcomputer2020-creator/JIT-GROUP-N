@@ -305,7 +305,7 @@ export const EmojiStickerPicker: React.FC<EmojiStickerPickerProps> = React.memo(
 
     return (
       <div
-        className="absolute bottom-full left-2 sm:left-3 mb-2 z-40 w-[332px] sm:w-[372px] max-w-[calc(100vw-1.5rem)] bg-slate-900 text-white border border-slate-700/90 rounded-2xl shadow-2xl overflow-hidden"
+        className="absolute bottom-full left-2 sm:left-3 mb-2 z-40 w-[332px] sm:w-[372px] max-w-[calc(100%-1rem)] bg-slate-900 text-white border border-slate-700/90 rounded-2xl shadow-2xl overflow-hidden"
         role="dialog"
         aria-label="Emoji and Sticker Picker"
       >
