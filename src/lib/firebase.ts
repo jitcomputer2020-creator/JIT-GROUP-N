@@ -1349,12 +1349,18 @@ export async function fetchPublicDirectory(maxEntries = 200, forceRefresh = fals
 
   const byId = new Map<string, UserProfile>();
 
-  // 1. Fetch user_directory and leaderboard in parallel so ALL registered Firebase users are discovered
-  const [dirRes, lbRes] = await Promise.allSettled([
+  // 1. Fetch user_directory, users, and leaderboard in parallel so ALL registered Firebase users are discovered
+  const [dirRes, usersRes, lbRes] = await Promise.allSettled([
     getDocs(
       query(
         collection(db, 'user_directory'),
         where('rewardPoints', '>=', 0),
+        limit(Math.max(maxEntries, 200))
+      )
+    ),
+    getDocs(
+      query(
+        collection(db, 'users'),
         limit(Math.max(maxEntries, 200))
       )
     ),
@@ -1379,6 +1385,25 @@ export async function fetchPublicDirectory(maxEntries = 200, forceRefresh = fals
     });
   } else if ((dirRes.reason as any)?.code === 'permission-denied') {
     handleFirestoreError(dirRes.reason, OperationType.LIST, 'user_directory');
+  }
+
+  if (usersRes.status === 'fulfilled') {
+    usersRes.value.docs.forEach((d) => {
+      const uData = d.data();
+      if (!uData || uData.status === 'deleted') return;
+      const fullProfile = firestoreDocToUserProfile({ id: d.id, ...uData });
+      if (!fullProfile.id) return;
+      const pDigits = normalizeDigitsOnly(fullProfile.contactNumber || '');
+      if (pDigits) searchablePhoneDigitsById.set(fullProfile.id, pDigits);
+      byId.set(fullProfile.id, {
+        ...fullProfile,
+        contactNumber: fullProfile.isContactNumberPublic
+          ? fullProfile.contactNumber
+          : pDigits.length >= 4
+          ? `******${pDigits.slice(-4)}`
+          : 'Private',
+      });
+    });
   }
 
   const missingProfileIds: Array<{ id: string; lbData: Record<string, any> }> = [];

@@ -226,6 +226,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     isPrimaryDemo ? 'conv_001' : ''
   );
   const [mobileThreadOpen, setMobileThreadOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<'chats' | 'friends'>('chats');
   const [searchQuery, setSearchQuery] = useState('');
   const [sendingMessage, setSendingMessage] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -438,12 +439,12 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     };
   }, [isPrimaryDemo]);
 
-  // Load Firebase users directory when opening New DM or New Group modal
+  // Load Firebase users directory immediately when Messages opens (for Friends & Users sidebar + modals)
   useEffect(() => {
-    if (!isNewDmOpen && !isNewGroupModalOpen) return;
+    if (!currentUser?.id) return;
     let cancelled = false;
     setLoadingDirectory(true);
-    fetchPublicDirectory(120)
+    fetchPublicDirectory(200)
       .then((list) => {
         if (!cancelled) {
           setDirectoryUsers(list);
@@ -456,14 +457,15 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
     return () => {
       cancelled = true;
     };
-  }, [isNewDmOpen, isNewGroupModalOpen]);
+  }, [currentUser?.id, isNewDmOpen, isNewGroupModalOpen]);
 
-  // Live search in New DM modal
+  // Live search across cloud users for both sidebar search and New DM modal
   useEffect(() => {
-    if (!isNewDmOpen || !dmUserQuery.trim()) return;
+    const q = (isNewDmOpen ? dmUserQuery : searchQuery).trim();
+    if (!q) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      searchCloudUsers(dmUserQuery.trim(), 25)
+      searchCloudUsers(q, 30)
         .then((res) => {
           if (!cancelled && res.length > 0) {
             setDirectoryUsers((prev) => {
@@ -482,7 +484,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [isNewDmOpen, dmUserQuery]);
+  }, [isNewDmOpen, dmUserQuery, searchQuery]);
 
   const jitAiConversation: Conversation = useMemo(() => {
     const sortedAi = sortMessagesChronologically(aiMessages);
@@ -596,6 +598,19 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
       );
     });
   }, [selectablePeers, dmUserQuery]);
+
+  const filteredSidebarUsers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase().replace(/^@+/, '');
+    if (!q) return selectablePeers;
+    return selectablePeers.filter((u) => {
+      const uname = (u.username || deriveUsername(u.fullName)).toLowerCase();
+      return (
+        u.fullName.toLowerCase().includes(q) ||
+        uname.includes(q) ||
+        (u.contactNumber || '').includes(q)
+      );
+    });
+  }, [selectablePeers, searchQuery]);
 
   const handleStartDirectChat = async (peer: UserProfile) => {
     if (!currentUser) return;
@@ -998,114 +1013,253 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   );
 
   return (
-    <div className="relative w-full flex-1 min-w-0 box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl sm:rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-136px)] min-h-[460px] flex flex-col md:grid md:grid-cols-[280px_1fr]">
-      {/* 1. Left Conversation List */}
+    <div className="relative w-full flex-1 min-w-0 box-border bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl sm:rounded-3xl shadow-sm overflow-hidden h-[calc(100dvh-132px)] sm:h-[calc(100vh-136px)] min-h-[460px] flex flex-col md:grid md:grid-cols-[300px_1fr]">
+      {/* 1. Always-Visible Left Sidebar (300px on Desktop, default screen on Mobile) */}
       <div
         className={`w-full h-full min-h-0 min-w-0 border-r border-slate-100 dark:border-slate-800 ${
           mobileThreadOpen ? 'hidden md:flex' : 'flex'
         } flex-col overflow-hidden box-border`}
       >
-        <div className="p-4 border-b border-slate-100 dark:border-slate-800">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              Chats &amp; Groups
+        <div className="p-3.5 border-b border-slate-100 dark:border-slate-800 space-y-2.5 shrink-0">
+          <div className="flex items-center justify-between gap-1.5">
+            <h3 className="text-sm font-bold text-slate-900 dark:text-white truncate">
+              Chats &amp; Friends
             </h3>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <button
+                type="button"
                 onClick={() => setIsNewDmOpen(true)}
-                className="px-2.5 py-1.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors flex items-center gap-1 shadow-sm"
+                className="px-2 py-1.5 text-[11px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors flex items-center gap-1 shadow-sm"
                 title="Start New Direct Message"
               >
-                <MessageSquarePlus className="w-3.5 h-3.5" />
+                <Plus className="w-3 h-3" />
                 <span>New DM</span>
               </button>
               <button
+                type="button"
                 onClick={() => setIsNewGroupModalOpen(true)}
-                className="p-1.5 text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-xl transition-colors"
+                className="px-2 py-1.5 text-[11px] font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-950/70 rounded-xl transition-colors flex items-center gap-1"
                 title="Create New Group"
               >
-                <Plus className="w-4 h-4" />
+                <Users className="w-3 h-3" />
+                <span>New Group</span>
               </button>
             </div>
           </div>
 
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
             <input
               type="text"
-              placeholder="Search conversations..."
+              placeholder="Search friends or chats..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-900 dark:text-white placeholder:text-slate-400"
             />
+          </div>
+
+          {/* Two clear sidebar tabs: Recent Chats | Friends & Users */}
+          <div className="grid grid-cols-2 gap-1 bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl">
+            <button
+              type="button"
+              onClick={() => setSidebarTab('chats')}
+              className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition-colors truncate ${
+                sidebarTab === 'chats'
+                  ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+              }`}
+            >
+              Recent Chats
+            </button>
+            <button
+              type="button"
+              onClick={() => setSidebarTab('friends')}
+              className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition-colors truncate ${
+                sidebarTab === 'friends'
+                  ? 'bg-white dark:bg-slate-900 text-blue-600 dark:text-blue-400 shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+              }`}
+            >
+              Friends &amp; Users ({selectablePeers.length})
+            </button>
           </div>
         </div>
 
-        {/* Conversation List */}
-        <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 no-scrollbar">
-          {/* Pinned JIT AI Chat Companion */}
-          {(!searchQuery.trim() ||
-            'jit ai assistant study helper tech'.includes(searchQuery.toLowerCase())) && (
-            <button
-              key={JIT_AI_CONV_ID}
-              onClick={() => {
-                setActiveConvId(JIT_AI_CONV_ID);
-                setMobileThreadOpen(true);
-              }}
-              className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
-                activeConv?.id === JIT_AI_CONV_ID
-                  ? 'bg-indigo-50/90 dark:bg-indigo-950/40'
-                  : 'bg-indigo-50/30 dark:bg-indigo-950/10 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/30'
-              }`}
-            >
-              <div className="relative shrink-0 w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-600 via-blue-600 to-cyan-500 text-white flex items-center justify-center shadow-sm">
-                <Bot className="w-5 h-5" />
-                <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-white dark:border-slate-900" />
-              </div>
-
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-0.5">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <h4 className="text-xs font-extrabold text-indigo-950 dark:text-white truncate">
-                      JIT AI Assistant
-                    </h4>
-                    <span className="px-1.5 py-0.5 rounded-md bg-indigo-600 text-white text-[9px] font-bold uppercase tracking-wider shrink-0">
-                      AI
-                    </span>
+        {/* Scrollable List Body */}
+        <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60 no-scrollbar">
+          {sidebarTab === 'chats' ? (
+            <>
+              {/* Pinned JIT AI Chat Companion */}
+              {(!searchQuery.trim() ||
+                'jit ai assistant study helper tech'.includes(searchQuery.toLowerCase())) && (
+                <button
+                  key={JIT_AI_CONV_ID}
+                  type="button"
+                  onClick={() => {
+                    setActiveConvId(JIT_AI_CONV_ID);
+                    setMobileThreadOpen(true);
+                  }}
+                  className={`w-full p-3.5 flex items-start gap-3 text-left transition-colors ${
+                    activeConv?.id === JIT_AI_CONV_ID
+                      ? 'bg-indigo-50/90 dark:bg-indigo-950/40'
+                      : 'bg-indigo-50/30 dark:bg-indigo-950/10 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/30'
+                  }`}
+                >
+                  <div className="relative shrink-0 w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-600 via-blue-600 to-cyan-500 text-white flex items-center justify-center shadow-sm">
+                    <Bot className="w-5 h-5" />
+                    <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-white dark:border-slate-900" />
                   </div>
-                  <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-mono shrink-0">
-                    24/7
-                  </span>
-                </div>
-                <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
-                  {jitAiConversation.lastMessage?.text}
-                </p>
-              </div>
-            </button>
-          )}
 
-          {filteredConversations.length === 0 ? (
-            <div className="p-8 text-center space-y-3">
-              <MessageSquarePlus className="w-8 h-8 text-slate-400 mx-auto" />
-              <p className="text-xs text-slate-500">
-                No conversations yet. Start a direct chat with a campus friend!
-              </p>
-              <button
-                onClick={() => setIsNewDmOpen(true)}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold"
-              >
-                Start Direct Message
-              </button>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-0.5">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <h4 className="text-xs font-extrabold text-indigo-950 dark:text-white truncate">
+                          JIT AI Assistant
+                        </h4>
+                        <span className="px-1.5 py-0.5 rounded-md bg-indigo-600 text-white text-[9px] font-bold uppercase tracking-wider shrink-0">
+                          AI
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-indigo-600 dark:text-indigo-400 font-mono shrink-0">
+                        24/7
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300 truncate">
+                      {jitAiConversation.lastMessage?.text}
+                    </p>
+                  </div>
+                </button>
+              )}
+
+              {filteredConversations.length === 0 ? (
+                <div className="p-6 text-center space-y-2.5">
+                  <MessageSquarePlus className="w-8 h-8 text-slate-400 mx-auto" />
+                  <p className="text-xs text-slate-500">
+                    No active conversations match your search yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setSidebarTab('friends')}
+                    className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold"
+                  >
+                    Browse Friends &amp; Users
+                  </button>
+                </div>
+              ) : (
+                filteredConversations.map((conv) => (
+                  <ConversationRow
+                    key={conv.id}
+                    conv={conv}
+                    isSelected={conv.id === activeConv?.id}
+                    onSelect={handleSelectConversation}
+                  />
+                ))
+              )}
+
+              {/* When searching in Recent Chats, also surface matching Friends & Users directly below */}
+              {searchQuery.trim() && filteredSidebarUsers.length > 0 && (
+                <div className="pt-1">
+                  <div className="px-3.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400 bg-slate-50 dark:bg-slate-950/50">
+                    Friends &amp; Users
+                  </div>
+                  {filteredSidebarUsers.slice(0, 8).map((peer) => {
+                    const isConnectedFriend = friendIds.includes(peer.id);
+                    return (
+                      <button
+                        key={`search_peer_${peer.id}`}
+                        type="button"
+                        disabled={startingDmUserId === peer.id}
+                        onClick={() => handleStartDirectChat(peer)}
+                        className="w-full p-3 flex items-center justify-between gap-2.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800/60 transition-colors"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <img
+                            src={peer.avatarUrl || APP_CONFIG.logoUrl}
+                            alt={peer.fullName}
+                            className="w-9 h-9 rounded-xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                                {peer.fullName}
+                              </p>
+                              {isConnectedFriend && (
+                                <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 shrink-0">
+                                  Friend
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[10px] font-mono text-slate-500 truncate">
+                              @{peer.username || deriveUsername(peer.fullName)}
+                            </p>
+                          </div>
+                        </div>
+                        {startingDmUserId === peer.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
+                        ) : (
+                          <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 shrink-0">
+                            Chat
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          ) : loadingDirectory && filteredSidebarUsers.length === 0 ? (
+            <div className="py-10 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+              <span>Loading JIT users...</span>
+            </div>
+          ) : filteredSidebarUsers.length === 0 ? (
+            <div className="p-6 text-center text-xs text-slate-400">
+              No friends or registered users match &ldquo;{searchQuery}&rdquo;.
             </div>
           ) : (
-            filteredConversations.map((conv) => (
-              <ConversationRow
-                key={conv.id}
-                conv={conv}
-                isSelected={conv.id === activeConv?.id}
-                onSelect={handleSelectConversation}
-              />
-            ))
+            filteredSidebarUsers.map((peer) => {
+              const isConnectedFriend = friendIds.includes(peer.id);
+              const isOpening = startingDmUserId === peer.id;
+              return (
+                <button
+                  key={peer.id}
+                  type="button"
+                  disabled={isOpening}
+                  onClick={() => handleStartDirectChat(peer)}
+                  className="w-full p-3 flex items-center justify-between gap-2.5 text-left hover:bg-blue-50/70 dark:hover:bg-blue-950/30 transition-colors"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <img
+                      src={peer.avatarUrl || APP_CONFIG.logoUrl}
+                      alt={peer.fullName}
+                      className="w-10 h-10 rounded-2xl object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                          {peer.fullName}
+                        </h4>
+                        {isConnectedFriend && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 shrink-0">
+                            Friend
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] font-mono text-slate-500 truncate">
+                        @{peer.username || deriveUsername(peer.fullName)}
+                      </p>
+                    </div>
+                  </div>
+                  {isOpening ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+                  ) : (
+                    <span className="px-2 py-1 rounded-lg bg-blue-600/10 text-blue-600 dark:text-blue-400 text-[10px] font-bold shrink-0">
+                      Message
+                    </span>
+                  )}
+                </button>
+              );
+            })
           )}
         </div>
       </div>
@@ -1141,10 +1295,10 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
                   type="button"
                   onClick={() => setMobileThreadOpen(false)}
                   className="md:hidden inline-flex items-center gap-1 px-2.5 py-1.5 -ml-1 text-[11px] font-bold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-xl transition-colors shrink-0"
-                  title="Back to Chats"
+                  title="Back to Chats & Friends"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Back to Chats</span>
+                  <span>Back</span>
                 </button>
                 {activeConv.id === JIT_AI_CONV_ID ? (
                   <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-600 via-blue-600 to-cyan-500 text-white flex items-center justify-center shrink-0 shadow-sm">
