@@ -185,6 +185,7 @@ export interface MultiplayerRoom {
   maxPlayers: number;
   isPublicMatch?: boolean;
   isOpenGroup?: boolean;
+  isBotMatch?: boolean;
   activeSeatLimit?: number;
   players: RoomPlayer[];
   waitingPlayers?: RoomPlayer[];

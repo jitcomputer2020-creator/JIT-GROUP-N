@@ -209,10 +209,17 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
   isSimulatingRef.current = isSimulating;
 
   const isMultiplayer = Boolean(currentRoom) || gameMode !== 'ai';
+  const p1Id = currentRoom
+    ? currentRoom.players[0]?.id || currentRoom.player1Id || currentRoom.hostId || ''
+    : activePlayerId;
+  const p2Id = currentRoom
+    ? currentRoom.players[1]?.id || currentRoom.player2Id || ''
+    : '';
+
   const mySide: 'player' | 'opponent' =
     !isMultiplayer || !currentRoom
       ? 'player'
-      : currentRoom.players[0]?.id === activePlayerId
+      : p1Id === activePlayerId
       ? 'player'
       : 'opponent';
 
@@ -227,8 +234,8 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
   const expectedTurnActorId = !currentRoom
     ? activePlayerId
     : turn === 'player'
-    ? currentRoom.players[0]?.id
-    : currentRoom.players[1]?.id;
+    ? p1Id
+    : p2Id;
 
   const isAuthorizedMultiplayerActor = (() => {
     if (!currentRoom && gameMode === 'ai') return turn === 'player';
@@ -545,9 +552,9 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     };
   }, []);
 
-  // Clear AI timer if entering multiplayer room
+  // Clear AI timer if entering non-bot multiplayer room
   useEffect(() => {
-    if (gameMode !== 'ai' || currentRoom) {
+    if ((gameMode !== 'ai' || currentRoom) && !currentRoom?.isBotMatch) {
       if (aiTimerRef.current) {
         window.clearTimeout(aiTimerRef.current);
         aiTimerRef.current = null;
@@ -946,10 +953,11 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
         // Broadcast full Carrom board & turn state to Firestore room
         const activeRoom = currentRoomRef.current;
         if (activeRoom && gameModeRef.current !== 'ai' && onSyncMove) {
-          const nextTurnActorId =
-            nextSide === 'player'
-              ? activeRoom.players[0]?.id || activeRoom.hostId
-              : activeRoom.players[1]?.id || activeRoom.player2Id || '';
+          const roomP1 =
+            activeRoom.players[0]?.id || activeRoom.player1Id || activeRoom.hostId || '';
+          const roomP2 = activeRoom.players[1]?.id || activeRoom.player2Id || '';
+          const nextTurnActorId = nextSide === 'player' ? roomP1 : roomP2;
+          const actorForMove = isAiShot && activeRoom.isBotMatch && roomP2 ? roomP2 : activePlayerId;
           const serializedCoins: CarromSyncedCoin[] = coinsRef.current.map((c) => ({
             id: c.id,
             x: Math.round(c.x * 100) / 100,
@@ -968,7 +976,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
               statusLog: nextLogs,
               winnerMsg: computedWinnerMsg,
               finished: finishedRef.current,
-              byPlayerId: activePlayerId,
+              byPlayerId: actorForMove,
             },
             nextTurnActorId,
             finishedRef.current ? 'finished' : 'playing'
@@ -1027,6 +1035,73 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
     },
     [aiDifficulty, activePlayerId, mySide, onMatchFinish, onSyncMove]
   );
+
+  // Automated 1.5-second Demo Challenger shot when playing in Random Play `isBotMatch`
+  useEffect(() => {
+    const room = currentRoom;
+    if (
+      !room ||
+      !room.isBotMatch ||
+      room.status === 'finished' ||
+      finishedRef.current ||
+      isSimulating ||
+      turn !== 'opponent'
+    ) {
+      return;
+    }
+    const roomP1 = room.players[0]?.id || room.player1Id || room.hostId || '';
+    const roomP2 = room.players[1]?.id || room.player2Id || '';
+    if (!roomP1 || roomP1 !== activePlayerId || !roomP2.startsWith('bot_demo_')) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const liveRoom = currentRoomRef.current;
+      if (
+        !liveRoom ||
+        liveRoom.roomCode !== room.roomCode ||
+        !liveRoom.isBotMatch ||
+        liveRoom.status === 'finished' ||
+        finishedRef.current ||
+        isSimulatingRef.current ||
+        turnRef.current !== 'opponent'
+      ) {
+        return;
+      }
+
+      const targets = coinsRef.current.filter(
+        (c) => !c.pocketed && (c.type === 'black' || c.type === 'queen')
+      );
+      const fallbackTargets = coinsRef.current.filter((c) => !c.pocketed);
+      const pool = targets.length > 0 ? targets : fallbackTargets;
+      let chosen = pool[0];
+      let bestScore = Infinity;
+      for (const c of pool) {
+        const distPocket = Math.min(...POCKETS.map((p) => Math.hypot(c.x - p.x, c.y - p.y)));
+        const distBaseline = Math.abs(c.y - BASELINE_Y_AI);
+        const s = distPocket + distBaseline * 0.25;
+        if (s < bestScore) {
+          bestScore = s;
+          chosen = c;
+        }
+      }
+      const preferredAiX = chosen
+        ? clamp(chosen.x + (Math.random() - 0.5) * 28, BASELINE_MARGIN_X + 10, SIZE - BASELINE_MARGIN_X - 10)
+        : SIZE / 2;
+      const sx = findSafeStrikerX(preferredAiX, BASELINE_Y_AI, coinsRef.current);
+      let angleDeg = 0;
+      if (chosen) {
+        const rawRad = Math.atan2(chosen.y - BASELINE_Y_AI, chosen.x - sx);
+        const rawDeg = (rawRad * 180) / Math.PI - 90;
+        const jitter = aiDifficulty === 'hard' ? 2.5 : aiDifficulty === 'medium' ? 8 : 18;
+        angleDeg = clamp(rawDeg + (Math.random() - 0.5) * jitter, -75, 75);
+      }
+      const aiPow = aiDifficulty === 'hard' ? 86 : aiDifficulty === 'medium' ? 76 : 64;
+      executeStrike(sx, angleDeg, aiPow, 'opponent', true);
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, [activePlayerId, aiDifficulty, currentRoom, executeStrike, isSimulating, turn]);
 
   const getBoardCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -1381,7 +1456,7 @@ export const CarromBoard: React.FC<CarromBoardProps> = ({
                     (turn === 'player'
                       ? currentRoom.players[0]?.name
                       : currentRoom.players[1]?.name) || 'Opponent'
-                  }'s Turn...`
+                  }'s turn...`
                 : 'Strike Striker'}
             </span>
           </button>

@@ -323,6 +323,65 @@ function sanitizeStats(stats?: Partial<UserProfile['stats']>): UserProfile['stat
   };
 }
 
+const DEFAULT_AVATAR_PATH = '/assets/aistudio/image_e64e54f2.png';
+
+function pickPreferredAvatar(primary?: unknown, secondary?: unknown): string {
+  const a = typeof primary === 'string' && primary.trim() ? primary.trim() : '';
+  const b = typeof secondary === 'string' && secondary.trim() ? secondary.trim() : '';
+  if (a && a !== DEFAULT_AVATAR_PATH) return a;
+  if (b && b !== DEFAULT_AVATAR_PATH) return b;
+  return a || b || DEFAULT_AVATAR_PATH;
+}
+
+function mergeProfileDocs(
+  profileDoc: Record<string, any> | null,
+  userDoc: Record<string, any> | null,
+  fallbackId?: string
+): Record<string, any> {
+  const p = profileDoc || {};
+  const u = userDoc || {};
+  const mergedId = String(p.id || u.id || fallbackId || '');
+  const mergedStats = {
+    ...(u.stats && typeof u.stats === 'object' ? u.stats : {}),
+    ...(p.stats && typeof p.stats === 'object' ? p.stats : {}),
+  };
+  if (mergedStats.rewardPoints === undefined) {
+    const rawPts = p.points ?? u.points ?? p.rewardPoints ?? u.rewardPoints;
+    if (typeof rawPts === 'number' && Number.isFinite(rawPts)) {
+      mergedStats.rewardPoints = rawPts;
+    }
+  }
+  if (mergedStats.friendsCount === undefined) {
+    if (Array.isArray(u.friends)) mergedStats.friendsCount = u.friends.length;
+    else if (Array.isArray(p.friends)) mergedStats.friendsCount = p.friends.length;
+  }
+  const mergedAvatar = pickPreferredAvatar(
+    p.avatarUrl || p.avatar,
+    u.avatarUrl || u.avatar
+  );
+  const mergedCover =
+    (typeof u.coverUrl === 'string' && u.coverUrl) ||
+    (typeof u.coverPhoto === 'string' && u.coverPhoto) ||
+    (typeof p.coverUrl === 'string' && p.coverUrl) ||
+    (typeof p.coverPhoto === 'string' && p.coverPhoto) ||
+    '';
+
+  return {
+    ...u,
+    ...p,
+    id: mergedId,
+    fullName: p.fullName || p.name || u.fullName || u.name || 'JIT Member',
+    contactNumber: p.contactNumber || u.contactNumber || '',
+    bio: typeof p.bio === 'string' && p.bio ? p.bio : typeof u.bio === 'string' ? u.bio : '',
+    address: p.address || u.address || '',
+    avatarUrl: mergedAvatar,
+    ...(mergedCover ? { coverUrl: mergedCover } : {}),
+    stats: mergedStats,
+    lastDailyClaimAt:
+      Math.max(Number(p.lastDailyClaimAt || 0), Number(u.lastDailyClaimAt || 0)) || undefined,
+  };
+}
+
 function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
   const lastLoginIso =
     (data.lastActiveAt && typeof data.lastActiveAt.toDate === 'function'
@@ -333,14 +392,36 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     data.joinedAt ||
     new Date().toISOString();
 
-  const fullName = String(data.fullName || 'JIT Member');
+  const fullName = String(data.fullName || data.name || 'JIT Member');
   const contactNumber = String(data.contactNumber || '');
+  const rawAvatar =
+    typeof data.avatarUrl === 'string' && data.avatarUrl.length > 0
+      ? data.avatarUrl
+      : typeof data.avatar === 'string' && data.avatar.length > 0
+      ? data.avatar
+      : DEFAULT_AVATAR_PATH;
+  const rawCover =
+    typeof data.coverUrl === 'string' && data.coverUrl.length > 0
+      ? data.coverUrl
+      : typeof data.coverPhoto === 'string' && data.coverPhoto.length > 0
+      ? data.coverPhoto
+      : undefined;
   const lastDailyClaimAt =
     typeof data.lastDailyClaimAt === 'number' &&
     Number.isFinite(data.lastDailyClaimAt) &&
     data.lastDailyClaimAt > 0
       ? data.lastDailyClaimAt
       : undefined;
+
+  const rawStats = {
+    ...(data.stats && typeof data.stats === 'object' ? data.stats : {}),
+  };
+  if (rawStats.rewardPoints === undefined && typeof data.points === 'number') {
+    rawStats.rewardPoints = data.points;
+  }
+  if (rawStats.friendsCount === undefined && Array.isArray(data.friends)) {
+    rawStats.friendsCount = data.friends.length;
+  }
 
   return {
     id: String(data.id),
@@ -349,11 +430,8 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     username: deriveUsername(fullName, contactNumber, typeof data.username === 'string' ? data.username : undefined),
     address: String(data.address || ''),
     bio: typeof data.bio === 'string' ? data.bio : '',
-    avatarUrl:
-      typeof data.avatarUrl === 'string' && data.avatarUrl.length > 0
-        ? data.avatarUrl
-        : '/assets/aistudio/image_e64e54f2.png',
-    coverUrl: typeof data.coverUrl === 'string' && data.coverUrl.length > 0 ? data.coverUrl : undefined,
+    avatarUrl: rawAvatar,
+    coverUrl: rawCover,
     joinedAt: String(data.joinedAt || lastLoginIso),
     lastLoginAt: String(data.lastLoginAt || lastLoginIso),
     lastLogin: String(data.lastLogin || data.lastLoginAt || lastLoginIso),
@@ -363,7 +441,7 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     suspendedReason: typeof data.suspendedReason === 'string' && data.suspendedReason ? data.suspendedReason : undefined,
     suspendedAt: typeof data.suspendedAt === 'string' && data.suspendedAt ? data.suspendedAt : undefined,
     ...(lastDailyClaimAt ? { lastDailyClaimAt } : {}),
-    stats: sanitizeStats(data.stats),
+    stats: sanitizeStats(rawStats),
   };
 }
 
@@ -418,6 +496,7 @@ export async function lookupCloudProfileByPhone(
   }
 
   let profileData: Record<string, any> | null = null;
+  let userData: Record<string, any> | null = null;
   let profileId: string | null = null;
 
   // 1. Primary fast lookup via phone_index (checking canonical 10-digit key + legacy raw digit keys)
@@ -437,92 +516,118 @@ export async function lookupCloudProfileByPhone(
         return { found: false, expired: true };
       }
 
-      const profileSnap = await fetchDocServerFirst([COL.profiles, pid]);
-      if (profileSnap.exists()) {
-        const candidateData = profileSnap.data();
-        if (candidateData.status !== 'deleted') {
-          profileId = pid;
-          profileData = candidateData;
-          break;
-        }
+      const [profileSnap, userSnap] = await Promise.all([
+        fetchDocServerFirst([COL.profiles, pid]).catch(() => null),
+        fetchDocServerFirst([COL.users, pid]).catch(() => null),
+      ]);
+      const candidateProfile = profileSnap && profileSnap.exists() ? profileSnap.data() : null;
+      const candidateUser = userSnap && userSnap.exists() ? userSnap.data() : null;
+      if (
+        (candidateProfile && candidateProfile.status !== 'deleted') ||
+        (candidateUser && candidateUser.status !== 'deleted')
+      ) {
+        profileId = pid;
+        profileData = candidateProfile && candidateProfile.status !== 'deleted' ? candidateProfile : null;
+        userData = candidateUser && candidateUser.status !== 'deleted' ? candidateUser : null;
+        break;
       }
     } catch {
       // Continue to next key / fallback query
     }
   }
 
-  // 2. Fallback query across profiles collection in case phone_index entry is missing or stale
-  if (!profileData) {
-    try {
-      const keyQ = query(collection(db, COL.profiles), where('phoneKey', '==', phoneKey), limit(10));
-      let keySnap;
+  // 2. Fallback query across both jitgroup_users and jitgroup_profiles
+  if (!profileData && !userData) {
+    for (const colName of [COL.users, COL.profiles]) {
       try {
-        keySnap = await getDocsFromServer(keyQ);
-      } catch {
-        keySnap = await getDocs(keyQ);
-      }
-      for (const d of keySnap.docs) {
-        const data = d.data();
-        if (data && data.status !== 'deleted') {
-          profileId = String(data.id || d.id);
-          profileData = data;
-          break;
+        const keyQ = query(collection(db, colName), where('phoneKey', '==', phoneKey), limit(10));
+        let keySnap;
+        try {
+          keySnap = await getDocsFromServer(keyQ);
+        } catch {
+          keySnap = await getDocs(keyQ);
         }
+        for (const d of keySnap.docs) {
+          const data = d.data();
+          if (data && data.status !== 'deleted') {
+            profileId = String(data.id || d.id);
+            if (colName === COL.users) userData = data;
+            else profileData = data;
+            break;
+          }
+        }
+        if (profileId) break;
+      } catch {
+        // Fallback to bounded scan below
       }
-    } catch {
-      // Fallback to bounded scan below
     }
   }
 
-  if (!profileData) {
-    try {
-      const scanQ = query(collection(db, COL.profiles), limit(350));
-      let scanSnap;
+  if (!profileData && !userData) {
+    for (const colName of [COL.users, COL.profiles]) {
       try {
-        scanSnap = await getDocsFromServer(scanQ);
-      } catch {
-        scanSnap = await getDocs(scanQ);
-      }
-      for (const d of scanSnap.docs) {
-        const data = d.data();
-        if (!data || data.status === 'deleted') continue;
-        const storedKey = normalizePhone10(String(data.phoneKey || data.contactNumber || ''));
-        if (storedKey && storedKey === phoneKey) {
-          profileId = String(data.id || d.id);
-          profileData = data;
-          break;
+        const scanQ = query(collection(db, colName), limit(350));
+        let scanSnap;
+        try {
+          scanSnap = await getDocsFromServer(scanQ);
+        } catch {
+          scanSnap = await getDocs(scanQ);
         }
+        for (const d of scanSnap.docs) {
+          const data = d.data();
+          if (!data || data.status === 'deleted') continue;
+          const storedKey = normalizePhone10(String(data.phoneKey || data.contactNumber || ''));
+          if (storedKey && storedKey === phoneKey) {
+            profileId = String(data.id || d.id);
+            if (colName === COL.users) userData = data;
+            else profileData = data;
+            break;
+          }
+        }
+        if (profileId) break;
+      } catch {
+        // Non-fatal fallback
       }
-    } catch {
-      // Non-fatal fallback
     }
   }
 
-  if (!profileData || !profileId) {
+  if ((!profileData && !userData) || !profileId) {
     return { found: false };
   }
 
+  // Ensure both docs are fetched & merged so photos/bio/points from either collection are loaded
+  if (!profileData) {
+    try {
+      const profileSnap = await fetchDocServerFirst([COL.profiles, profileId]);
+      if (profileSnap.exists() && profileSnap.data()?.status !== 'deleted') {
+        profileData = profileSnap.data();
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (!userData) {
+    try {
+      const userSnap = await fetchDocServerFirst([COL.users, profileId]);
+      if (userSnap.exists() && userSnap.data()?.status !== 'deleted') {
+        userData = userSnap.data();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const mergedDoc = mergeProfileDocs(profileData, userData, profileId);
+
   if (
     profileId !== 'usr_jit_primary_001' &&
-    isCloudTimestampExpired(profileData.lastActiveAt, profileData.lastLoginAt || profileData.lastLogin)
+    isCloudTimestampExpired(mergedDoc.lastActiveAt, mergedDoc.lastLoginAt || mergedDoc.lastLogin)
   ) {
     await cleanupExpiredCloudProfile(phoneKey, profileId);
     return { found: false, expired: true };
   }
 
-  const profile = firestoreDocToUserProfile(profileData);
-  try {
-    const userSnap = await fetchDocServerFirst([COL.users, profileId]);
-    if (userSnap.exists()) {
-      const userClaimAt = Number(userSnap.data()?.lastDailyClaimAt || 0);
-      if (Number.isFinite(userClaimAt) && userClaimAt > (profile.lastDailyClaimAt || 0)) {
-        profile.lastDailyClaimAt = userClaimAt;
-      }
-    }
-  } catch {
-    // Non-fatal if users alias doc does not exist yet
-  }
-
+  const profile = firestoreDocToUserProfile(mergedDoc);
   return {
     found: true,
     profile,
@@ -530,7 +635,8 @@ export async function lookupCloudProfileByPhone(
 }
 
 /**
- * Looks up a profile by phone in Firestore and refreshes its lastLogin timestamp.
+ * Strictly READ-ONLY login lookup by normalized 10-digit phone in Firestore.
+ * Loads all existing profile fields and photos without ever overwriting the document.
  */
 export async function loginCloudProfileByPhone(
   contactNumber: string
@@ -548,65 +654,16 @@ export async function loginCloudProfileByPhone(
       suspendedReason: profile.suspendedReason || 'Suspended by administrator.',
     };
   }
-  const phoneKey = toCanonicalPhoneKey(profile.contactNumber || contactNumber);
-  const nowIso = new Date().toISOString();
-
-  try {
-    const batch = writeBatch(db);
-    batch.set(
-      doc(db, COL.profiles, profile.id),
-      {
-        phoneKey,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    batch.set(
-      doc(db, COL.users, profile.id),
-      {
-        id: profile.id,
-        phoneKey,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    if (phoneKey && phoneKey.length >= 7) {
-      batch.set(
-        doc(db, COL.phoneIndex, phoneKey),
-        {
-          profileId: profile.id,
-          lastLoginAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-    }
-    batch.set(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(profile));
-    await batch.commit();
-    invalidateDirectoryCache();
-  } catch (err: any) {
-    if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.UPDATE, `profiles/${profile.id}`);
-    }
-    console.warn('loginCloudProfileByPhone timestamp refresh notice:', err);
-  }
 
   return {
     success: true,
-    profile: {
-      ...profile,
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-    },
+    profile,
   };
 }
 
 /**
  * Creates a brand new profile in Firestore (atomic profile + phone_index batch),
- * OR recognizes an existing active profile without wiping its points/stats.
+ * OR recognizes an existing active profile strictly WITHOUT overwriting its stored fields/photos.
  */
 export async function registerOrRecognizeCloudProfile(
   contactNumber: string,
@@ -619,69 +676,11 @@ export async function registerOrRecognizeCloudProfile(
 
   const existing = await lookupCloudProfileByPhone(contactNumber);
   if (existing.found && existing.profile) {
-    const prev = existing.profile;
-    const cleanName = fullName.trim().slice(0, 120) || prev.fullName;
-    const cleanAddr = address.trim().slice(0, 300) || prev.address;
-
-    const mergedExisting: UserProfile = {
-      ...prev,
-      fullName: cleanName,
-      address: cleanAddr,
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-    };
-
-    try {
-      const batch = writeBatch(db);
-      batch.set(
-        doc(db, COL.profiles, prev.id),
-        {
-          phoneKey,
-          fullName: cleanName,
-          address: cleanAddr,
-          lastLoginAt: nowIso,
-          lastLogin: nowIso,
-          lastActiveAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-      batch.set(
-        doc(db, COL.users, prev.id),
-        {
-          id: prev.id,
-          phoneKey,
-          fullName: cleanName,
-          address: cleanAddr,
-          lastLoginAt: nowIso,
-          lastLogin: nowIso,
-          lastActiveAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-      if (phoneKey && phoneKey.length >= 7) {
-        batch.set(
-          doc(db, COL.phoneIndex, phoneKey),
-          {
-            profileId: prev.id,
-            lastLoginAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
-      }
-      batch.set(doc(db, COL.userDirectory, prev.id), buildUserDirectoryPayload(mergedExisting));
-      await batch.commit();
-      invalidateDirectoryCache();
-    } catch (err: any) {
-      if (err?.code === 'permission-denied') {
-        handleFirestoreError(err, OperationType.UPDATE, `profiles/${prev.id}`);
-      }
-      throw err;
-    }
-
+    // Strictly preserve all existing Firestore data (avatar, coverPhoto, name, bio, points, etc.)
     return {
       success: true,
       isExisting: true,
-      profile: mergedExisting,
+      profile: existing.profile,
     };
   }
 
@@ -719,10 +718,12 @@ export async function registerOrRecognizeCloudProfile(
     contactNumber: newProfile.contactNumber,
     phoneKey,
     fullName: newProfile.fullName,
+    name: newProfile.fullName,
     username: derivedUsername,
     address: newProfile.address,
     bio: newProfile.bio || '',
     avatarUrl: newProfile.avatarUrl,
+    avatar: newProfile.avatarUrl,
     joinedAt: newProfile.joinedAt,
     lastLoginAt: newProfile.lastLoginAt,
     lastLogin: newProfile.lastLogin,
@@ -734,17 +735,22 @@ export async function registerOrRecognizeCloudProfile(
   };
   if (newProfile.coverUrl) {
     firestoreProfileDoc.coverUrl = newProfile.coverUrl;
+    firestoreProfileDoc.coverPhoto = newProfile.coverUrl;
   }
 
   try {
     const batch = writeBatch(db);
-    batch.set(doc(db, COL.profiles, newProfile.id), firestoreProfileDoc);
+    batch.set(doc(db, COL.profiles, newProfile.id), firestoreProfileDoc, { merge: true });
     batch.set(doc(db, COL.users, newProfile.id), firestoreProfileDoc, { merge: true });
-    batch.set(doc(db, COL.phoneIndex, phoneKey), {
-      profileId: newProfile.id,
-      createdAt: serverTimestamp(),
-      lastLoginAt: serverTimestamp(),
-    });
+    batch.set(
+      doc(db, COL.phoneIndex, phoneKey),
+      {
+        profileId: newProfile.id,
+        createdAt: serverTimestamp(),
+        lastLoginAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
     batch.set(doc(db, COL.leaderboard, newProfile.id), {
       profileId: newProfile.id,
       fullName: newProfile.fullName,
@@ -772,7 +778,8 @@ export async function registerOrRecognizeCloudProfile(
 }
 
 /**
- * Updates profile fields or stats in Firestore while keeping lastActiveAt refreshed.
+ * Persists profile updates (including Base64 JPEG avatar/cover photos) directly to
+ * `jitgroup_users` and `jitgroup_profiles` using `set(..., { merge: true })`.
  */
 export async function updateCloudProfile(
   profile: UserProfile,
@@ -783,19 +790,8 @@ export async function updateCloudProfile(
 
   const nowIso = new Date().toISOString();
   const profileRef = doc(db, COL.profiles, profile.id);
+  const userRef = doc(db, COL.users, profile.id);
   const indexRef = doc(db, COL.phoneIndex, phoneKey);
-
-  // Ensure document exists first; if not, seed it atomically
-  const existingSnap = await fetchDocServerFirst([COL.profiles, profile.id]);
-  if (!existingSnap.exists()) {
-    await registerOrRecognizeCloudProfile(
-      profile.contactNumber,
-      profile.fullName,
-      profile.address,
-      profile
-    );
-    return;
-  }
 
   const detailKeys = [
     'fullName',
@@ -817,78 +813,79 @@ export async function updateCloudProfile(
   }
 
   try {
-    if (hasDetailUpdates) {
-      const detailPatch: Record<string, any> = {
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      };
-      if (updates.fullName !== undefined) detailPatch.fullName = updates.fullName.trim().slice(0, 120);
-      if (updates.username !== undefined) {
-        detailPatch.username = deriveUsername(
-          updates.fullName || profile.fullName,
-          profile.contactNumber,
-          updates.username
-        );
-      }
-      if (updates.bio !== undefined) detailPatch.bio = updates.bio.slice(0, 500);
-      if (updates.address !== undefined) detailPatch.address = updates.address.trim().slice(0, 300);
-      if (updates.avatarUrl !== undefined) detailPatch.avatarUrl = sanitizeAvatarUrl(updates.avatarUrl);
-      if (updates.coverUrl !== undefined) {
-        if (updates.coverUrl === '') {
-          detailPatch.coverUrl = '';
-        } else if (updates.coverUrl.length <= 395000) {
-          detailPatch.coverUrl = updates.coverUrl;
-        }
-      }
-      if (updates.isContactNumberPublic !== undefined) {
-        detailPatch.isContactNumberPublic = Boolean(updates.isContactNumberPublic);
-      }
-      if (updates.isAddressPublic !== undefined) {
-        detailPatch.isAddressPublic = Boolean(updates.isAddressPublic);
-      }
+    const patch: Record<string, any> = {
+      id: profile.id,
+      contactNumber: profile.contactNumber,
+      phoneKey,
+      lastLoginAt: nowIso,
+      lastLogin: nowIso,
+      lastActiveAt: serverTimestamp(),
+    };
 
-      const mergedProfile: UserProfile = {
-        ...profile,
-        ...updates,
-        ...(detailPatch.username ? { username: detailPatch.username } : {}),
-        stats: sanitizeStats(updates.stats || profile.stats),
-      };
-      const batch = writeBatch(db);
-      batch.update(profileRef, detailPatch);
-      batch.set(doc(db, COL.users, profile.id), { id: profile.id, ...detailPatch }, { merge: true });
-      batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
-      batch.set(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
-      await batch.commit();
-      invalidateDirectoryCache();
+    if (updates.fullName !== undefined) {
+      const cleanName = updates.fullName.trim().slice(0, 120);
+      patch.fullName = cleanName;
+      patch.name = cleanName;
+    }
+    if (updates.username !== undefined) {
+      patch.username = deriveUsername(
+        updates.fullName || profile.fullName,
+        profile.contactNumber,
+        updates.username
+      );
+    }
+    if (updates.bio !== undefined) patch.bio = updates.bio.slice(0, 500);
+    if (updates.address !== undefined) patch.address = updates.address.trim().slice(0, 300);
+    if (updates.avatarUrl !== undefined) {
+      const cleanAvatar = sanitizeAvatarUrl(updates.avatarUrl);
+      patch.avatarUrl = cleanAvatar;
+      patch.avatar = cleanAvatar;
+    }
+    if (updates.coverUrl !== undefined) {
+      if (updates.coverUrl === '') {
+        patch.coverUrl = '';
+        patch.coverPhoto = '';
+      } else if (updates.coverUrl.length <= 395000) {
+        patch.coverUrl = updates.coverUrl;
+        patch.coverPhoto = updates.coverUrl;
+      }
+    }
+    if (updates.isContactNumberPublic !== undefined) {
+      patch.isContactNumberPublic = Boolean(updates.isContactNumberPublic);
+    }
+    if (updates.isAddressPublic !== undefined) {
+      patch.isAddressPublic = Boolean(updates.isAddressPublic);
+    }
+    if (hasStatsUpdate) {
+      patch.stats = sanitizeStats(updates.stats || profile.stats);
+    }
+    if (hasClaimUpdate) {
+      patch.lastDailyClaimAt = updates.lastDailyClaimAt;
     }
 
-    if (hasStatsUpdate || hasClaimUpdate) {
-      const mergedStats = sanitizeStats(updates.stats || profile.stats);
-      const mergedProfile: UserProfile = {
-        ...profile,
-        ...updates,
-        stats: mergedStats,
-      };
-      const statsPatch: Record<string, any> = {
-        stats: mergedStats,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      };
-      if (hasClaimUpdate) {
-        statsPatch.lastDailyClaimAt = updates.lastDailyClaimAt;
-      }
-      const batch = writeBatch(db);
-      batch.update(profileRef, statsPatch);
-      batch.set(doc(db, COL.users, profile.id), { id: profile.id, ...statsPatch }, { merge: true });
-      batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
-      batch.set(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
-      await batch.commit();
+    const mergedProfile: UserProfile = {
+      ...profile,
+      ...updates,
+      ...(patch.username ? { username: patch.username } : {}),
+      stats: sanitizeStats(updates.stats || profile.stats),
+    };
+
+    const batch = writeBatch(db);
+    batch.set(profileRef, patch, { merge: true });
+    batch.set(userRef, patch, { merge: true });
+    batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
+    batch.set(
+      doc(db, COL.userDirectory, profile.id),
+      buildUserDirectoryPayload(mergedProfile),
+      { merge: true }
+    );
+    await batch.commit();
+    if (hasDetailUpdates) {
+      invalidateDirectoryCache();
     }
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.UPDATE, `profiles/${profile.id}`);
+      handleFirestoreError(err, OperationType.UPDATE, `users/${profile.id}`);
     }
     console.warn('Firestore updateCloudProfile notice:', err);
   }
@@ -1604,9 +1601,19 @@ function directoryDocToUserProfile(data: Record<string, any>): UserProfile {
 export async function getCloudProfileById(profileId: string): Promise<UserProfile | null> {
   if (!profileId || profileId.length < 8) return null;
   try {
-    const snap = await fetchDocServerFirst([COL.profiles, profileId]);
-    if (snap.exists()) {
-      const profile = firestoreDocToUserProfile(snap.data());
+    const [profileSnap, userSnap] = await Promise.all([
+      fetchDocServerFirst([COL.profiles, profileId]).catch(() => null),
+      fetchDocServerFirst([COL.users, profileId]).catch(() => null),
+    ]);
+    const pData = profileSnap && profileSnap.exists() ? profileSnap.data() : null;
+    const uData = userSnap && userSnap.exists() ? userSnap.data() : null;
+    if ((pData && pData.status !== 'deleted') || (uData && uData.status !== 'deleted')) {
+      const merged = mergeProfileDocs(
+        pData && pData.status !== 'deleted' ? pData : null,
+        uData && uData.status !== 'deleted' ? uData : null,
+        profileId
+      );
+      const profile = firestoreDocToUserProfile(merged);
       if (profile.status !== 'deleted') return profile;
     }
   } catch {
@@ -1632,33 +1639,30 @@ export function subscribeToCloudProfile(
   }
   const profileRef = doc(db, COL.profiles, profileId);
   const userRef = doc(db, COL.users, profileId);
-  let latestProfile: UserProfile | null = null;
-  let latestUserClaimAt = 0;
+  let latestProfileDoc: Record<string, any> | null = null;
+  let latestUserDoc: Record<string, any> | null = null;
+  let profileResolved = false;
+  let userResolved = false;
 
-  const emitMerged = (exists: boolean) => {
-    if (!exists || !latestProfile) {
-      onProfile(null, false);
+  const emitMerged = () => {
+    const hasProfile = Boolean(latestProfileDoc);
+    const hasUser = Boolean(latestUserDoc);
+    if (!hasProfile && !hasUser) {
+      if (profileResolved && userResolved) {
+        onProfile(null, false);
+      }
       return;
     }
-    const mergedClaimAt = Math.max(latestProfile.lastDailyClaimAt || 0, latestUserClaimAt);
-    onProfile(
-      mergedClaimAt > 0
-        ? { ...latestProfile, lastDailyClaimAt: mergedClaimAt }
-        : latestProfile,
-      true
-    );
+    const mergedDoc = mergeProfileDocs(latestProfileDoc, latestUserDoc, profileId);
+    onProfile(firestoreDocToUserProfile(mergedDoc), true);
   };
 
   const unsubProfile = onSnapshot(
     profileRef,
     (snap) => {
-      if (!snap.exists()) {
-        latestProfile = null;
-        emitMerged(false);
-        return;
-      }
-      latestProfile = firestoreDocToUserProfile(snap.data());
-      emitMerged(true);
+      profileResolved = true;
+      latestProfileDoc = snap.exists() ? snap.data() : null;
+      emitMerged();
     },
     (err) => {
       console.warn('subscribeToCloudProfile notice:', err);
@@ -1668,14 +1672,9 @@ export function subscribeToCloudProfile(
   const unsubUser = onSnapshot(
     userRef,
     (snap) => {
-      if (!snap.exists()) return;
-      const claimAt = Number(snap.data()?.lastDailyClaimAt || 0);
-      if (Number.isFinite(claimAt) && claimAt > 0) {
-        latestUserClaimAt = Math.max(latestUserClaimAt, claimAt);
-        if (latestProfile) {
-          emitMerged(true);
-        }
-      }
+      userResolved = true;
+      latestUserDoc = snap.exists() ? snap.data() : null;
+      emitMerged();
     },
     () => {}
   );
@@ -2173,6 +2172,7 @@ function parseRoomSnapshotData(data: Record<string, any>): MultiplayerRoom {
     maxPlayers,
     isPublicMatch: Boolean(data.isPublicMatch),
     isOpenGroup,
+    isBotMatch: Boolean(data.isBotMatch),
     activeSeatLimit,
     players,
     waitingPlayers,
@@ -3907,6 +3907,148 @@ export async function quickMatchFirestoreRoom(
   }
 
   throw lastErr || new Error('Could not enter quick matchmaking queue. Please try again.');
+}
+
+/**
+ * Transitions an unmatched Random Play waiting room into an active Demo Profile opponent match
+ * stored cleanly inside Firestore `jitgroup_games/{roomCode}` with `isBotMatch: true`.
+ */
+export async function activateDemoOpponentInRoom(
+  roomCode: string,
+  gameId: string,
+  botPlayer: { id: string; name: string; avatar: string }
+): Promise<MultiplayerRoom | null> {
+  const cleanCode = normalizeRoomId(roomCode);
+  if (!cleanCode || !botPlayer?.id) return null;
+
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
+  const slotRef = doc(db, COL.matchmakingQueue, `slot_${gameId}`);
+  const cleanBotName = (botPlayer.name || 'Campus Player').slice(0, 80);
+  const cleanBotAvatar = sanitizeRoomAvatarUrl(botPlayer.avatar);
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef);
+      const slotSnap = await tx.get(slotRef);
+      if (!snap.exists()) return null;
+
+      const data = snap.data();
+      const parsed = parseRoomSnapshotData(data);
+      if (parsed.status !== 'waiting' || !isPlayer2Unassigned(data, parsed)) {
+        return parsed;
+      }
+
+      const hostPlayer = parsed.players[0];
+      const joinedPlayer1Id = hostPlayer?.id || parsed.player1Id || parsed.hostId;
+      const joinedPlayer1Name = hostPlayer?.name || parsed.player1Name || 'Player 1';
+      const joinedPlayer1AuthUid = hostPlayer?.authUid || parsed.player1AuthUid || null;
+      const botEntry: RoomPlayer = {
+        id: botPlayer.id,
+        name: cleanBotName,
+        avatar: cleanBotAvatar,
+        isHost: false,
+        isReady: true,
+        color: 'Yellow',
+        joinedAtMs: Date.now(),
+      };
+      const nextPlayers = [...parsed.players, botEntry];
+      const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const nextGameState = buildInitialGameStateForGame(gameId, startId, parsed.gameState || {});
+      const unifiedStart = buildUnifiedBoardAndMoveFields(nextGameState, 'GAME_START', joinedPlayer1Id);
+      const hostInfo: RoomParticipantInfo = {
+        id: joinedPlayer1Id,
+        name: joinedPlayer1Name,
+        symbol: 'X',
+        avatar: hostPlayer?.avatar || parsed.host?.avatar || '',
+      };
+      const guestInfo: RoomParticipantInfo = {
+        id: botPlayer.id,
+        name: cleanBotName,
+        symbol: 'O',
+        avatar: cleanBotAvatar,
+      };
+      const initialScores: Record<string, number> = {
+        [joinedPlayer1Id]: 0,
+        [botPlayer.id]: 0,
+      };
+
+      tx.update(roomRef, {
+        roomId: cleanCode,
+        gameType: gameId,
+        playersJson: JSON.stringify(nextPlayers),
+        host: hostInfo,
+        guest: guestInfo,
+        player1: joinedPlayer1Id,
+        player1Id: joinedPlayer1Id,
+        player1AuthUid: joinedPlayer1AuthUid,
+        player1Name: joinedPlayer1Name,
+        player2: botPlayer.id,
+        player2Id: botPlayer.id,
+        player2AuthUid: null,
+        player2Name: cleanBotName,
+        playerCount: nextPlayers.length,
+        hostId: parsed.hostId,
+        isPublicMatch: true,
+        isBotMatch: true,
+        scores: initialScores,
+        winnerId: null,
+        isDraw: false,
+        status: 'playing',
+        gameStateJson: JSON.stringify(nextGameState),
+        ...unifiedStart,
+        moveAction: 'GAME_START',
+        currentTurn: joinedPlayer1Id,
+        currentTurnUserId: joinedPlayer1Id,
+        lastUpdated: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      if (slotSnap.exists() && slotSnap.data().matchedRoomCode === cleanCode) {
+        tx.update(slotRef, {
+          status: 'matched',
+          matchedRoomCode: cleanCode,
+          matchedWithId: botPlayer.id,
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      return {
+        ...parsed,
+        roomCode: cleanCode,
+        roomId: cleanCode,
+        gameType: gameId,
+        host: hostInfo,
+        guest: guestInfo,
+        player1: joinedPlayer1Id,
+        player1Id: joinedPlayer1Id,
+        player1AuthUid: joinedPlayer1AuthUid,
+        player1Name: joinedPlayer1Name,
+        player2: botPlayer.id,
+        player2Id: botPlayer.id,
+        player2AuthUid: null,
+        player2Name: cleanBotName,
+        isPublicMatch: true,
+        isBotMatch: true,
+        scores: initialScores,
+        winnerId: null,
+        isDraw: false,
+        status: 'playing',
+        players: nextPlayers,
+        boardState: nextGameState,
+        gameState: nextGameState,
+        diceRoll: unifiedStart.diceRoll,
+        lastMove: unifiedStart.lastMove,
+        currentTurn: joinedPlayer1Id,
+        currentTurnUserId: joinedPlayer1Id,
+      };
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${cleanCode}`);
+    }
+    console.warn('activateDemoOpponentInRoom notice:', err);
+    return null;
+  }
 }
 
 function buildInitialGameStateForGame(

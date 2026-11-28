@@ -172,9 +172,9 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
   const awardedRoundRef = useRef<string | null>(null);
   const prevBoardJsonRef = useRef<string>('');
 
-  // Clear AI timers immediately if entering a room or changing mode
+  // Clear AI timers immediately if entering a non-bot room or changing mode
   useEffect(() => {
-    if (isMultiplayer && aiTimerRef.current !== null) {
+    if (isMultiplayer && !roomData?.isBotMatch && aiTimerRef.current !== null) {
       window.clearTimeout(aiTimerRef.current);
       aiTimerRef.current = null;
       setAiThinking(false);
@@ -185,7 +185,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
         aiTimerRef.current = null;
       }
     };
-  }, [gameMode, aiDifficulty, roomId, isMultiplayer]);
+  }, [gameMode, aiDifficulty, roomId, isMultiplayer, roomData?.isBotMatch]);
 
   // Real-Time Firestore Single-Source-of-Truth Subscription
   useEffect(() => {
@@ -322,6 +322,102 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       });
     }
   }, [isMultiplayer, roomId, roomData, winner, boardState, mySymbol, gameMode, onAwardMatch]);
+
+  // Automated 1.5-second Demo Challenger O move in Random Play `isBotMatch` rooms
+  useEffect(() => {
+    if (
+      !isMultiplayer ||
+      !roomId ||
+      !roomData?.isBotMatch ||
+      !isPlayer1 ||
+      !p1Id ||
+      !p2Id.startsWith('bot_demo_') ||
+      winner ||
+      roomStatus === 'finished' ||
+      roomStatus === 'waiting' ||
+      resolvedTurnUserId !== p2Id
+    ) {
+      return;
+    }
+
+    const timer = window.setTimeout(async () => {
+      if (isWritingRef.current) return;
+      const moveIdx = getTicTacToeAIMove(boardState, aiDifficulty);
+      if (moveIdx === -1 || boardState[moveIdx]) return;
+
+      const nextBoard = [...boardState];
+      nextBoard[moveIdx] = 'O';
+      const { winner: nextWinner } = checkTicTacToeWinner(nextBoard);
+      const nextPairScores =
+        nextWinner === 'X' || nextWinner === 'O'
+          ? { ...scores, [nextWinner]: scores[nextWinner] + 1 }
+          : scores;
+      const nextUserScores: Record<string, number> = {
+        [p1Id]: nextPairScores.X,
+        [p2Id]: nextPairScores.O,
+      };
+      const nextWinnerId =
+        nextWinner === 'X' ? p1Id : nextWinner === 'O' ? p2Id : null;
+      const nextIsDraw = nextWinner === 'draw';
+      const nextTurn = nextWinner ? (nextWinnerId || '') : p1Id;
+
+      soundFx.playMove();
+      isWritingRef.current = true;
+      try {
+        const roomRef = doc(db, COL.gameRooms, roomId);
+        await updateDoc(roomRef, {
+          boardState: {
+            board: nextBoard,
+            scores: nextPairScores,
+            result: nextWinner || null,
+          },
+          gameStateJson: JSON.stringify({
+            board: nextBoard,
+            scores: nextPairScores,
+            byPlayerId: p2Id,
+          }),
+          currentTurn: nextTurn,
+          currentTurnUserId: nextTurn,
+          scores: nextUserScores,
+          winnerId: nextWinnerId,
+          isDraw: nextIsDraw,
+          status: nextWinner ? 'finished' : 'playing',
+          moveAction: 'TTT_MOVE',
+          lastMove: {
+            action: 'TTT_MOVE',
+            byPlayerId: p2Id,
+            byAuthUid: auth.currentUser?.uid || null,
+            summary: `O -> cell ${moveIdx + 1}`,
+            timestampMs: Date.now(),
+          },
+          lastUpdated: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          handleFirestoreError(err, OperationType.UPDATE, `gameRooms/${roomId}`);
+        }
+        console.warn('TicTacToe bot move failed:', err);
+      } finally {
+        isWritingRef.current = false;
+      }
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    aiDifficulty,
+    boardState,
+    isMultiplayer,
+    isPlayer1,
+    p1Id,
+    p2Id,
+    resolvedTurnUserId,
+    roomData?.isBotMatch,
+    roomId,
+    roomStatus,
+    scores,
+    winner,
+  ]);
 
   const resultMessage = useMemo(() => {
     if (!winner) return null;
@@ -635,7 +731,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
               ? 'Waiting...'
               : isMyMultiplayerTurn
               ? `Your Turn (${mySymbol})`
-              : `${isXTurn ? hostDisplayName.split(' ')[0] : guestDisplayName.split(' ')[0]}'s Turn`
+              : `Waiting for ${isXTurn ? hostDisplayName.split(' ')[0] : guestDisplayName.split(' ')[0]}'s turn...`
             : isXTurn
             ? 'X Turn'
             : 'O Turn'}

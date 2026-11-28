@@ -82,7 +82,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
             Searching for Player...
           </h4>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 max-w-xs">
-            Pairing you automatically into a shared live room as soon as the next online player joins.
+            Pairing you automatically into a shared live room, or matching an active Demo Challenger if no online player joins within {Math.max(0, 5 - elapsedSeconds)}s.
           </p>
 
           <div className="mt-4 flex items-center gap-3">

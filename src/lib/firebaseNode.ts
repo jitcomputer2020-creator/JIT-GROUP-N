@@ -165,6 +165,67 @@ function buildUserDirectoryPayload(profile: UserProfile): Record<string, any> {
   };
 }
 
+const DEFAULT_AVATAR_PATH = '/assets/aistudio/image_e64e54f2.png';
+
+function pickPreferredAvatar(primary?: unknown, secondary?: unknown): string {
+  const a = typeof primary === 'string' && primary.trim() ? primary.trim() : '';
+  const b = typeof secondary === 'string' && secondary.trim() ? secondary.trim() : '';
+  if (a && a !== DEFAULT_AVATAR_PATH) return a;
+  if (b && b !== DEFAULT_AVATAR_PATH) return b;
+  return a || b || DEFAULT_AVATAR_PATH;
+}
+
+function mergeProfileDocs(
+  profileDoc: Record<string, any> | null,
+  userDoc: Record<string, any> | null,
+  fallbackId?: string
+): Record<string, any> {
+  const p = profileDoc || {};
+  const u = userDoc || {};
+  const mergedId = String(p.id || u.id || fallbackId || '');
+  const mergedStats = {
+    ...(u.stats && typeof u.stats === 'object' ? u.stats : {}),
+    ...(p.stats && typeof p.stats === 'object' ? p.stats : {}),
+  };
+  if (mergedStats.rewardPoints === undefined) {
+    const rawPts = p.points ?? u.points ?? p.rewardPoints ?? u.rewardPoints;
+    if (typeof rawPts === 'number' && Number.isFinite(rawPts)) {
+      mergedStats.rewardPoints = rawPts;
+    }
+  }
+  if (mergedStats.friendsCount === undefined) {
+    if (Array.isArray(u.friends)) mergedStats.friendsCount = u.friends.length;
+    else if (Array.isArray(p.friends)) mergedStats.friendsCount = p.friends.length;
+  }
+  const mergedAvatar = pickPreferredAvatar(
+    p.avatarUrl || p.avatar,
+    u.avatarUrl || u.avatar
+  );
+  const mergedCover =
+    (typeof u.coverUrl === 'string' && u.coverUrl) ||
+    (typeof u.coverPhoto === 'string' && u.coverPhoto) ||
+    (typeof p.coverUrl === 'string' && p.coverUrl) ||
+    (typeof p.coverPhoto === 'string' && p.coverPhoto) ||
+    '';
+
+  return {
+    ...u,
+    ...p,
+    id: mergedId,
+    fullName: p.fullName || p.name || u.fullName || u.name || 'JIT Member',
+    contactNumber: p.contactNumber || u.contactNumber || '',
+    bio: typeof p.bio === 'string' && p.bio ? p.bio : typeof u.bio === 'string' ? u.bio : '',
+    address: p.address || u.address || '',
+    avatarUrl: mergedAvatar,
+    ...(mergedCover ? { coverUrl: mergedCover } : {}),
+    stats: mergedStats,
+    lastDailyClaimAt: Math.max(
+      Number(p.lastDailyClaimAt || 0),
+      Number(u.lastDailyClaimAt || 0)
+    ) || undefined,
+  };
+}
+
 function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
   const lastLoginIso =
     (data.lastActiveAt && typeof data.lastActiveAt.toDate === 'function'
@@ -175,14 +236,36 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     data.joinedAt ||
     new Date().toISOString();
 
-  const fullName = String(data.fullName || 'JIT Member');
+  const fullName = String(data.fullName || data.name || 'JIT Member');
   const contactNumber = String(data.contactNumber || '');
+  const rawAvatar =
+    typeof data.avatarUrl === 'string' && data.avatarUrl.length > 0
+      ? data.avatarUrl
+      : typeof data.avatar === 'string' && data.avatar.length > 0
+      ? data.avatar
+      : DEFAULT_AVATAR_PATH;
+  const rawCover =
+    typeof data.coverUrl === 'string' && data.coverUrl.length > 0
+      ? data.coverUrl
+      : typeof data.coverPhoto === 'string' && data.coverPhoto.length > 0
+      ? data.coverPhoto
+      : undefined;
   const lastDailyClaimAt =
     typeof data.lastDailyClaimAt === 'number' &&
     Number.isFinite(data.lastDailyClaimAt) &&
     data.lastDailyClaimAt > 0
       ? data.lastDailyClaimAt
       : undefined;
+
+  const rawStats = {
+    ...(data.stats && typeof data.stats === 'object' ? data.stats : {}),
+  };
+  if (rawStats.rewardPoints === undefined && typeof data.points === 'number') {
+    rawStats.rewardPoints = data.points;
+  }
+  if (rawStats.friendsCount === undefined && Array.isArray(data.friends)) {
+    rawStats.friendsCount = data.friends.length;
+  }
 
   return {
     id: String(data.id),
@@ -191,11 +274,8 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     username: deriveUsername(fullName, contactNumber, typeof data.username === 'string' ? data.username : undefined),
     address: String(data.address || ''),
     bio: typeof data.bio === 'string' ? data.bio : '',
-    avatarUrl:
-      typeof data.avatarUrl === 'string' && data.avatarUrl.length > 0
-        ? data.avatarUrl
-        : '/assets/aistudio/image_e64e54f2.png',
-    coverUrl: typeof data.coverUrl === 'string' && data.coverUrl.length > 0 ? data.coverUrl : undefined,
+    avatarUrl: rawAvatar,
+    coverUrl: rawCover,
     joinedAt: String(data.joinedAt || lastLoginIso),
     lastLoginAt: String(data.lastLoginAt || lastLoginIso),
     lastLogin: String(data.lastLogin || data.lastLoginAt || lastLoginIso),
@@ -205,7 +285,7 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
     suspendedReason: typeof data.suspendedReason === 'string' && data.suspendedReason ? data.suspendedReason : undefined,
     suspendedAt: typeof data.suspendedAt === 'string' && data.suspendedAt ? data.suspendedAt : undefined,
     ...(lastDailyClaimAt ? { lastDailyClaimAt } : {}),
-    stats: sanitizeStats(data.stats),
+    stats: sanitizeStats(rawStats),
   };
 }
 
@@ -236,6 +316,7 @@ export async function lookupCloudProfileByPhone(
   if (!phoneKey || phoneKey.length < 7) return { found: false };
 
   let profileData: Record<string, any> | null = null;
+  let userData: Record<string, any> | null = null;
   let profileId: string | null = null;
 
   const keysToTry = Array.from(
@@ -253,64 +334,93 @@ export async function lookupCloudProfileByPhone(
       return { found: false, expired: true };
     }
 
-    const profileSnap = await getDoc(doc(dbLite, COL.profiles, pid)).catch(() => null);
-    if (profileSnap && profileSnap.exists()) {
-      const candidate = profileSnap.data();
-      if (candidate.status !== 'deleted') {
-        profileId = pid;
-        profileData = candidate;
-        break;
+    const [profileSnap, userSnap] = await Promise.all([
+      getDoc(doc(dbLite, COL.profiles, pid)).catch(() => null),
+      getDoc(doc(dbLite, COL.users, pid)).catch(() => null),
+    ]);
+    const candidateProfile = profileSnap && profileSnap.exists() ? profileSnap.data() : null;
+    const candidateUser = userSnap && userSnap.exists() ? userSnap.data() : null;
+    if (
+      (candidateProfile && candidateProfile.status !== 'deleted') ||
+      (candidateUser && candidateUser.status !== 'deleted')
+    ) {
+      profileId = pid;
+      profileData = candidateProfile && candidateProfile.status !== 'deleted' ? candidateProfile : null;
+      userData = candidateUser && candidateUser.status !== 'deleted' ? candidateUser : null;
+      break;
+    }
+  }
+
+  if (!profileData && !userData) {
+    for (const colName of [COL.users, COL.profiles]) {
+      try {
+        const keySnap = await getDocs(
+          query(collection(dbLite, colName), where('phoneKey', '==', phoneKey), limit(10))
+        );
+        for (const d of keySnap.docs) {
+          const data = d.data();
+          if (data && data.status !== 'deleted') {
+            profileId = String(data.id || d.id);
+            if (colName === COL.users) userData = data;
+            else profileData = data;
+            break;
+          }
+        }
+        if (profileId) break;
+      } catch {
+        // Fallback to bounded scan
       }
     }
   }
+
+  if (!profileData && !userData) {
+    for (const colName of [COL.users, COL.profiles]) {
+      try {
+        const scanSnap = await getDocs(query(collection(dbLite, colName), limit(350)));
+        for (const d of scanSnap.docs) {
+          const data = d.data();
+          if (!data || data.status === 'deleted') continue;
+          const storedKey = normalizePhone10(String(data.phoneKey || data.contactNumber || ''));
+          if (storedKey && storedKey === phoneKey) {
+            profileId = String(data.id || d.id);
+            if (colName === COL.users) userData = data;
+            else profileData = data;
+            break;
+          }
+        }
+        if (profileId) break;
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if ((!profileData && !userData) || !profileId) return { found: false };
 
   if (!profileData) {
-    try {
-      const keySnap = await getDocs(
-        query(collection(dbLite, COL.profiles), where('phoneKey', '==', phoneKey), limit(10))
-      );
-      for (const d of keySnap.docs) {
-        const data = d.data();
-        if (data && data.status !== 'deleted') {
-          profileId = String(data.id || d.id);
-          profileData = data;
-          break;
-        }
-      }
-    } catch {
-      // Fallback to bounded scan
+    const profileSnap = await getDoc(doc(dbLite, COL.profiles, profileId)).catch(() => null);
+    if (profileSnap && profileSnap.exists() && profileSnap.data()?.status !== 'deleted') {
+      profileData = profileSnap.data();
+    }
+  }
+  if (!userData) {
+    const userSnap = await getDoc(doc(dbLite, COL.users, profileId)).catch(() => null);
+    if (userSnap && userSnap.exists() && userSnap.data()?.status !== 'deleted') {
+      userData = userSnap.data();
     }
   }
 
-  if (!profileData) {
-    try {
-      const scanSnap = await getDocs(query(collection(dbLite, COL.profiles), limit(350)));
-      for (const d of scanSnap.docs) {
-        const data = d.data();
-        if (!data || data.status === 'deleted') continue;
-        const storedKey = normalizePhone10(String(data.phoneKey || data.contactNumber || ''));
-        if (storedKey && storedKey === phoneKey) {
-          profileId = String(data.id || d.id);
-          profileData = data;
-          break;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  if (!profileData || !profileId) return { found: false };
+  const mergedDoc = mergeProfileDocs(profileData, userData, profileId);
 
   if (
     profileId !== 'usr_jit_primary_001' &&
-    isCloudTimestampExpired(profileData.lastActiveAt, profileData.lastLoginAt || profileData.lastLogin)
+    isCloudTimestampExpired(mergedDoc.lastActiveAt, mergedDoc.lastLoginAt || mergedDoc.lastLogin)
   ) {
     await cleanupExpiredCloudProfile(phoneKey, profileId);
     return { found: false, expired: true };
   }
 
-  return { found: true, profile: firestoreDocToUserProfile(profileData) };
+  return { found: true, profile: firestoreDocToUserProfile(mergedDoc) };
 }
 
 export async function loginCloudProfileByPhone(
@@ -329,39 +439,11 @@ export async function loginCloudProfileByPhone(
       suspendedReason: profile.suspendedReason || 'Suspended by administrator.',
     };
   }
-  const phoneKey = toCanonicalPhoneKey(profile.contactNumber || contactNumber);
-  const nowIso = new Date().toISOString();
 
-  try {
-    const batch = writeBatch(dbLite);
-    batch.set(
-      doc(dbLite, COL.profiles, profile.id),
-      {
-        phoneKey,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    if (phoneKey && phoneKey.length >= 7) {
-      batch.set(
-        doc(dbLite, COL.phoneIndex, phoneKey),
-        {
-          profileId: profile.id,
-          lastLoginAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-    }
-    await batch.commit();
-  } catch (err) {
-    console.warn('loginCloudProfileByPhone batch notice (node):', err);
-  }
-
+  // Strictly READ-only on login so existing Firestore user data & custom photos are never overwritten.
   return {
     success: true,
-    profile: { ...profile, lastLoginAt: nowIso, lastLogin: nowIso },
+    profile,
   };
 }
 
@@ -396,45 +478,8 @@ export async function registerOrRecognizeCloudProfile(
 
   const existing = await lookupCloudProfileByPhone(contactNumber);
   if (existing.found && existing.profile) {
-    const prev = existing.profile;
-    const cleanName = fullName.trim().slice(0, 120) || prev.fullName;
-    const cleanAddr = address.trim().slice(0, 300) || prev.address;
-    const updated = {
-      ...prev,
-      fullName: cleanName,
-      address: cleanAddr,
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-    };
-
-    const batch = writeBatch(dbLite);
-    batch.set(
-      doc(dbLite, COL.profiles, prev.id),
-      {
-        phoneKey,
-        fullName: cleanName,
-        address: cleanAddr,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    if (phoneKey && phoneKey.length >= 7) {
-      batch.set(
-        doc(dbLite, COL.phoneIndex, phoneKey),
-        {
-          profileId: prev.id,
-          lastLoginAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-    }
-    batch.set(doc(dbLite, COL.userDirectory, prev.id), buildUserDirectoryPayload(updated));
-    await batch.commit();
-
-    await syncNodeLeaderboardEntry(updated);
-    return { success: true, isExisting: true, profile: updated };
+    // Strictly preserve existing user profile data & photos without overwriting Firestore
+    return { success: true, isExisting: true, profile: existing.profile };
   }
 
   const profileId =
@@ -467,10 +512,12 @@ export async function registerOrRecognizeCloudProfile(
     contactNumber: newProfile.contactNumber,
     phoneKey,
     fullName: newProfile.fullName,
+    name: newProfile.fullName,
     username: derivedUsername,
     address: newProfile.address,
     bio: newProfile.bio || '',
     avatarUrl: newProfile.avatarUrl,
+    avatar: newProfile.avatarUrl,
     joinedAt: newProfile.joinedAt,
     lastLoginAt: newProfile.lastLoginAt,
     lastLogin: newProfile.lastLogin,
@@ -481,15 +528,17 @@ export async function registerOrRecognizeCloudProfile(
   };
   if (newProfile.coverUrl) {
     firestoreProfileDoc.coverUrl = newProfile.coverUrl;
+    firestoreProfileDoc.coverPhoto = newProfile.coverUrl;
   }
 
   const batch = writeBatch(dbLite);
-  batch.set(doc(dbLite, COL.profiles, newProfile.id), firestoreProfileDoc);
+  batch.set(doc(dbLite, COL.profiles, newProfile.id), firestoreProfileDoc, { merge: true });
+  batch.set(doc(dbLite, COL.users, newProfile.id), firestoreProfileDoc, { merge: true });
   batch.set(doc(dbLite, COL.phoneIndex, phoneKey), {
     profileId: newProfile.id,
     createdAt: serverTimestamp(),
     lastLoginAt: serverTimestamp(),
-  });
+  }, { merge: true });
   batch.set(doc(dbLite, COL.leaderboard, newProfile.id), {
     profileId: newProfile.id,
     fullName: newProfile.fullName,
@@ -515,18 +564,8 @@ export async function updateCloudProfile(
 
   const nowIso = new Date().toISOString();
   const profileRef = doc(dbLite, COL.profiles, profile.id);
+  const userRef = doc(dbLite, COL.users, profile.id);
   const indexRef = doc(dbLite, COL.phoneIndex, phoneKey);
-
-  const existingSnap = await getDoc(profileRef);
-  if (!existingSnap.exists()) {
-    await registerOrRecognizeCloudProfile(
-      profile.contactNumber,
-      profile.fullName,
-      profile.address,
-      profile
-    );
-    return;
-  }
 
   const detailKeys = [
     'fullName',
@@ -540,79 +579,77 @@ export async function updateCloudProfile(
   ] as const;
   const hasDetailUpdates = detailKeys.some((k) => updates[k] !== undefined);
   const hasStatsUpdate = updates.stats !== undefined;
+  const hasClaimUpdate =
+    typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt);
 
-  if (!hasDetailUpdates && !hasStatsUpdate) {
+  if (!hasDetailUpdates && !hasStatsUpdate && !hasClaimUpdate) {
     return;
   }
 
-  if (hasDetailUpdates) {
-    const detailPatch: Record<string, any> = {
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-      lastActiveAt: serverTimestamp(),
-    };
-    if (updates.fullName !== undefined) detailPatch.fullName = updates.fullName.trim().slice(0, 120);
-    if (updates.username !== undefined) {
-      detailPatch.username = deriveUsername(
-        updates.fullName || profile.fullName,
-        profile.contactNumber,
-        updates.username
-      );
-    }
-    if (updates.bio !== undefined) detailPatch.bio = updates.bio.slice(0, 500);
-    if (updates.address !== undefined) detailPatch.address = updates.address.trim().slice(0, 300);
-    if (updates.avatarUrl !== undefined) detailPatch.avatarUrl = sanitizeAvatarUrl(updates.avatarUrl);
-    if (updates.coverUrl !== undefined) {
-      if (updates.coverUrl === '') {
-        detailPatch.coverUrl = '';
-      } else if (updates.coverUrl.length <= 395000) {
-        detailPatch.coverUrl = updates.coverUrl;
-      }
-    }
-    if (updates.isContactNumberPublic !== undefined) {
-      detailPatch.isContactNumberPublic = Boolean(updates.isContactNumberPublic);
-    }
-    if (updates.isAddressPublic !== undefined) {
-      detailPatch.isAddressPublic = Boolean(updates.isAddressPublic);
-    }
+  const patch: Record<string, any> = {
+    id: profile.id,
+    contactNumber: profile.contactNumber,
+    phoneKey,
+    lastLoginAt: nowIso,
+    lastLogin: nowIso,
+    lastActiveAt: serverTimestamp(),
+  };
 
-    const mergedProfile: UserProfile = {
-      ...profile,
-      ...updates,
-      ...(detailPatch.username ? { username: detailPatch.username } : {}),
-      stats: sanitizeStats(updates.stats || profile.stats),
-    };
-    const batch = writeBatch(dbLite);
-    batch.update(profileRef, detailPatch);
-    batch.update(indexRef, { lastLoginAt: serverTimestamp() });
-    batch.set(doc(dbLite, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
-    await batch.commit();
+  if (updates.fullName !== undefined) {
+    const cleanName = updates.fullName.trim().slice(0, 120);
+    patch.fullName = cleanName;
+    patch.name = cleanName;
+  }
+  if (updates.username !== undefined) {
+    patch.username = deriveUsername(
+      updates.fullName || profile.fullName,
+      profile.contactNumber,
+      updates.username
+    );
+  }
+  if (updates.bio !== undefined) patch.bio = updates.bio.slice(0, 500);
+  if (updates.address !== undefined) patch.address = updates.address.trim().slice(0, 300);
+  if (updates.avatarUrl !== undefined) {
+    const cleanAvatar = sanitizeAvatarUrl(updates.avatarUrl);
+    patch.avatarUrl = cleanAvatar;
+    patch.avatar = cleanAvatar;
+  }
+  if (updates.coverUrl !== undefined) {
+    if (updates.coverUrl === '') {
+      patch.coverUrl = '';
+      patch.coverPhoto = '';
+    } else if (updates.coverUrl.length <= 395000) {
+      patch.coverUrl = updates.coverUrl;
+      patch.coverPhoto = updates.coverUrl;
+    }
+  }
+  if (updates.isContactNumberPublic !== undefined) {
+    patch.isContactNumberPublic = Boolean(updates.isContactNumberPublic);
+  }
+  if (updates.isAddressPublic !== undefined) {
+    patch.isAddressPublic = Boolean(updates.isAddressPublic);
+  }
+  if (hasStatsUpdate) {
+    patch.stats = sanitizeStats(updates.stats || profile.stats);
+  }
+  if (hasClaimUpdate) {
+    patch.lastDailyClaimAt = updates.lastDailyClaimAt;
   }
 
-  if (hasStatsUpdate || (typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt))) {
-    const mergedProfile: UserProfile = {
-      ...profile,
-      ...updates,
-      stats: sanitizeStats(updates.stats || profile.stats),
-    };
-    const statsPatch: Record<string, any> = {
-      stats: sanitizeStats(updates.stats || profile.stats),
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-      lastActiveAt: serverTimestamp(),
-      ...(typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt)
-        ? { lastDailyClaimAt: updates.lastDailyClaimAt }
-        : {}),
-    };
-    const batch = writeBatch(dbLite);
-    batch.update(profileRef, statsPatch);
-    batch.set(doc(dbLite, COL.users, profile.id), { id: profile.id, ...statsPatch }, { merge: true });
-    batch.update(indexRef, { lastLoginAt: serverTimestamp() });
-    batch.set(doc(dbLite, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
-    await batch.commit();
-  }
+  const mergedProfile: UserProfile = {
+    ...profile,
+    ...updates,
+    ...(patch.username ? { username: patch.username } : {}),
+    stats: sanitizeStats(updates.stats || profile.stats),
+  };
+  const batch = writeBatch(dbLite);
+  batch.set(profileRef, patch, { merge: true });
+  batch.set(userRef, patch, { merge: true });
+  batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
+  batch.set(doc(dbLite, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile), { merge: true });
+  await batch.commit();
 
-  await syncNodeLeaderboardEntry(profile);
+  await syncNodeLeaderboardEntry(mergedProfile);
 }
 
 export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<void> {

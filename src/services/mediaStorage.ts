@@ -145,12 +145,14 @@ export async function compressImageFile(
     maxHeight?: number;
     maxDataUrlLength?: number;
     initialQuality?: number;
+    forceMime?: 'image/jpeg' | 'image/webp';
   }
 ): Promise<string> {
   const maxWidth = options?.maxWidth ?? 1024;
   const maxHeight = options?.maxHeight ?? 1024;
   const maxDataUrlLength = options?.maxDataUrlLength ?? 260_000;
   const initialQuality = options?.initialQuality ?? 0.86;
+  const forceMime = options?.forceMime;
 
   const rawDataUrl = await fileToDataUrl(file);
 
@@ -188,8 +190,10 @@ export async function compressImageFile(
           return canvas.toDataURL(mime, quality);
         };
 
-        // Preserve original if it's already small enough and within dimensions
+        // Preserve original if it's already small enough, within dimensions, and matches forced mime (if any)
+        const matchesForcedMime = !forceMime || rawDataUrl.startsWith(`data:${forceMime}`);
         if (
+          matchesForcedMime &&
           rawDataUrl.length <= maxDataUrlLength &&
           (img.naturalWidth || img.width) <= maxWidth &&
           (img.naturalHeight || img.height) <= maxHeight
@@ -198,7 +202,9 @@ export async function compressImageFile(
           return;
         }
 
-        const qualities = [initialQuality, 0.74, 0.6, 0.48, 0.36];
+        const qualities = Array.from(
+          new Set([initialQuality, 0.72, 0.6, 0.48, 0.36].filter((q) => q <= initialQuality + 0.01))
+        );
         let scale = 1;
 
         for (let scalePass = 0; scalePass < 4; scalePass++) {
@@ -206,15 +212,19 @@ export async function compressImageFile(
           const h = Math.max(64, Math.round(targetH * scale));
 
           for (const q of qualities) {
-            const webpOut = attemptEncode(w, h, 'image/webp', q);
-            if (webpOut.startsWith('data:image/webp') && webpOut.length <= maxDataUrlLength) {
-              resolve(webpOut);
-              return;
+            if (forceMime !== 'image/jpeg') {
+              const webpOut = attemptEncode(w, h, 'image/webp', q);
+              if (webpOut.startsWith('data:image/webp') && webpOut.length <= maxDataUrlLength) {
+                resolve(webpOut);
+                return;
+              }
             }
-            const jpegOut = attemptEncode(w, h, 'image/jpeg', q);
-            if (jpegOut.length <= maxDataUrlLength) {
-              resolve(jpegOut);
-              return;
+            if (forceMime !== 'image/webp') {
+              const jpegOut = attemptEncode(w, h, 'image/jpeg', q);
+              if (jpegOut.length <= maxDataUrlLength) {
+                resolve(jpegOut);
+                return;
+              }
             }
           }
           scale *= 0.75;
@@ -225,7 +235,7 @@ export async function compressImageFile(
           attemptEncode(
             Math.max(64, Math.round(targetW * 0.4)),
             Math.max(64, Math.round(targetH * 0.4)),
-            'image/jpeg',
+            forceMime || 'image/jpeg',
             0.35
           )
         );
@@ -239,8 +249,8 @@ export async function compressImageFile(
 }
 
 /**
- * Persistently saves a compressed profile or cover image to IndexedDB
- * and returns a cloud-ready Data URL guaranteed to fit Firestore limits.
+ * Persistently saves a compressed JPEG Data URL (avatar <= 300x300 @ 0.8, cover <= 800x300 @ 0.8)
+ * to IndexedDB and returns the cloud-ready Data URL for Firestore persistence.
  */
 export async function saveCompressedProfileMediaFile(
   file: File,
@@ -248,10 +258,11 @@ export async function saveCompressedProfileMediaFile(
 ): Promise<{ id: string; dataUrl: string }> {
   const isAvatar = mode === 'avatar';
   const dataUrl = await compressImageFile(file, {
-    maxWidth: isAvatar ? 512 : 1280,
-    maxHeight: isAvatar ? 512 : 720,
+    maxWidth: isAvatar ? 300 : 800,
+    maxHeight: isAvatar ? 300 : 300,
     maxDataUrlLength: isAvatar ? 180_000 : 280_000,
-    initialQuality: 0.85,
+    initialQuality: 0.8,
+    forceMime: 'image/jpeg',
   });
 
   const id = `media_${mode}_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;

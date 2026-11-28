@@ -45,7 +45,10 @@ import {
   kickOrLeaveFirestoreRoom,
   fetchFirestoreGameRoomByCode,
   sendGameInviteToFriend,
+  activateDemoOpponentInRoom,
+  pushFirestoreQuizAnswer,
 } from '../lib/firebase';
+import { INITIAL_FRIENDS } from '../services/mockData';
 import {
   getPieceColor,
   getLegalMovesForSquare,
@@ -317,6 +320,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   // Match award duplicate guard
   const awardedMatchRef = useRef<Record<string, boolean>>({});
   const aiTimersRef = useRef<number[]>([]);
+  const rollTimersRef = useRef<number[]>([]);
   const ludoRollIntervalRef = useRef<number | null>(null);
   const slRollIntervalRef = useRef<number | null>(null);
 
@@ -326,9 +330,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     return id;
   }, []);
 
-  const clearAiTimers = useCallback(() => {
-    aiTimersRef.current.forEach((id) => window.clearTimeout(id));
-    aiTimersRef.current = [];
+  const registerRollTimer = useCallback((fn: () => void, ms: number) => {
+    const id = window.setTimeout(fn, ms);
+    rollTimersRef.current.push(id);
+    return id;
+  }, []);
+
+  const clearRollTimers = useCallback(() => {
+    rollTimersRef.current.forEach((id) => window.clearTimeout(id));
+    rollTimersRef.current = [];
     if (ludoRollIntervalRef.current !== null) {
       window.clearInterval(ludoRollIntervalRef.current);
       ludoRollIntervalRef.current = null;
@@ -339,9 +349,17 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }
   }, []);
 
+  const clearAiTimers = useCallback(() => {
+    aiTimersRef.current.forEach((id) => window.clearTimeout(id));
+    aiTimersRef.current = [];
+  }, []);
+
   useEffect(() => {
-    return () => clearAiTimers();
-  }, [clearAiTimers]);
+    return () => {
+      clearAiTimers();
+      clearRollTimers();
+    };
+  }, [clearAiTimers, clearRollTimers]);
 
   const spawnFloatingReaction = useCallback((id: string, emoji: string, senderName: string) => {
     if (seenReactionIdsRef.current.has(id)) return;
@@ -569,6 +587,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const resetLudo = useCallback(
     (sync = true) => {
       clearAiTimers();
+      clearRollTimers();
       awardedMatchRef.current.ludo = false;
       const fresh = [
         [-1, -1, -1, -1],
@@ -615,7 +634,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
       }
     },
-    [clearAiTimers]
+    [clearAiTimers, clearRollTimers]
   );
 
   const loadAiQuizQuestions = useCallback(
@@ -745,6 +764,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const resetSnakeLadder = useCallback(
     (sync = true) => {
       clearAiTimers();
+      clearRollTimers();
       awardedMatchRef.current.snake_ladder = false;
       slStateRef.current = { positions: { p1: 1, p2: 1 }, turn: 'p1', finished: false };
       setSlPositions({ p1: 1, p2: 1 });
@@ -766,7 +786,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         rematchFirestoreGameRoom(room.roomCode, resetState, room.players[0]?.id || room.hostId).catch(() => {});
       }
     },
-    [clearAiTimers]
+    [clearAiTimers, clearRollTimers]
   );
 
   const resetCarromState = useCallback((sync = false) => {
@@ -818,6 +838,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
       if (moveAction === 'REMATCH') {
         clearAiTimers();
+        clearRollTimers();
         resetMoveTracking();
         awardedMatchRef.current.tictactoe = false;
         resetChess(false);
@@ -1023,6 +1044,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     },
     [
       clearAiTimers,
+      clearRollTimers,
       recordMoveSeq,
       resetCarromState,
       resetChess,
@@ -1054,7 +1076,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
             room.player1 === activePlayer.id ||
             room.hostId === activePlayer.id ||
             room.player2 === activePlayer.id ||
-            room.player2Id === activePlayer.id;
+            room.player2Id === activePlayer.id ||
+            Boolean(
+              firebaseAuthUid &&
+                (room.player1AuthUid === firebaseAuthUid || room.player2AuthUid === firebaseAuthUid)
+            );
 
           if (!stillMember) {
             detachRoomSubscription();
@@ -1136,6 +1162,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 ? syncedInitState.questionSeed
                 : undefined;
             clearAiTimers();
+            clearRollTimers();
             resetMoveTracking();
             awardedMatchRef.current.tictactoe = false;
             resetChess(false);
@@ -1541,6 +1568,32 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       void checkOwnRoomAndMergeIfNeeded();
     }, 4000);
 
+    // If no online player joins within 5 seconds, pair automatically with an active Demo Challenger
+    const demoFallbackTimer = window.setTimeout(() => {
+      if (cancelled || settled || joining) return;
+      joining = true;
+      void (async () => {
+        try {
+          const pool = INITIAL_FRIENDS.filter((f) => f.id !== activePlayer.id);
+          const demo = pool[Math.floor(Math.random() * pool.length)] || INITIAL_FRIENDS[0];
+          const botPlayer = {
+            id: `bot_demo_${demo.id}`,
+            name: demo.fullName,
+            avatar: demo.avatarUrl || APP_CONFIG.logoUrl,
+          };
+          await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
+          const botRoom = await activateDemoOpponentInRoom(myCode, selectedGame, botPlayer);
+          if (!cancelled && !settled && botRoom) {
+            enterMatchedRoom(botRoom, false);
+          } else {
+            joining = false;
+          }
+        } catch {
+          joining = false;
+        }
+      })();
+    }, 5000);
+
     const handleBeforeUnload = () => {
       void releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode);
       void kickOrLeaveFirestoreRoom(myCode, activePlayer.id);
@@ -1552,6 +1605,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       unsubQueue();
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.clearInterval(pollTimer);
+      window.clearTimeout(demoFallbackTimer);
     };
   }, [
     isMatchmakingOpen,
@@ -1601,6 +1655,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleCreateFriendRoom = async () => {
     if (isRoomSubmitting) return;
     clearAiTimers();
+    clearRollTimers();
     setIsRoomSubmitting(true);
     gameModeRef.current = 'friend';
     setGameMode('friend');
@@ -1655,6 +1710,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleCreateOpenGroupRoom = async (activeSeatLimit: number) => {
     if (isRoomSubmitting) return;
     clearAiTimers();
+    clearRollTimers();
     setIsRoomSubmitting(true);
     gameModeRef.current = 'open_group';
     setGameMode('open_group');
@@ -1699,6 +1755,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleJoinFriendRoom = async (code: string) => {
     if (isRoomSubmitting) return;
     clearAiTimers();
+    clearRollTimers();
     setIsRoomSubmitting(true);
     setJoinError(null);
     setChatMessages([]);
@@ -1814,6 +1871,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleInviteFriendAndStart = async (friend: UserProfile) => {
     if (isRoomSubmitting || invitingFriendId) return;
     clearAiTimers();
+    clearRollTimers();
     setInvitingFriendId(friend.id);
     setIsRoomSubmitting(true);
     gameModeRef.current = 'friend';
@@ -1868,6 +1926,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handlePlayRandom = async () => {
     if (isRoomSubmitting) return;
     clearAiTimers();
+    clearRollTimers();
     setIsRoomSubmitting(true);
     gameModeRef.current = 'random';
     setGameMode('random');
@@ -1924,6 +1983,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const handlePlayAI = (diff: AIDifficulty) => {
     clearAiTimers();
+    clearRollTimers();
     void releasePublicQueueSlotIfOwner(
       selectedGameRef.current,
       activePlayer.id,
@@ -1953,6 +2013,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleStartRoomGame = async () => {
     if (!currentRoom) return;
     clearAiTimers();
+    clearRollTimers();
     const initQuizSeed =
       typeof (currentRoom.boardState || currentRoom.gameState)?.questionSeed === 'number'
         ? (currentRoom.boardState || currentRoom.gameState).questionSeed
@@ -1981,6 +2042,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const handleLeaveRoom = async () => {
     clearAiTimers();
+    clearRollTimers();
     await releasePublicQueueSlotIfOwner(
       selectedGameRef.current,
       activePlayer.id,
@@ -2006,6 +2068,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
   const handleFallbackToAI = async () => {
     clearAiTimers();
+    clearRollTimers();
     await releasePublicQueueSlotIfOwner(
       selectedGameRef.current,
       activePlayer.id,
@@ -2115,6 +2178,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const handleHostRotatePlayers = async (nextActiveIds: string[]) => {
     if (!currentRoom || !isRoomHost) return;
     clearAiTimers();
+    clearRollTimers();
     resetChess(false);
     resetLudo(false);
     resetQuiz(false);
@@ -2314,8 +2378,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   const getPlayerIdForLudoSeat = useCallback((seat: 0 | 1 | 2 | 3): string | undefined => {
     const room = currentRoomRef.current;
     if (!room) return undefined;
+    const p1 = room.players[0]?.id || room.player1Id || room.hostId || undefined;
+    const p2 = room.players[1]?.id || room.player2Id || undefined;
     if (room.players.length <= 2) {
-      return seat === 0 ? room.players[0]?.id : seat === 2 ? room.players[1]?.id : undefined;
+      return seat === 0 ? p1 : seat === 2 ? p2 : undefined;
     }
     return room.players[seat]?.id;
   }, []);
@@ -2523,7 +2589,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }, 65);
     ludoRollIntervalRef.current = interval;
 
-    registerAiTimer(() => {
+    registerRollTimer(() => {
       window.clearInterval(interval);
       if (ludoRollIntervalRef.current === interval) {
         ludoRollIntervalRef.current = null;
@@ -2904,8 +2970,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       return;
     }
     if (gameMode !== 'ai' && currentRoom) {
-      const expectedPlayerId = chessTurn === 'white' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id;
-      const isWhitePlayer = currentRoom.players[0]?.id === activePlayer.id;
+      const p1Id = currentRoom.players[0]?.id || currentRoom.player1Id || currentRoom.hostId || undefined;
+      const p2Id = currentRoom.players[1]?.id || currentRoom.player2Id || undefined;
+      const expectedPlayerId = chessTurn === 'white' ? p1Id : p2Id;
+      const isWhitePlayer = p1Id === activePlayer.id;
       const myColor = isWhitePlayer ? 'white' : 'black';
       if (myColor !== chessTurn || !isAuthorizedTurnActor(expectedPlayerId)) {
         soundFx.playError();
@@ -3151,8 +3219,10 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       }
       if (gameModeRef.current !== 'ai' && currentRoomRef.current) {
         const room = currentRoomRef.current;
-        const expectedSeatId = side === 'p1' ? room.players[0]?.id : room.players[1]?.id;
-        const mySide = room.players[0]?.id === activePlayerIdRef.current ? 'p1' : 'p2';
+        const p1Id = room.players[0]?.id || room.player1Id || room.hostId || undefined;
+        const p2Id = room.players[1]?.id || room.player2Id || undefined;
+        const expectedSeatId = side === 'p1' ? p1Id : p2Id;
+        const mySide = p1Id === activePlayerIdRef.current ? 'p1' : 'p2';
         if (side !== mySide || !isAuthorizedTurnActor(expectedSeatId)) {
           soundFx.playError();
           return;
@@ -3169,14 +3239,16 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       }, 65);
       slRollIntervalRef.current = interval;
 
-      registerAiTimer(() => {
+      registerRollTimer(() => {
         window.clearInterval(interval);
         if (slRollIntervalRef.current === interval) {
           slRollIntervalRef.current = null;
         }
         const room = currentRoomRef.current;
         if (gameModeRef.current !== 'ai' && room) {
-          const expectedSeatId = side === 'p1' ? room.players[0]?.id : room.players[1]?.id;
+          const p1Id = room.players[0]?.id || room.player1Id || room.hostId || undefined;
+          const p2Id = room.players[1]?.id || room.player2Id || undefined;
+          const expectedSeatId = side === 'p1' ? p1Id : p2Id;
           if (!isAuthorizedTurnActor(expectedSeatId)) {
             setSlRolling(false);
             return;
@@ -3226,7 +3298,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           slStateRef.current = { positions: updatedPos, turn: side, finished: true };
           setSlFinished(true);
           soundFx.playWin();
-          const mySide = room ? (room.players[0]?.id === activePlayerIdRef.current ? 'p1' : 'p2') : 'p1';
+          const p1Id = room?.players[0]?.id || room?.player1Id || room?.hostId || '';
+          const p2Id = room?.players[1]?.id || room?.player2Id || '';
+          const mySide = room ? (p1Id === activePlayerIdRef.current ? 'p1' : 'p2') : 'p1';
           const playerWon = side === mySide;
           setSlMessage(
             playerWon
@@ -3243,8 +3317,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           });
 
           if (room) {
-            const p1Id = room.players[0]?.id || '';
-            const p2Id = room.players[1]?.id || '';
             const winnerId = (side === 'p1' ? p1Id : p2Id) || null;
             const slScores: Record<string, number> = {
               ...(p1Id ? { [p1Id]: updatedPos.p1 } : {}),
@@ -3280,8 +3352,8 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         setSlMessage(finalMsg);
 
         if (room) {
-          const p1Id = room.players[0]?.id || '';
-          const p2Id = room.players[1]?.id || '';
+          const p1Id = room.players[0]?.id || room.player1Id || room.hostId || '';
+          const p2Id = room.players[1]?.id || room.player2Id || '';
           const nextTurnId = nextTurn === 'p1' ? p1Id : p2Id;
           const slScores: Record<string, number> = {
             ...(p1Id ? { [p1Id]: updatedPos.p1 } : {}),
@@ -3318,10 +3390,566 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       isAuthorizedTurnActor,
       isWaitingSpectator,
       registerAiTimer,
+      registerRollTimer,
       slRolling,
       triggerGameAward,
     ]
   );
+
+  // Automated 1.5-second Demo Challenger Turn Execution for Random Play Bot Matches (`isBotMatch`)
+  useEffect(() => {
+    const room = currentRoom;
+    if (!room || !room.isBotMatch || room.status === 'finished' || !isRoomMatchStarted(room)) {
+      return;
+    }
+    const p1Id = room.players[0]?.id || room.player1Id || room.hostId || '';
+    const p2Id = room.players[1]?.id || room.player2Id || '';
+    const roomTurnId = room.currentTurnUserId || room.currentTurn || '';
+    if (!p1Id || p1Id !== activePlayer.id || !p2Id.startsWith('bot_demo_')) {
+      return;
+    }
+    if (selectedGame !== 'snake_ladder' && selectedGame !== 'ludo' && selectedGame !== 'chess') {
+      return;
+    }
+    if (roomTurnId !== p2Id) {
+      return;
+    }
+
+    const botName = room.players[1]?.name || 'Demo Challenger';
+    const timer = window.setTimeout(() => {
+      const liveRoom = currentRoomRef.current;
+      if (!liveRoom || liveRoom.roomCode !== room.roomCode || !liveRoom.isBotMatch || liveRoom.status === 'finished') {
+        return;
+      }
+
+      if (selectedGame === 'snake_ladder') {
+        if (slStateRef.current.finished) return;
+        const basePositions = slStateRef.current.positions;
+        const roll = Math.floor(Math.random() * 6) + 1;
+        soundFx.playDice();
+        setSlDice(roll);
+        const startPos = basePositions.p2;
+        let nextPos = startPos + roll;
+        let msg = `${botName} (Amber ⭐) rolled ${roll}: moved ${startPos} → ${nextPos}`;
+        if (nextPos > 100) {
+          nextPos = startPos;
+          msg = `${botName} rolled ${roll} — needs exact ${100 - startPos} to finish on 100!`;
+        } else if (SL_LADDERS[nextPos]) {
+          const to = SL_LADDERS[nextPos];
+          msg = `🪜 ${botName} rolled ${roll} → climbed ladder ${nextPos} to ${to}!`;
+          nextPos = to;
+          soundFx.playMove();
+        } else if (SL_SNAKES[nextPos]) {
+          const to = SL_SNAKES[nextPos];
+          msg = `🐍 ${botName} rolled ${roll} → snake bite at ${nextPos}! Slid to ${to}.`;
+          nextPos = to;
+          soundFx.playError();
+        } else {
+          soundFx.playMove();
+        }
+        const updatedPos = { ...basePositions, p2: nextPos };
+        const slScores: Record<string, number> = {
+          [p1Id]: updatedPos.p1,
+          [p2Id]: updatedPos.p2,
+        };
+        setSlPositions(updatedPos);
+
+        if (nextPos === 100) {
+          slStateRef.current = { positions: updatedPos, turn: 'p2', finished: true };
+          setSlFinished(true);
+          setSlMessage(`🏁 ${botName} reached Square 100 first! +10 Participation Points`);
+          triggerGameAward('snake_ladder', {
+            gameId: 'snake_ladder',
+            gameName: 'Snake & Ladder',
+            mode: gameModeRef.current,
+            outcome: 'loss',
+            pointsEarned: 10,
+            scoreSummary: `${botName} finished first`,
+          });
+          broadcastRoomMove(
+            'SL_MOVE',
+            {
+              positions: updatedPos,
+              playerPositions: updatedPos,
+              turn: 'p2',
+              dice: roll,
+              diceValue: roll,
+              message: msg,
+              finished: true,
+              byPlayerId: p2Id,
+            },
+            p2Id,
+            'finished',
+            {
+              bypassTurnGuard: true,
+              actorIdOverride: p2Id,
+              scores: slScores,
+              winnerId: p2Id,
+              isDraw: false,
+            }
+          );
+          return;
+        }
+
+        const nextTurn: 'p1' | 'p2' = roll === 6 ? 'p2' : 'p1';
+        const nextTurnId = nextTurn === 'p2' ? p2Id : p1Id;
+        const finalMsg = roll === 6 ? `${msg} (Bonus roll for 6!)` : msg;
+        slStateRef.current = { positions: updatedPos, turn: nextTurn, finished: false };
+        setSlTurn(nextTurn);
+        setSlMessage(finalMsg);
+        broadcastRoomMove(
+          'SL_MOVE',
+          {
+            positions: updatedPos,
+            playerPositions: updatedPos,
+            turn: nextTurn,
+            dice: roll,
+            diceValue: roll,
+            message: finalMsg,
+            finished: false,
+            byPlayerId: p2Id,
+          },
+          nextTurnId,
+          'playing',
+          {
+            bypassTurnGuard: true,
+            actorIdOverride: p2Id,
+            scores: slScores,
+          }
+        );
+        return;
+      }
+
+      if (selectedGame === 'ludo') {
+        const cur = ludoStateRef.current;
+        if (cur.winner !== null) return;
+        const botSeat: 0 | 1 | 2 | 3 = liveRoom.players.length <= 2 ? 2 : 1;
+        const roll = Math.floor(Math.random() * 6) + 1;
+        soundFx.playDice();
+        setLudoDice(roll);
+        const color = LUDO_COLORS[botSeat];
+        const newSixes = roll === 6 ? cur.consecutiveSixes + 1 : 0;
+
+        if (newSixes >= 3) {
+          const skipLog = [`${botName} (${color.name}) rolled three 6s — turn forfeited!`, ...cur.log.slice(0, 4)];
+          ludoStateRef.current = {
+            tokens: cur.tokens,
+            turn: 0,
+            dice: roll,
+            phase: 'roll',
+            legalTokens: [],
+            consecutiveSixes: 0,
+            winner: null,
+            log: skipLog,
+          };
+          setLudoLog(skipLog);
+          setLudoConsecutiveSixes(0);
+          setLudoPhase('roll');
+          setLudoLegalTokens([]);
+          setLudoTurn(0);
+          broadcastRoomMove(
+            'LUDO_MOVE',
+            {
+              tokens: cur.tokens,
+              turn: 0,
+              dice: roll,
+              diceValue: roll,
+              phase: 'roll',
+              canRoll: true,
+              canMove: false,
+              legalTokens: [],
+              consecutiveSixes: 0,
+              log: skipLog,
+              winner: null,
+              byPlayerId: p2Id,
+            },
+            p1Id,
+            'playing',
+            { bypassTurnGuard: true, actorIdOverride: p2Id }
+          );
+          return;
+        }
+
+        const tokenChoice = chooseLudoAIToken(cur.tokens, botSeat, roll, aiDifficulty);
+        if (tokenChoice === null) {
+          const passLog = [`${botName} (${color.name}) rolled ${roll} (no legal move).`, ...cur.log.slice(0, 4)];
+          ludoStateRef.current = {
+            tokens: cur.tokens,
+            turn: 0,
+            dice: roll,
+            phase: 'roll',
+            legalTokens: [],
+            consecutiveSixes: 0,
+            winner: null,
+            log: passLog,
+          };
+          setLudoLog(passLog);
+          setLudoConsecutiveSixes(0);
+          setLudoPhase('roll');
+          setLudoLegalTokens([]);
+          setLudoTurn(0);
+          broadcastRoomMove(
+            'LUDO_MOVE',
+            {
+              tokens: cur.tokens,
+              turn: 0,
+              dice: roll,
+              diceValue: roll,
+              phase: 'roll',
+              canRoll: true,
+              canMove: false,
+              legalTokens: [],
+              consecutiveSixes: 0,
+              log: passLog,
+              winner: null,
+              byPlayerId: p2Id,
+            },
+            p1Id,
+            'playing',
+            { bypassTurnGuard: true, actorIdOverride: p2Id }
+          );
+          return;
+        }
+
+        const updated = cur.tokens.map((arr) => [...arr]);
+        const prevPos = updated[botSeat][tokenChoice];
+        const nextPos = prevPos === -1 ? 0 : prevPos + roll;
+        updated[botSeat][tokenChoice] = nextPos;
+
+        let capturedName = '';
+        const globalSq = ludoLocalToGlobal(botSeat, nextPos);
+        if (globalSq !== null && !LUDO_SAFE_GLOBAL_INDICES.has(globalSq)) {
+          for (let opp = 0; opp < 4; opp++) {
+            if (opp === botSeat) continue;
+            updated[opp].forEach((opPos, oIdx) => {
+              if (ludoLocalToGlobal(opp, opPos) === globalSq) {
+                updated[opp][oIdx] = -1;
+                capturedName = LUDO_COLORS[opp].name;
+                soundFx.playCapture();
+              }
+            });
+          }
+        }
+        if (!capturedName) soundFx.playMove();
+
+        const hasWon = updated[botSeat].every((p) => p === 56);
+        const moveText =
+          prevPos === -1
+            ? `${botName} rolled 6 → Token #${tokenChoice + 1} entered the board!`
+            : nextPos === 56
+            ? `${botName} Token #${tokenChoice + 1} reached Home! ★`
+            : `${botName} rolled ${roll} → Token #${tokenChoice + 1} to ${nextPos}/56${
+                capturedName ? ` (Captured ${capturedName}!)` : ''
+              }`;
+        const nextLog = [moveText, ...cur.log.slice(0, 4)];
+        setLudoTokens(updated);
+        setLudoLog(nextLog);
+        setLudoLegalTokens([]);
+
+        if (hasWon) {
+          ludoStateRef.current = {
+            tokens: updated,
+            turn: botSeat,
+            dice: roll,
+            phase: 'finished',
+            legalTokens: [],
+            consecutiveSixes: 0,
+            winner: botSeat,
+            log: nextLog,
+          };
+          setLudoWinner(botSeat);
+          setLudoPhase('finished');
+          triggerGameAward('ludo', {
+            gameId: 'ludo',
+            gameName: 'Ludo',
+            mode: gameModeRef.current,
+            outcome: 'loss',
+            pointsEarned: 10,
+            scoreSummary: `${botName} won Ludo`,
+          });
+          broadcastRoomMove(
+            'LUDO_MOVE',
+            {
+              tokens: updated,
+              turn: botSeat,
+              dice: roll,
+              diceValue: roll,
+              phase: 'finished',
+              canRoll: false,
+              canMove: false,
+              legalTokens: [],
+              consecutiveSixes: 0,
+              log: nextLog,
+              winner: botSeat,
+              byPlayerId: p2Id,
+            },
+            p2Id,
+            'finished',
+            {
+              bypassTurnGuard: true,
+              actorIdOverride: p2Id,
+              scores: {
+                [p1Id]: updated[0].filter((pos) => pos === 56).length,
+                [p2Id]: updated[botSeat].filter((pos) => pos === 56).length,
+              },
+              winnerId: p2Id,
+              isDraw: false,
+            }
+          );
+          return;
+        }
+
+        const bonusRoll = roll === 6 || Boolean(capturedName) || nextPos === 56;
+        const nextSeat: 0 | 1 | 2 | 3 = bonusRoll ? botSeat : 0;
+        const nextTurnId = nextSeat === botSeat ? p2Id : p1Id;
+        const nextSixesVal = bonusRoll && roll === 6 ? newSixes : 0;
+        ludoStateRef.current = {
+          tokens: updated,
+          turn: nextSeat,
+          dice: roll,
+          phase: 'roll',
+          legalTokens: [],
+          consecutiveSixes: nextSixesVal,
+          winner: null,
+          log: nextLog,
+        };
+        setLudoPhase('roll');
+        setLudoTurn(nextSeat);
+        setLudoConsecutiveSixes(nextSixesVal);
+        broadcastRoomMove(
+          'LUDO_MOVE',
+          {
+            tokens: updated,
+            turn: nextSeat,
+            dice: roll,
+            diceValue: roll,
+            phase: 'roll',
+            canRoll: true,
+            canMove: false,
+            legalTokens: [],
+            consecutiveSixes: nextSixesVal,
+            log: nextLog,
+            winner: null,
+            byPlayerId: p2Id,
+          },
+          nextTurnId,
+          'playing',
+          { bypassTurnGuard: true, actorIdOverride: p2Id }
+        );
+        return;
+      }
+
+      if (selectedGame === 'chess') {
+        if (chessWinner || chessTurn !== 'black') return;
+        const aiMove = getChessAIMove(chessBoard, aiDifficulty);
+        if (!aiMove) return;
+        const afterAiBoard = applyChessMoveToBoard(chessBoard, aiMove);
+        const aiNextStatus = getChessGameStatus(afterAiBoard, 'white');
+        if (aiMove.captured) soundFx.playCapture();
+        else soundFx.playMove();
+
+        const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+        const [fsr, fsc] = aiMove.from;
+        const [ftr, ftc] = aiMove.to;
+        const aiTag =
+          aiNextStatus === 'checkmate'
+            ? ' # CHECKMATE!'
+            : aiNextStatus === 'check'
+            ? ' + Check!'
+            : aiNextStatus === 'stalemate'
+            ? ' ½ Stalemate'
+            : '';
+        const aiLog = [
+          `${botName}: ${aiMove.piece} ${files[fsc]}${8 - fsr} → ${files[ftc]}${8 - ftr}${
+            aiMove.captured ? ` x${aiMove.captured}` : ''
+          }${aiTag}`,
+          ...chessMoveLog.slice(0, 4),
+        ];
+        const moveMeta = {
+          from: aiMove.from,
+          to: aiMove.to,
+          piece: aiMove.piece,
+          captured: aiMove.captured || null,
+        };
+        const nextCaptured = aiMove.captured
+          ? {
+              white: chessCapturedPieces.white,
+              black: [...chessCapturedPieces.black, aiMove.captured],
+            }
+          : chessCapturedPieces;
+
+        let aiWinner: 'white' | 'black' | 'draw' | null = null;
+        if (aiNextStatus === 'checkmate') {
+          aiWinner = 'black';
+          triggerGameAward('chess', {
+            gameId: 'chess',
+            gameName: 'Chess',
+            mode: gameModeRef.current,
+            outcome: 'loss',
+            pointsEarned: 10,
+            scoreSummary: `Checkmated by ${botName}`,
+          });
+        } else if (aiNextStatus === 'stalemate') {
+          aiWinner = 'draw';
+          triggerGameAward('chess', {
+            gameId: 'chess',
+            gameName: 'Chess',
+            mode: gameModeRef.current,
+            outcome: 'draw',
+            pointsEarned: 20,
+            scoreSummary: `Stalemate vs ${botName}`,
+          });
+        }
+
+        setChessBoard(afterAiBoard);
+        setSelectedSquare(null);
+        setChessTurn('white');
+        setChessStatus(aiNextStatus);
+        setChessWinner(aiWinner);
+        setChessLastMove(moveMeta);
+        setChessCapturedPieces(nextCaptured);
+        setChessMoveLog(aiLog);
+
+        broadcastRoomMove(
+          'CHESS_MOVE',
+          {
+            board: afterAiBoard,
+            turn: 'white',
+            log: aiLog,
+            status: aiNextStatus,
+            winner: aiWinner,
+            lastMove: moveMeta,
+            capturedPieces: nextCaptured,
+            byPlayerId: p2Id,
+          },
+          aiWinner ? (aiWinner === 'black' ? p2Id : '') : p1Id,
+          aiWinner ? 'finished' : 'playing',
+          {
+            bypassTurnGuard: true,
+            actorIdOverride: p2Id,
+            ...(aiWinner
+              ? {
+                  winnerId: aiWinner === 'black' ? p2Id : null,
+                  isDraw: aiWinner === 'draw',
+                }
+              : {}),
+          }
+        );
+      }
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activePlayer.id,
+    aiDifficulty,
+    broadcastRoomMove,
+    chessBoard,
+    chessCapturedPieces,
+    chessMoveLog,
+    chessTurn,
+    chessWinner,
+    currentRoom,
+    isRoomMatchStarted,
+    ludoPhase,
+    ludoTurn,
+    ludoWinner,
+    selectedGame,
+    slFinished,
+    slTurn,
+    triggerGameAward,
+  ]);
+
+  // Automated 1.5-second Demo Challenger Answer for Quiz Battle (`isBotMatch`)
+  useEffect(() => {
+    const room = currentRoom;
+    if (
+      selectedGame !== 'quiz' ||
+      !room ||
+      !room.isBotMatch ||
+      quizFinished ||
+      !isRoomMatchStarted(room)
+    ) {
+      return;
+    }
+    const p1Id = room.players[0]?.id || room.player1Id || room.hostId || '';
+    const p2Id = room.players[1]?.id || room.player2Id || '';
+    if (!p1Id || p1Id !== activePlayer.id || !p2Id.startsWith('bot_demo_')) {
+      return;
+    }
+    const qAnswers = quizAnswersByQ[quizIndex] || {};
+    if (qAnswers[p1Id] === undefined || qAnswers[p2Id] !== undefined) {
+      return;
+    }
+    const currQ = quizQuestions[quizIndex];
+    if (!currQ) return;
+    const qIdxAtBotRun = quizIndex;
+
+    const timer = window.setTimeout(() => {
+      if (!currentRoomRef.current || currentRoomRef.current.roomCode !== room.roomCode) return;
+      const aiPick = getQuizAIMove(currQ.answer, currQ.options.length, aiDifficulty);
+      const prevBotScore = Number(quizMultiplayerScores[p2Id] ?? 0);
+      const nextBotScore = prevBotScore + (aiPick.choice === currQ.answer ? 105 : 0);
+      const botMoveId = `${p2Id}_quiz_${qIdxAtBotRun}_${Date.now()}`;
+
+      void pushFirestoreQuizAnswer(room.roomCode, {
+        actorId: p2Id,
+        questionIndex: qIdxAtBotRun,
+        selectedOption: aiPick.choice,
+        newPlayerScore: nextBotScore,
+        questions: quizQuestions,
+        source: quizSource,
+        questionSeed: quizSeed,
+        moveId: botMoveId,
+        moveSeq: qIdxAtBotRun + 1,
+      }).then((txMerged) => {
+        if (!txMerged || !currentRoomRef.current || currentRoomRef.current.roomCode !== room.roomCode) {
+          return;
+        }
+        if (txMerged.scores) setQuizMultiplayerScores(txMerged.scores);
+        if (txMerged.answersByQ) setQuizAnswersByQ(txMerged.answersByQ);
+        if (txMerged.finished) {
+          setQuizFinished(true);
+          const myFinal = Number(txMerged.scores?.[p1Id] ?? quizScore);
+          const botFinal = Number(txMerged.scores?.[p2Id] ?? nextBotScore);
+          const wonMatch = myFinal >= botFinal;
+          triggerGameAward('quiz', {
+            gameId: 'quiz',
+            gameName: 'Quiz Battle',
+            mode: gameModeRef.current,
+            outcome: wonMatch ? 'win' : 'loss',
+            pointsEarned: wonMatch ? 55 : myFinal > 0 ? 25 : 10,
+            scoreSummary: `Scored ${myFinal} vs Opponent ${botFinal}`,
+          });
+        } else if (typeof txMerged.index === 'number' && txMerged.index !== qIdxAtBotRun) {
+          const targetIdx = txMerged.index;
+          setQuizIndex((prevIdx) => {
+            if (prevIdx !== targetIdx) {
+              setSelectedOption(null);
+              setQuizTimer(15);
+            }
+            return targetIdx;
+          });
+        }
+      });
+    }, 1500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    activePlayer.id,
+    aiDifficulty,
+    currentRoom,
+    isRoomMatchStarted,
+    quizAnswersByQ,
+    quizFinished,
+    quizIndex,
+    quizMultiplayerScores,
+    quizQuestions,
+    quizScore,
+    quizSeed,
+    quizSource,
+    selectedGame,
+    triggerGameAward,
+  ]);
 
   // --------------------------------------------------------------------------
   // Instructions Helper (exhaustive across all 7 GameIds)
@@ -3831,91 +4459,98 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                       Play Again
                     </button>
                   </div>
-                ) : ludoPhase === 'select' ? (
-                  <div className="w-full p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-2xl space-y-2 text-center">
-                    <p className="text-xs font-bold text-amber-800 dark:text-amber-300">
-                      {gameMode !== 'ai' &&
-                      currentRoom &&
-                      (!isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn)) ||
-                        ludoTurn !== myLudoSeat)
-                        ? `${LUDO_COLORS[ludoTurn].name} rolled ${ludoDice} — waiting for them to move a token...`
-                        : `Rolled ${ludoDice}! Choose which token to move:`}
-                    </p>
-                    <div className="flex flex-wrap justify-center gap-2">
-                      {ludoLegalTokens.map((tIdx) => (
-                        <button
-                          key={tIdx}
-                          type="button"
-                          disabled={
-                            gameMode !== 'ai' &&
-                            Boolean(currentRoom) &&
+                ) : (
+                  <div className="w-full space-y-3">
+                    {ludoPhase === 'select' && (
+                      <div className="w-full p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-2xl space-y-2 text-center">
+                        <p className="text-xs font-bold text-amber-800 dark:text-amber-300">
+                          {gameMode !== 'ai' &&
+                          currentRoom &&
+                          (!isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn)) ||
+                            ludoTurn !== myLudoSeat)
+                            ? `${LUDO_COLORS[ludoTurn].name} rolled ${ludoDice} — waiting for them to move a token...`
+                            : `Rolled ${ludoDice}! Choose which token to move:`}
+                        </p>
+                        <div className="flex flex-wrap justify-center gap-2">
+                          {ludoLegalTokens.map((tIdx) => (
+                            <button
+                              key={tIdx}
+                              type="button"
+                              disabled={
+                                gameMode !== 'ai' &&
+                                Boolean(currentRoom) &&
+                                (ludoTurn !== myLudoSeat ||
+                                  !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn)))
+                              }
+                              onClick={() => executeLudoTokenMove(ludoTurn, tIdx, ludoDice)}
+                              className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-sm min-h-[40px]"
+                            >
+                              Move #{tIdx + 1} (
+                              {ludoTokens[ludoTurn][tIdx] === -1
+                                ? 'Yard → Start'
+                                : `Step ${ludoTokens[ludoTurn][tIdx]}`}
+                              )
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
+                      <button
+                        type="button"
+                        onClick={rollLudoDice}
+                        disabled={
+                          ludoRolling ||
+                          ludoPhase === 'select' ||
+                          (gameMode === 'ai'
+                            ? ludoTurn !== 0
+                            : Boolean(currentRoom) &&
+                              (ludoTurn !== myLudoSeat ||
+                                !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn))))
+                        }
+                        className="w-14 h-14 sm:w-16 sm:h-16 bg-white dark:bg-slate-900 border-2 border-blue-500 rounded-2xl shadow-lg flex items-center justify-center text-2xl sm:text-3xl font-black text-blue-600 hover:scale-105 active:scale-95 disabled:opacity-50 transition-all"
+                      >
+                        {ludoDice}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={rollLudoDice}
+                        disabled={
+                          ludoRolling ||
+                          ludoPhase === 'select' ||
+                          (gameMode === 'ai'
+                            ? ludoTurn !== 0
+                            : Boolean(currentRoom) &&
+                              (ludoTurn !== myLudoSeat ||
+                                !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn))))
+                        }
+                        className="px-5 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-md transition-colors min-h-[44px]"
+                      >
+                        {ludoRolling
+                          ? 'Rolling Dice...'
+                          : gameMode === 'ai' && !currentRoom && ludoTurn !== 0
+                          ? `${LUDO_COLORS[ludoTurn].name} AI Playing...`
+                          : currentRoom &&
+                            !currentRoom.isOpenGroup &&
+                            !currentRoom.guest &&
+                            !currentRoom.player2Id &&
+                            currentRoom.players.length < 2
+                          ? 'Waiting for Friend to Join...'
+                          : currentRoom &&
                             (ludoTurn !== myLudoSeat ||
                               !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn)))
-                          }
-                          onClick={() => executeLudoTokenMove(ludoTurn, tIdx, ludoDice)}
-                          className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-sm min-h-[40px]"
-                        >
-                          Move #{tIdx + 1} (
-                          {ludoTokens[ludoTurn][tIdx] === -1
-                            ? 'Yard → Start'
-                            : `Step ${ludoTokens[ludoTurn][tIdx]}`}
-                          )
-                        </button>
-                      ))}
+                          ? `Waiting for ${
+                              (currentRoom.players.length <= 2
+                                ? ludoTurn === 0
+                                  ? currentRoom.players[0]?.name
+                                  : currentRoom.players[1]?.name
+                                : currentRoom.players[ludoTurn]?.name) || LUDO_COLORS[ludoTurn].name
+                            }'s turn...`
+                          : ludoPhase === 'select'
+                          ? 'Select Token Above...'
+                          : `Roll Dice 🎲`}
+                      </button>
                     </div>
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4">
-                    <button
-                      type="button"
-                      onClick={rollLudoDice}
-                      disabled={
-                        ludoRolling ||
-                        (gameMode === 'ai'
-                          ? ludoTurn !== 0
-                          : Boolean(currentRoom) &&
-                            (ludoTurn !== myLudoSeat ||
-                              !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn))))
-                      }
-                      className="w-14 h-14 sm:w-16 sm:h-16 bg-white dark:bg-slate-900 border-2 border-blue-500 rounded-2xl shadow-lg flex items-center justify-center text-2xl sm:text-3xl font-black text-blue-600 hover:scale-105 active:scale-95 disabled:opacity-50 transition-all"
-                    >
-                      {ludoDice}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={rollLudoDice}
-                      disabled={
-                        ludoRolling ||
-                        (gameMode === 'ai'
-                          ? ludoTurn !== 0
-                          : Boolean(currentRoom) &&
-                            (ludoTurn !== myLudoSeat ||
-                              !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn))))
-                      }
-                      className="px-5 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-md transition-colors min-h-[44px]"
-                    >
-                      {ludoRolling
-                        ? 'Rolling Dice...'
-                        : gameMode === 'ai' && !currentRoom && ludoTurn !== 0
-                        ? `${LUDO_COLORS[ludoTurn].name} AI Playing...`
-                        : currentRoom &&
-                          !currentRoom.isOpenGroup &&
-                          !currentRoom.guest &&
-                          !currentRoom.player2Id &&
-                          currentRoom.players.length < 2
-                        ? 'Waiting for Friend to Join...'
-                        : currentRoom &&
-                          (ludoTurn !== myLudoSeat ||
-                            !isAuthorizedTurnActor(getPlayerIdForLudoSeat(ludoTurn)))
-                        ? `Waiting for ${
-                            (currentRoom.players.length <= 2
-                              ? ludoTurn === 0
-                                ? currentRoom.players[0]?.name
-                                : currentRoom.players[1]?.name
-                              : currentRoom.players[ludoTurn]?.name) || LUDO_COLORS[ludoTurn].name
-                          }...`
-                        : `Roll Dice 🎲`}
-                    </button>
                   </div>
                 )}
 
@@ -4174,7 +4809,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                           chessTurn === 'white'
                             ? currentRoom.players[0]?.name || 'White ♔'
                             : currentRoom.players[1]?.name || 'Black ♚'
-                        } to move...`}
+                        }'s turn...`}
                   </p>
                 )}
 
@@ -4405,7 +5040,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         ? slTurn === 'p2'
                         : Boolean(currentRoom) &&
                           !isAuthorizedTurnActor(
-                            slTurn === 'p1' ? currentRoom?.players[0]?.id : currentRoom?.players[1]?.id
+                            slTurn === 'p1'
+                              ? currentRoom?.players[0]?.id || currentRoom?.player1Id || currentRoom?.hostId || undefined
+                              : currentRoom?.players[1]?.id || currentRoom?.player2Id || undefined
                           ))
                     }
                     className="w-16 h-16 bg-white dark:bg-slate-900 border-2 border-emerald-500 rounded-2xl shadow-md flex items-center justify-center text-3xl font-black text-emerald-600 hover:scale-105 active:scale-95 disabled:opacity-50 transition-all"
@@ -4422,7 +5059,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                         ? slTurn === 'p2'
                         : Boolean(currentRoom) &&
                           !isAuthorizedTurnActor(
-                            slTurn === 'p1' ? currentRoom?.players[0]?.id : currentRoom?.players[1]?.id
+                            slTurn === 'p1'
+                              ? currentRoom?.players[0]?.id || currentRoom?.player1Id || currentRoom?.hostId || undefined
+                              : currentRoom?.players[1]?.id || currentRoom?.player2Id || undefined
                           ))
                     }
                     className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-2xl text-xs font-bold shadow-md transition-colors min-h-[44px]"
@@ -4441,13 +5080,15 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                       ? 'Waiting for Friend to Join...'
                       : currentRoom &&
                         !isAuthorizedTurnActor(
-                          slTurn === 'p1' ? currentRoom.players[0]?.id : currentRoom.players[1]?.id
+                          slTurn === 'p1'
+                            ? currentRoom.players[0]?.id || currentRoom.player1Id || currentRoom.hostId || undefined
+                            : currentRoom.players[1]?.id || currentRoom.player2Id || undefined
                         )
                       ? `Waiting for ${
                           slTurn === 'p1'
                             ? currentRoom.players[0]?.name || 'Player 1 (📍)'
                             : currentRoom.players[1]?.name || 'Player 2 (⭐)'
-                        }...`
+                        }'s turn...`
                       : `Roll for ${
                           currentRoom
                             ? slTurn === 'p1'
@@ -4481,7 +5122,17 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 isWaitingSpectator={isWaitingSpectator}
                 syncedState={carromSyncedState}
                 onSyncMove={(nextState, nextTurnId, status) =>
-                  broadcastRoomMove('CARROM_MOVE', nextState, nextTurnId, status)
+                  broadcastRoomMove('CARROM_MOVE', nextState, nextTurnId, status, {
+                    bypassTurnGuard: Boolean(
+                      currentRoomRef.current?.isBotMatch &&
+                        typeof nextState?.byPlayerId === 'string' &&
+                        nextState.byPlayerId !== activePlayer.id
+                    ),
+                    actorIdOverride:
+                      typeof nextState?.byPlayerId === 'string' && nextState.byPlayerId
+                        ? nextState.byPlayerId
+                        : undefined,
+                  })
                 }
                 onRequestRematch={() => resetCarromState(true)}
                 onMatchFinish={(outcome, summary, points) => {

@@ -121,7 +121,13 @@ export function useMultiplayerRoom({
     }
 
     const turnOwnerId =
-      room.currentTurnUserId || room.currentTurn || expectedSeatPlayerId || room.players[0]?.id || '';
+      room.currentTurnUserId ||
+      room.currentTurn ||
+      expectedSeatPlayerId ||
+      room.players[0]?.id ||
+      room.player1Id ||
+      room.hostId ||
+      '';
     if (!turnOwnerId) return false;
     if (expectedSeatPlayerId && turnOwnerId !== expectedSeatPlayerId) {
       return false;
@@ -163,6 +169,7 @@ export function useMultiplayerRoom({
       status: 'playing' | 'active' | 'in_game' | 'finished' = 'playing',
       options?: {
         bypassTurnGuard?: boolean;
+        actorIdOverride?: string;
         scores?: Record<string, number>;
         winnerId?: string | null;
         isDraw?: boolean;
@@ -180,20 +187,25 @@ export function useMultiplayerRoom({
       const nextSeq = roomMoveCounterRef.current + 1;
       roomMoveCounterRef.current = nextSeq;
       const myId = activePlayerIdRef.current;
+      const actorId =
+        options?.actorIdOverride ||
+        (typeof newGameState?.byPlayerId === 'string' && newGameState.byPlayerId
+          ? newGameState.byPlayerId
+          : myId);
       const liveFbUid = auth.currentUser?.uid || firebaseAuthUidRef.current || null;
-      const moveId = `${myId}_${nextSeq}_${Math.random().toString(36).slice(2, 6)}`;
+      const moveId = `${actorId}_${nextSeq}_${Math.random().toString(36).slice(2, 6)}`;
 
       const stampedState = {
         ...newGameState,
         moveSeq: nextSeq,
         moveId,
-        byPlayerId: myId,
+        byPlayerId: actorId,
         ...(liveFbUid ? { byAuthUid: liveFbUid } : {}),
       };
       const resolvedNextTurn = String(nextTurnId || '');
       const normalizedStatus: 'playing' | 'finished' =
         status === 'finished' ? 'finished' : 'playing';
-      const unified = buildUnifiedBoardAndMoveFields(stampedState, moveAction, myId);
+      const unified = buildUnifiedBoardAndMoveFields(stampedState, moveAction, actorId);
 
       const optimisticRoom: MultiplayerRoom = {
         ...room,
