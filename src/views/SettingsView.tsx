@@ -4,20 +4,21 @@
  */
 
 import React, { useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, BUILT_IN_DEMO_PROFILE_IDS } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { NavTab, ThemeMode } from '../types';
-import { APP_CONFIG } from '../constants/branding';
 import {
   Sun,
   Moon,
   Laptop,
-  Smartphone,
   LogOut,
   Clock,
   CheckCircle2,
   Lock,
   Layers,
+  Trash2,
+  AlertTriangle,
+  X,
 } from 'lucide-react';
 
 interface SettingsViewProps {
@@ -29,16 +30,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onNavigate,
   onOpenAuth,
 }) => {
-  const { currentUser, logout, updateProfile, daysRemaining } = useAuth();
+  const { currentUser, logout, updateProfile, deleteOwnAccount, daysRemaining } = useAuth();
   const { theme, setTheme } = useTheme();
 
   // Settings toggles
-  const [notifyMsg, setNotifyMsg] = useState(true);
-  const [notifyGames, setNotifyGames] = useState(true);
-  const [notifyTournaments, setNotifyTournaments] = useState(true);
   const [isPhonePublic, setIsPhonePublic] = useState(currentUser?.isContactNumberPublic || false);
   const [isAddressPublic, setIsAddressPublic] = useState(currentUser?.isAddressPublic || false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  const isProtectedDemoAccount = currentUser
+    ? BUILT_IN_DEMO_PROFILE_IDS.has(currentUser.id)
+    : false;
 
   const handleSavePrivacy = async () => {
     if (!currentUser) return;
@@ -48,6 +53,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     });
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
+  };
+
+  const handleConfirmDeleteAccount = async () => {
+    setDeleteError('');
+    setDeletingAccount(true);
+    const res = await deleteOwnAccount();
+    setDeletingAccount(false);
+    if (res.success) {
+      setShowDeleteConfirm(false);
+      onNavigate('login');
+    } else {
+      setDeleteError(res.error || 'Could not delete account right now.');
+    }
   };
 
   return (
@@ -224,6 +242,95 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </button>
         </div>
       </section>
+
+      {/* 6. Permanent Account Deletion */}
+      {currentUser && (
+        <section className="bg-white dark:bg-slate-900 border border-red-200/80 dark:border-red-900/50 rounded-3xl p-5 sm:p-6 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h3 className="text-sm font-bold text-red-600 dark:text-red-400 flex items-center gap-1.5">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>Permanent Account Deletion</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {isProtectedDemoAccount
+                ? 'Built-in campus demo profiles are protected and cannot be permanently deleted.'
+                : 'Permanently delete your JIT GROUP profile, saved login entry, and cloud records from Firebase.'}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={isProtectedDemoAccount}
+            onClick={() => {
+              setDeleteError('');
+              setShowDeleteConfirm(true);
+            }}
+            className="px-4 py-2.5 min-h-[44px] bg-red-600 hover:bg-red-700 disabled:opacity-45 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition-colors flex items-center justify-center gap-1.5 shrink-0"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Delete Account</span>
+          </button>
+        </section>
+      )}
+
+      {/* Permanent Account Deletion Confirmation Modal */}
+      {showDeleteConfirm && currentUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 animate-in fade-in">
+          <div className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Delete Account Permanently?
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-mono">
+                    {currentUser.fullName} · {currentUser.contactNumber}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              This will permanently remove your profile, points, and phone login index from JIT GROUP and sign you out immediately. This action cannot be undone.
+            </p>
+
+            {deleteError && (
+              <p className="text-xs text-red-600 dark:text-red-400 font-semibold">
+                {deleteError}
+              </p>
+            )}
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                disabled={deletingAccount}
+                onClick={() => setShowDeleteConfirm(false)}
+                className="flex-1 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs font-semibold transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deletingAccount}
+                onClick={handleConfirmDeleteAccount}
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-colors"
+              >
+                {deletingAccount ? 'Deleting...' : 'Delete Permanently'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

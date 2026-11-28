@@ -57,6 +57,7 @@ import {
   deleteFirestoreReel,
   purgeExpiredCloudVideos,
   subscribeToFirestoreAnnouncements,
+  updateCloudFriendsCount,
 } from '../lib/firebase';
 
 export interface ActiveChatPartner {
@@ -280,13 +281,15 @@ const SEED_REELS: Reel[] = INITIAL_REELS.map((r) => ({
 }));
 
 export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { currentUser, registeredProfiles } = useAuth();
+  const { currentUser, registeredProfiles, syncLocalFriendsCount } = useAuth();
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
   const [announcements, setAnnouncements] = useState<GlobalAnnouncement[]>([]);
   const [activeChatPartner, setActiveChatPartner] = useState<ActiveChatPartner | null>(null);
   const [pendingGameInvite, setPendingGameInvite] = useState<PendingGameInvite | null>(null);
   const [cloudNotifications, setCloudNotifications] = useState<InAppNotification[]>([]);
   const [friendRequests, setFriendRequests] = useState<FriendRequest[]>([]);
+  const [friendsHydratedForUserId, setFriendsHydratedForUserId] = useState<string | null>(null);
+  const lastSyncedFriendsCountRef = useRef<{ uid: string; count: number } | null>(null);
   const postsHydratedRef = useRef(false);
   const deletedPostIdsRef = useRef<Set<string>>(new Set());
   const deletedReelIdsRef = useRef<Set<string>>(new Set());
@@ -447,10 +450,14 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // Real-time Firestore Friend Requests & Notifications subscriptions
   useEffect(() => {
-    if (!currentUser?.id) return;
+    if (!currentUser?.id) {
+      setFriendsHydratedForUserId(null);
+      return;
+    }
     const uid = currentUser.id;
     const isDemo = uid === 'usr_jit_primary_001';
     const blockedDemo = new Set(demoRemovedIds);
+    setFriendsHydratedForUserId(null);
 
     const unsubReqs = subscribeToFirestoreFriendRequests(uid, (state) => {
       setFriendRequests(state.requests);
@@ -469,6 +476,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         setPendingIncomingRequestIds(state.incomingPendingIds);
         setPendingOutgoingRequestIds(state.outgoingPendingIds);
       }
+      setFriendsHydratedForUserId(uid);
     });
 
     const unsubNotifs = subscribeToFirestoreNotifications(uid, (items) => {
@@ -480,6 +488,18 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       unsubNotifs();
     };
   }, [currentUser?.id, demoRemovedIds]);
+
+  // Keep user's Campus Friends stat synced with live accepted friendIds once Firestore hydrates
+  useEffect(() => {
+    if (!currentUser?.id || friendsHydratedForUserId !== currentUser.id) return;
+    const liveCount = friendIds.filter((id) => id !== currentUser.id).length;
+    syncLocalFriendsCount(liveCount);
+    const prevSync = lastSyncedFriendsCountRef.current;
+    if (!prevSync || prevSync.uid !== currentUser.id || prevSync.count !== liveCount) {
+      lastSyncedFriendsCountRef.current = { uid: currentUser.id, count: liveCount };
+      updateCloudFriendsCount(currentUser.id, liveCount).catch(() => {});
+    }
+  }, [currentUser?.id, friendIds, friendsHydratedForUserId, syncLocalFriendsCount]);
 
   // Real-time Firestore Reels, Posts, and Announcements subscriptions (plus 40-day expiry & delete reconciliation)
   useEffect(() => {

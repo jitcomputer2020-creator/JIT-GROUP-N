@@ -48,12 +48,26 @@ export function normalizeDigitsOnly(phone: string): string {
   return (phone || '').replace(/\D/g, '');
 }
 
-export function toCanonicalPhoneKey(phone: string): string {
-  const digits = normalizeDigitsOnly(phone);
-  if (digits.length >= 10) {
-    return digits.slice(-10);
+export function normalizePhone10(phone: string): string {
+  let digits = normalizeDigitsOnly(phone);
+  if (!digits) return '';
+  if (digits.startsWith('00') && digits.length > 10) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('91') && digits.length > 10) {
+    digits = digits.slice(2);
+  }
+  while (digits.startsWith('0') && digits.length > 10) {
+    digits = digits.slice(1);
+  }
+  if (digits.length > 10) {
+    digits = digits.slice(-10);
   }
   return digits;
+}
+
+export function toCanonicalPhoneKey(phone: string): string {
+  return normalizePhone10(phone);
 }
 
 function isCloudTimestampExpired(ts: unknown, fallbackIso?: string): boolean {
@@ -202,28 +216,77 @@ async function cleanupExpiredCloudProfile(phoneKey: string, profileId: string): 
 export async function lookupCloudProfileByPhone(
   contactNumber: string
 ): Promise<{ found: boolean; profile?: UserProfile; expired?: boolean }> {
+  const rawDigits = normalizeDigitsOnly(contactNumber);
   const phoneKey = toCanonicalPhoneKey(contactNumber);
   if (!phoneKey || phoneKey.length < 7) return { found: false };
 
-  const indexSnap = await getDoc(doc(dbLite, 'phone_index', phoneKey));
-  if (!indexSnap.exists()) return { found: false };
+  let profileData: Record<string, any> | null = null;
+  let profileId: string | null = null;
 
-  const indexData = indexSnap.data();
-  const profileId = indexData?.profileId;
-  if (!profileId || typeof profileId !== 'string') return { found: false };
+  const keysToTry = Array.from(
+    new Set([phoneKey, rawDigits, `91${phoneKey}`, `0${phoneKey}`].filter((k) => k && k.length >= 7))
+  );
+  for (const keyCandidate of keysToTry) {
+    const indexSnap = await getDoc(doc(dbLite, 'phone_index', keyCandidate)).catch(() => null);
+    if (!indexSnap || !indexSnap.exists()) continue;
+    const indexData = indexSnap.data();
+    const pid = indexData?.profileId;
+    if (!pid || typeof pid !== 'string') continue;
 
-  if (isCloudTimestampExpired(indexData.lastLoginAt)) {
-    await cleanupExpiredCloudProfile(phoneKey, profileId);
-    return { found: false, expired: true };
+    if (isCloudTimestampExpired(indexData.lastLoginAt)) {
+      await cleanupExpiredCloudProfile(keyCandidate, pid);
+      return { found: false, expired: true };
+    }
+
+    const profileSnap = await getDoc(doc(dbLite, 'profiles', pid)).catch(() => null);
+    if (profileSnap && profileSnap.exists()) {
+      const candidate = profileSnap.data();
+      if (candidate.status !== 'deleted') {
+        profileId = pid;
+        profileData = candidate;
+        break;
+      }
+    }
   }
 
-  const profileSnap = await getDoc(doc(dbLite, 'profiles', profileId));
-  if (!profileSnap.exists()) return { found: false };
-
-  const profileData = profileSnap.data();
-  if (profileData.status === 'deleted') {
-    return { found: false };
+  if (!profileData) {
+    try {
+      const keySnap = await getDocs(
+        query(collection(dbLite, 'profiles'), where('phoneKey', '==', phoneKey), limit(10))
+      );
+      for (const d of keySnap.docs) {
+        const data = d.data();
+        if (data && data.status !== 'deleted') {
+          profileId = String(data.id || d.id);
+          profileData = data;
+          break;
+        }
+      }
+    } catch {
+      // Fallback to bounded scan
+    }
   }
+
+  if (!profileData) {
+    try {
+      const scanSnap = await getDocs(query(collection(dbLite, 'profiles'), limit(350)));
+      for (const d of scanSnap.docs) {
+        const data = d.data();
+        if (!data || data.status === 'deleted') continue;
+        const storedKey = normalizePhone10(String(data.phoneKey || data.contactNumber || ''));
+        if (storedKey && storedKey === phoneKey) {
+          profileId = String(data.id || d.id);
+          profileData = data;
+          break;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!profileData || !profileId) return { found: false };
+
   if (
     profileId !== 'usr_jit_primary_001' &&
     isCloudTimestampExpired(profileData.lastActiveAt, profileData.lastLoginAt || profileData.lastLogin)
@@ -231,6 +294,12 @@ export async function lookupCloudProfileByPhone(
     await cleanupExpiredCloudProfile(phoneKey, profileId);
     return { found: false, expired: true };
   }
+
+  setDoc(
+    doc(dbLite, 'phone_index', phoneKey),
+    { profileId, lastLoginAt: serverTimestamp() },
+    { merge: true }
+  ).catch(() => {});
 
   return { found: true, profile: firestoreDocToUserProfile(profileData) };
 }
@@ -254,16 +323,32 @@ export async function loginCloudProfileByPhone(
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber || contactNumber);
   const nowIso = new Date().toISOString();
 
-  const batch = writeBatch(dbLite);
-  batch.update(doc(dbLite, 'profiles', profile.id), {
-    lastLoginAt: nowIso,
-    lastLogin: nowIso,
-    lastActiveAt: serverTimestamp(),
-  });
-  batch.update(doc(dbLite, 'phone_index', phoneKey), {
-    lastLoginAt: serverTimestamp(),
-  });
-  await batch.commit();
+  try {
+    const batch = writeBatch(dbLite);
+    batch.set(
+      doc(dbLite, 'profiles', profile.id),
+      {
+        phoneKey,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    if (phoneKey && phoneKey.length >= 7) {
+      batch.set(
+        doc(dbLite, 'phone_index', phoneKey),
+        {
+          profileId: profile.id,
+          lastLoginAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
+    await batch.commit();
+  } catch (err) {
+    console.warn('loginCloudProfileByPhone batch notice (node):', err);
+  }
 
   return {
     success: true,
@@ -314,16 +399,28 @@ export async function registerOrRecognizeCloudProfile(
     };
 
     const batch = writeBatch(dbLite);
-    batch.update(doc(dbLite, 'profiles', prev.id), {
-      fullName: cleanName,
-      address: cleanAddr,
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-      lastActiveAt: serverTimestamp(),
-    });
-    batch.update(doc(dbLite, 'phone_index', phoneKey), {
-      lastLoginAt: serverTimestamp(),
-    });
+    batch.set(
+      doc(dbLite, 'profiles', prev.id),
+      {
+        phoneKey,
+        fullName: cleanName,
+        address: cleanAddr,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    if (phoneKey && phoneKey.length >= 7) {
+      batch.set(
+        doc(dbLite, 'phone_index', phoneKey),
+        {
+          profileId: prev.id,
+          lastLoginAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
     batch.set(doc(dbLite, 'user_directory', prev.id), buildUserDirectoryPayload(updated));
     await batch.commit();
 

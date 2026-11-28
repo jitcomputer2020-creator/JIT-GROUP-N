@@ -4495,7 +4495,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
                 }
                 onRequestRematch={() => resetCarromState(true)}
                 onMatchFinish={(outcome, summary, points) => {
-                  triggerGameAward(`carrom_${Date.now()}`, {
+                  triggerGameAward('carrom', {
                     gameId: 'carrom',
                     gameName: 'Carrom',
                     mode: gameMode,

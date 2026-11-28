@@ -23,6 +23,8 @@ import {
   recordCloudMatchHistory,
   subscribeToCloudProfile,
   claimCloudDailyReward,
+  deleteCloudProfileByUser,
+  normalizePhone10,
   DAILY_CLAIM_COOLDOWN_MS,
   DAILY_STREAK_GRACE_MS,
 } from '../lib/firebase';
@@ -34,19 +36,23 @@ import {
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000; // 180 consecutive days (6 months)
 
+export const BUILT_IN_DEMO_PROFILE_IDS = new Set<string>([
+  'usr_jit_primary_001',
+  'usr_jit_002',
+  'usr_jit_003',
+  'usr_jit_004',
+]);
+
 export function normalizePhoneDigits(phone: string): string {
-  return (phone || '').replace(/\D/g, '');
+  return normalizePhone10(phone);
 }
 
 export function isPhoneNumberMatch(a: string, b: string): boolean {
-  const da = normalizePhoneDigits(a);
-  const db = normalizePhoneDigits(b);
-  if (!da || !db) return false;
-  if (da === db) return true;
-  // Match on last 10 digits when country code (+91, etc.) or leading 0 differs
-  if (da.length >= 10 && db.length >= 10 && da.slice(-10) === db.slice(-10)) return true;
-  // Match on local phone numbers of length 7+
-  if (da.length >= 7 && db.length >= 7 && (da.endsWith(db) || db.endsWith(da))) return true;
+  const na = normalizePhone10(a);
+  const nb = normalizePhone10(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.length >= 7 && nb.length >= 7 && (na.endsWith(nb) || nb.endsWith(na))) return true;
   return false;
 }
 
@@ -93,6 +99,9 @@ interface AuthContextType {
     address: string
   ) => Promise<{ success: boolean; error?: string; user?: UserProfile; isExisting?: boolean; message?: string }>;
   logout: () => void;
+  removeSavedProfile: (userId: string) => void;
+  deleteOwnAccount: () => Promise<{ success: boolean; error?: string }>;
+  syncLocalFriendsCount: (count: number) => void;
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
   claimDailyReward: () => Promise<{
     success: boolean;
@@ -118,6 +127,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const LS_CURRENT_USER = 'jit_current_user';
 const LS_PROFILES = 'jit_registered_profiles';
 const LS_LOGGED_OUT = 'jit_logged_out';
+const LS_REMOVED_SAVED_PROFILES = 'jit_removed_saved_profiles_v1';
 export const LS_WALLET_TX = 'jit_wallet_transactions';
 export const LS_MATCH_HISTORY = 'jit_match_history';
 const LS_DAILY_CLAIM_PREFIX = 'jit_daily_claim_';
@@ -233,15 +243,36 @@ function readPersistedUser(): UserProfile | null {
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const readRemovedSavedIds = (): string[] => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = localStorage.getItem(LS_REMOVED_SAVED_PROFILES);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const [removedSavedProfileIds, setRemovedSavedProfileIds] = useState<string[]>(() =>
+    readRemovedSavedIds()
+  );
+
   const [registeredProfiles, setRegisteredProfiles] = useState<UserProfile[]>(() => {
+    const removedSet = new Set(readRemovedSavedIds());
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(LS_PROFILES);
       if (saved) {
         try {
           const parsed = JSON.parse(saved);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            // Auto-clean any accounts inactive for >180 days or deleted on initial boot
-            return parsed.filter((p: UserProfile) => !isProfileExpired(p) && p.status !== 'deleted');
+            // Auto-clean any accounts inactive for >180 days, deleted, or removed from quick login
+            return parsed.filter(
+              (p: UserProfile) =>
+                !isProfileExpired(p) &&
+                p.status !== 'deleted' &&
+                (!removedSet.has(p.id) || BUILT_IN_DEMO_PROFILE_IDS.has(p.id))
+            );
           }
         } catch (e) {
           console.error('Failed to parse cached profiles', e);
@@ -258,8 +289,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   currentUserRef.current = currentUser;
   const registeredProfilesRef = useRef<UserProfile[]>(registeredProfiles);
   registeredProfilesRef.current = registeredProfiles;
+  const removedSavedProfileIdsRef = useRef<string[]>(removedSavedProfileIds);
+  removedSavedProfileIdsRef.current = removedSavedProfileIds;
   const confirmedCloudProfileRef = useRef<string | null>(null);
   const claimInFlightRef = useRef<boolean>(false);
+
+  const unmarkRemovedSavedProfile = useCallback((userId: string) => {
+    setRemovedSavedProfileIds((prev) => {
+      if (!prev.includes(userId)) return prev;
+      const next = prev.filter((id) => id !== userId);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(LS_REMOVED_SAVED_PROFILES, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+      }
+      return next;
+    });
+  }, []);
 
   // Sync state to localStorage
   useEffect(() => {
@@ -467,15 +515,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         );
 
         setRegisteredProfiles((prev) => {
+          const removedSet = new Set(removedSavedProfileIdsRef.current);
           const map = new Map<string, UserProfile>();
-          // Add existing local state first (excluding expired)
+          // Add existing local state first (excluding expired & removed saved)
           for (const p of prev) {
-            if (!isProfileExpired(p) && p.status !== 'deleted') {
+            if (
+              !isProfileExpired(p) &&
+              p.status !== 'deleted' &&
+              (!removedSet.has(p.id) || BUILT_IN_DEMO_PROFILE_IDS.has(p.id))
+            ) {
               map.set(p.id, p);
             }
           }
           // Merge server profiles (preserving authoritative Firestore photos/overrides if already loaded)
           for (const sp of activeServerProfiles) {
+            if (removedSet.has(sp.id) && !BUILT_IN_DEMO_PROFILE_IDS.has(sp.id)) continue;
             const localExisting = Array.from(map.values()).find(
               (p) => isPhoneNumberMatch(p.contactNumber, sp.contactNumber) || p.id === sp.id
             );
@@ -749,6 +803,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       if (cloudRes.success && cloudRes.profile) {
         const activeUser = cloudRes.profile;
+        unmarkRemovedSavedProfile(activeUser.id);
         setCurrentUser(activeUser);
         setRegisteredProfiles((prev) => {
           const withoutExpired = prev.filter((p) => !isProfileExpired(p));
@@ -902,6 +957,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       lastLogin: nowIso,
     };
 
+    unmarkRemovedSavedProfile(updatedUser.id);
     setCurrentUser(updatedUser);
     setRegisteredProfiles((prev) => {
       const exists = prev.some((p) => p.id === updatedUser.id);
@@ -1016,6 +1072,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const finalUser = cloudReg.profile;
       const isExisting = cloudReg.isExisting || Boolean(seedCandidate);
 
+      unmarkRemovedSavedProfile(finalUser.id);
       setCurrentUser(finalUser);
       setRegisteredProfiles((prev) => {
         const withoutExpired = prev.filter((p) => !isProfileExpired(p));
@@ -1133,6 +1190,104 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     signOutFirebaseAuth().catch(() => {});
   };
+
+  const removeSavedProfile = useCallback((userId: string) => {
+    if (!userId || BUILT_IN_DEMO_PROFILE_IDS.has(userId)) return;
+    setRemovedSavedProfileIds((prev) => {
+      const next = prev.includes(userId) ? prev : [...prev, userId];
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(LS_REMOVED_SAVED_PROFILES, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+      }
+      return next;
+    });
+    setRegisteredProfiles((prev) => {
+      const next = prev.filter((p) => p.id !== userId);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(LS_PROFILES, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const deleteOwnAccount = useCallback(async (): Promise<{ success: boolean; error?: string }> => {
+    const active = currentUserRef.current;
+    if (!active) {
+      return { success: false, error: 'No active account signed in.' };
+    }
+    if (BUILT_IN_DEMO_PROFILE_IDS.has(active.id)) {
+      return { success: false, error: 'Built-in default demo profiles cannot be deleted.' };
+    }
+    try {
+      await deleteCloudProfileByUser(active);
+      setRegisteredProfiles((prev) => prev.filter((p) => p.id !== active.id));
+      setRemovedSavedProfileIds((prev) => {
+        const next = prev.includes(active.id) ? prev : [...prev, active.id];
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem(LS_REMOVED_SAVED_PROFILES, JSON.stringify(next));
+          } catch {
+            // ignore
+          }
+        }
+        return next;
+      });
+      setCurrentUser(null);
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(LS_CURRENT_USER);
+        localStorage.setItem(LS_LOGGED_OUT, 'true');
+      }
+      signOutFirebaseAuth().catch(() => {});
+      return { success: true };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Could not delete account. Please try again.',
+      };
+    }
+  }, []);
+
+  const syncLocalFriendsCount = useCallback((count: number) => {
+    const safeCount = Math.max(0, Math.floor(Number(count) || 0));
+    setCurrentUser((prev) => {
+      if (!prev || prev.stats?.friendsCount === safeCount) return prev;
+      const updated: UserProfile = {
+        ...prev,
+        stats: {
+          ...prev.stats,
+          friendsCount: safeCount,
+        },
+      };
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
+        } catch {
+          // ignore
+        }
+      }
+      return updated;
+    });
+    setRegisteredProfiles((prev) => {
+      const activeId = currentUserRef.current?.id;
+      if (!activeId) return prev;
+      let changed = false;
+      const next = prev.map((p) => {
+        if (p.id === activeId && p.stats?.friendsCount !== safeCount) {
+          changed = true;
+          return { ...p, stats: { ...p.stats, friendsCount: safeCount } };
+        }
+        return p;
+      });
+      return changed ? next : prev;
+    });
+  }, []);
 
   const updateProfile = async (updates: Partial<UserProfile>) => {
     if (!currentUser) return;
@@ -1474,6 +1629,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loginWithContact,
         registerUser,
         logout,
+        removeSavedProfile,
+        deleteOwnAccount,
+        syncLocalFriendsCount,
         updateProfile,
         claimDailyReward,
         awardGameResult,

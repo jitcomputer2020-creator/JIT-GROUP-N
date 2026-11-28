@@ -182,16 +182,34 @@ export function normalizeDigitsOnly(phone: string): string {
 }
 
 /**
- * Canonical phone lookup key:
- * Uses last 10 digits for 10+ digit numbers so "+91 98744 92871", "09874492871",
- * "919874492871", and "9874492871" all resolve deterministically to the same account.
+ * Strips spaces, dashes, punctuation, "+91"/"91" country prefix, and leading "0"s
+ * to yield the canonical 10-digit mobile number for deterministic lookup & matching.
  */
-export function toCanonicalPhoneKey(phone: string): string {
-  const digits = normalizeDigitsOnly(phone);
-  if (digits.length >= 10) {
-    return digits.slice(-10);
+export function normalizePhone10(phone: string): string {
+  let digits = normalizeDigitsOnly(phone);
+  if (!digits) return '';
+  if (digits.startsWith('00') && digits.length > 10) {
+    digits = digits.slice(2);
+  }
+  if (digits.startsWith('91') && digits.length > 10) {
+    digits = digits.slice(2);
+  }
+  while (digits.startsWith('0') && digits.length > 10) {
+    digits = digits.slice(1);
+  }
+  if (digits.length > 10) {
+    digits = digits.slice(-10);
   }
   return digits;
+}
+
+/**
+ * Canonical phone lookup key:
+ * Uses normalized 10-digit number so "+91 98366 76562", "09836676562",
+ * "919836676562", and "9836676562" all resolve deterministically to the same account.
+ */
+export function toCanonicalPhoneKey(phone: string): string {
+  return normalizePhone10(phone);
 }
 
 function isCloudTimestampExpired(ts: unknown, fallbackIso?: string): boolean {
@@ -405,42 +423,104 @@ async function cleanupExpiredCloudProfile(phoneKey: string, profileId: string): 
 }
 
 /**
- * Looks up a registered profile directly in Firestore by contact number.
+ * Looks up a registered profile directly in Firestore by contact number (normalized 10-digit key).
+ * Checks phone_index first, then falls back to profiles/users queries & auto-repairs phone_index.
  * Automatically purges accounts inactive for more than 180 days.
  */
 export async function lookupCloudProfileByPhone(
   contactNumber: string
 ): Promise<{ found: boolean; profile?: UserProfile; expired?: boolean }> {
+  const rawDigits = normalizeDigitsOnly(contactNumber);
   const phoneKey = toCanonicalPhoneKey(contactNumber);
   if (!phoneKey || phoneKey.length < 7) {
     return { found: false };
   }
 
-  const indexSnap = await fetchDocServerFirst(['phone_index', phoneKey]);
-  if (!indexSnap.exists()) {
+  let profileData: Record<string, any> | null = null;
+  let profileId: string | null = null;
+
+  // 1. Primary fast lookup via phone_index (checking canonical 10-digit key + legacy raw digit keys)
+  const indexKeysToTry = Array.from(
+    new Set([phoneKey, rawDigits, `91${phoneKey}`, `0${phoneKey}`].filter((k) => k && k.length >= 7))
+  );
+  for (const keyCandidate of indexKeysToTry) {
+    try {
+      const indexSnap = await fetchDocServerFirst(['phone_index', keyCandidate]);
+      if (!indexSnap.exists()) continue;
+      const indexData = indexSnap.data();
+      const pid = indexData?.profileId;
+      if (!pid || typeof pid !== 'string') continue;
+
+      if (isCloudTimestampExpired(indexData.lastLoginAt)) {
+        await cleanupExpiredCloudProfile(keyCandidate, pid);
+        return { found: false, expired: true };
+      }
+
+      const profileSnap = await fetchDocServerFirst(['profiles', pid]);
+      if (profileSnap.exists()) {
+        const candidateData = profileSnap.data();
+        if (candidateData.status !== 'deleted') {
+          profileId = pid;
+          profileData = candidateData;
+          break;
+        }
+      }
+    } catch {
+      // Continue to next key / fallback query
+    }
+  }
+
+  // 2. Fallback query across profiles collection in case phone_index entry is missing or stale
+  if (!profileData) {
+    try {
+      const keyQ = query(collection(db, 'profiles'), where('phoneKey', '==', phoneKey), limit(10));
+      let keySnap;
+      try {
+        keySnap = await getDocsFromServer(keyQ);
+      } catch {
+        keySnap = await getDocs(keyQ);
+      }
+      for (const d of keySnap.docs) {
+        const data = d.data();
+        if (data && data.status !== 'deleted') {
+          profileId = String(data.id || d.id);
+          profileData = data;
+          break;
+        }
+      }
+    } catch {
+      // Fallback to bounded scan below
+    }
+  }
+
+  if (!profileData) {
+    try {
+      const scanQ = query(collection(db, 'profiles'), limit(350));
+      let scanSnap;
+      try {
+        scanSnap = await getDocsFromServer(scanQ);
+      } catch {
+        scanSnap = await getDocs(scanQ);
+      }
+      for (const d of scanSnap.docs) {
+        const data = d.data();
+        if (!data || data.status === 'deleted') continue;
+        const storedKey = normalizePhone10(String(data.phoneKey || data.contactNumber || ''));
+        if (storedKey && storedKey === phoneKey) {
+          profileId = String(data.id || d.id);
+          profileData = data;
+          break;
+        }
+      }
+    } catch {
+      // Non-fatal fallback
+    }
+  }
+
+  if (!profileData || !profileId) {
     return { found: false };
   }
 
-  const indexData = indexSnap.data();
-  const profileId = indexData?.profileId;
-  if (!profileId || typeof profileId !== 'string') {
-    return { found: false };
-  }
-
-  if (isCloudTimestampExpired(indexData.lastLoginAt)) {
-    await cleanupExpiredCloudProfile(phoneKey, profileId);
-    return { found: false, expired: true };
-  }
-
-  const profileSnap = await fetchDocServerFirst(['profiles', profileId]);
-  if (!profileSnap.exists()) {
-    return { found: false };
-  }
-
-  const profileData = profileSnap.data();
-  if (profileData.status === 'deleted') {
-    return { found: false };
-  }
   if (
     profileId !== 'usr_jit_primary_001' &&
     isCloudTimestampExpired(profileData.lastActiveAt, profileData.lastLoginAt || profileData.lastLogin)
@@ -448,6 +528,16 @@ export async function lookupCloudProfileByPhone(
     await cleanupExpiredCloudProfile(phoneKey, profileId);
     return { found: false, expired: true };
   }
+
+  // Repair missing/legacy canonical phone_index pointer automatically
+  setDoc(
+    doc(db, 'phone_index', phoneKey),
+    {
+      profileId,
+      lastLoginAt: serverTimestamp(),
+    },
+    { merge: true }
+  ).catch(() => {});
 
   const profile = firestoreDocToUserProfile(profileData);
   try {
@@ -492,14 +582,37 @@ export async function loginCloudProfileByPhone(
 
   try {
     const batch = writeBatch(db);
-    batch.update(doc(db, 'profiles', profile.id), {
-      lastLoginAt: nowIso,
-      lastLogin: nowIso,
-      lastActiveAt: serverTimestamp(),
-    });
-    batch.update(doc(db, 'phone_index', phoneKey), {
-      lastLoginAt: serverTimestamp(),
-    });
+    batch.set(
+      doc(db, 'profiles', profile.id),
+      {
+        phoneKey,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    batch.set(
+      doc(db, 'users', profile.id),
+      {
+        id: profile.id,
+        phoneKey,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    if (phoneKey && phoneKey.length >= 7) {
+      batch.set(
+        doc(db, 'phone_index', phoneKey),
+        {
+          profileId: profile.id,
+          lastLoginAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+    }
     batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(profile));
     await batch.commit();
     invalidateDirectoryCache();
@@ -507,7 +620,7 @@ export async function loginCloudProfileByPhone(
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.UPDATE, `profiles/${profile.id}`);
     }
-    throw err;
+    console.warn('loginCloudProfileByPhone timestamp refresh notice:', err);
   }
 
   return {
@@ -549,16 +662,41 @@ export async function registerOrRecognizeCloudProfile(
 
     try {
       const batch = writeBatch(db);
-      batch.update(doc(db, 'profiles', prev.id), {
-        fullName: cleanName,
-        address: cleanAddr,
-        lastLoginAt: nowIso,
-        lastLogin: nowIso,
-        lastActiveAt: serverTimestamp(),
-      });
-      batch.update(doc(db, 'phone_index', phoneKey), {
-        lastLoginAt: serverTimestamp(),
-      });
+      batch.set(
+        doc(db, 'profiles', prev.id),
+        {
+          phoneKey,
+          fullName: cleanName,
+          address: cleanAddr,
+          lastLoginAt: nowIso,
+          lastLogin: nowIso,
+          lastActiveAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      batch.set(
+        doc(db, 'users', prev.id),
+        {
+          id: prev.id,
+          phoneKey,
+          fullName: cleanName,
+          address: cleanAddr,
+          lastLoginAt: nowIso,
+          lastLogin: nowIso,
+          lastActiveAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      if (phoneKey && phoneKey.length >= 7) {
+        batch.set(
+          doc(db, 'phone_index', phoneKey),
+          {
+            profileId: prev.id,
+            lastLoginAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
       batch.set(doc(db, 'user_directory', prev.id), buildUserDirectoryPayload(mergedExisting));
       await batch.commit();
       invalidateDirectoryCache();
@@ -749,7 +887,7 @@ export async function updateCloudProfile(
       const batch = writeBatch(db);
       batch.update(profileRef, detailPatch);
       batch.set(doc(db, 'users', profile.id), { id: profile.id, ...detailPatch }, { merge: true });
-      batch.update(indexRef, { lastLoginAt: serverTimestamp() });
+      batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
       batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
       invalidateDirectoryCache();
@@ -774,7 +912,7 @@ export async function updateCloudProfile(
       const batch = writeBatch(db);
       batch.update(profileRef, statsPatch);
       batch.set(doc(db, 'users', profile.id), { id: profile.id, ...statsPatch }, { merge: true });
-      batch.update(indexRef, { lastLoginAt: serverTimestamp() });
+      batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
       batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
     }
@@ -1203,24 +1341,124 @@ export async function fetchAllCloudProfilesAsAdmin(): Promise<UserProfile[]> {
 }
 
 /**
- * Hard-deletes a user profile, phone_index, and leaderboard entry when signed in as Google Admin.
+ * Hard-deletes a user profile, phone_index, users alias, user_directory, and leaderboard entry when signed in as Google Admin.
  */
 export async function deleteCloudProfileAsAdmin(profile: UserProfile): Promise<void> {
   if (!auth.currentUser || !profile?.id) return;
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
+  const paths: [string, string][] = [
+    ['profiles', profile.id],
+    ['users', profile.id],
+    ['leaderboard', profile.id],
+    ['user_directory', profile.id],
+    ...(phoneKey && phoneKey.length >= 7 ? [['phone_index', phoneKey] as [string, string]] : []),
+  ];
   try {
-    const batch = writeBatch(db);
-    batch.delete(doc(db, 'profiles', profile.id));
-    if (phoneKey && phoneKey.length >= 7) {
-      batch.delete(doc(db, 'phone_index', phoneKey));
+    for (const [col, docId] of paths) {
+      const ref = doc(db, col, docId);
+      const snap = await getDoc(ref).catch(() => null);
+      if (snap?.exists()) {
+        await deleteDoc(ref);
+      }
     }
-    batch.delete(doc(db, 'leaderboard', profile.id));
-    await batch.commit();
+    invalidateDirectoryCache();
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(err, OperationType.DELETE, `profiles/${profile.id}`);
     }
     throw err;
+  }
+}
+
+/**
+ * Allows a user to permanently delete their own registered JIT GROUP account from Settings & Privacy.
+ * Built-in default demo profiles are protected from deletion.
+ */
+export async function deleteCloudProfileByUser(profile: UserProfile): Promise<void> {
+  if (!profile?.id) return;
+  const protectedDemoIds = new Set([
+    'usr_jit_primary_001',
+    'usr_jit_002',
+    'usr_jit_003',
+    'usr_jit_004',
+  ]);
+  if (protectedDemoIds.has(profile.id)) {
+    throw new Error('Built-in demo profiles cannot be permanently deleted.');
+  }
+
+  const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
+  const rawDigits = normalizeDigitsOnly(profile.contactNumber);
+  const phoneKeysToDelete = Array.from(
+    new Set([phoneKey, rawDigits].filter((k) => k && k.length >= 7))
+  );
+  const paths: [string, string][] = [
+    ['profiles', profile.id],
+    ['users', profile.id],
+    ['leaderboard', profile.id],
+    ['user_directory', profile.id],
+    ...phoneKeysToDelete.map((pk) => ['phone_index', pk] as [string, string]),
+  ];
+  for (const [col, docId] of paths) {
+    try {
+      const ref = doc(db, col, docId);
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        await deleteDoc(ref);
+      }
+    } catch (err: any) {
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.DELETE, `${col}/${docId}`);
+      }
+    }
+  }
+  invalidateDirectoryCache();
+}
+
+export async function updateCloudFriendsCount(profileId: string, friendsCount: number): Promise<void> {
+  if (!profileId || profileId.length < 6) return;
+  const safeCount = Math.max(0, Math.floor(Number(friendsCount) || 0));
+  try {
+    const profileRef = doc(db, 'profiles', profileId);
+    const snap = await getDoc(profileRef);
+    if (!snap.exists()) return;
+    const prevStats = sanitizeStats(snap.data()?.stats);
+    if (prevStats.friendsCount === safeCount) return;
+    const nextStats = { ...prevStats, friendsCount: safeCount };
+    const batch = writeBatch(db);
+    batch.update(profileRef, { stats: nextStats });
+    batch.set(doc(db, 'users', profileId), { id: profileId, stats: nextStats }, { merge: true });
+    await batch.commit();
+  } catch {
+    // Non-fatal background sync
+  }
+}
+
+export async function getFirestoreUserFriendsCount(userId: string): Promise<number> {
+  if (!userId) return 0;
+  try {
+    const qIn = query(
+      collection(db, 'friendRequests'),
+      where('toUserId', '==', userId),
+      where('status', '==', 'accepted')
+    );
+    const qOut = query(
+      collection(db, 'friendRequests'),
+      where('fromUserId', '==', userId),
+      where('status', '==', 'accepted')
+    );
+    const [inSnap, outSnap] = await Promise.all([getDocs(qIn), getDocs(qOut)]);
+    const friendSet = new Set<string>();
+    inSnap.forEach((d) => {
+      const fid = String(d.data()?.fromUserId || '');
+      if (fid && fid !== userId) friendSet.add(fid);
+    });
+    outSnap.forEach((d) => {
+      const fid = String(d.data()?.toUserId || '');
+      if (fid && fid !== userId) friendSet.add(fid);
+    });
+    return friendSet.size;
+  } catch {
+    return 0;
   }
 }
 

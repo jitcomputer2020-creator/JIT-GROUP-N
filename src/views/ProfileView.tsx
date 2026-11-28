@@ -9,7 +9,7 @@ import { useSocial } from '../context/SocialContext';
 import { NavTab, UserProfile } from '../types';
 import { INITIAL_ACHIEVEMENTS, INITIAL_USER, INITIAL_FRIENDS } from '../services/mockData';
 import { APP_CONFIG } from '../constants/branding';
-import { getCloudProfileById, deriveUsername, isVideoContentExpired } from '../lib/firebase';
+import { getCloudProfileById, deriveUsername, isVideoContentExpired, getFirestoreUserFriendsCount } from '../lib/firebase';
 import { isValidImageUrl, isValidVideoUrl } from '../lib/mediaValidation';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { ResponsiveImage } from '../components/common/ResponsiveImage';
@@ -48,6 +48,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
   const {
     posts,
     reels,
+    friendIds,
     viewingUserId,
     setViewingUserId,
     isFriend,
@@ -117,6 +118,28 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
   const targetUser: UserProfile | null = isViewingOther
     ? localOtherMatch || fetchedOtherUser
     : currentUser;
+
+  const [viewedOtherFriendsCount, setViewedOtherFriendsCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!isViewingOther || !viewingUserId) {
+      setViewedOtherFriendsCount(null);
+      return;
+    }
+    getFirestoreUserFriendsCount(viewingUserId)
+      .then((count) => {
+        if (!cancelled) {
+          setViewedOtherFriendsCount(count);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setViewedOtherFriendsCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isViewingOther, viewingUserId]);
 
   // Filter posts and reels belonging to this profile (excluding expired 40-day videos)
   const profileUserId = targetUser?.id || '';
@@ -420,12 +443,25 @@ export const ProfileView: React.FC<ProfileViewProps> = ({ onNavigate }) => {
 
           {/* Quick Metrics Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6 pt-5 border-t border-slate-100 dark:border-slate-800">
-            <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-2xl text-center">
+            <button
+              type="button"
+              onClick={() => {
+                if (!isViewingOther) onNavigate('friends');
+              }}
+              className={`p-3 bg-slate-50 dark:bg-slate-800/50 rounded-2xl text-center transition-colors ${
+                !isViewingOther ? 'hover:bg-blue-50/70 dark:hover:bg-slate-800 cursor-pointer' : 'cursor-default'
+              }`}
+              title={!isViewingOther ? 'View My Friends' : undefined}
+            >
               <p className="text-lg font-black text-slate-900 dark:text-white font-mono tabular-nums">
-                {user.stats?.friendsCount || 0}
+                {!isViewingOther
+                  ? friendIds.filter((id) => id !== user.id).length
+                  : viewedOtherFriendsCount !== null
+                  ? Math.max(viewedOtherFriendsCount, isFriend(user.id) ? 1 : 0)
+                  : user.stats?.friendsCount || 0}
               </p>
               <p className="text-[11px] font-semibold text-slate-500">Campus Friends</p>
-            </div>
+            </button>
             <div className="p-3 bg-slate-50 dark:bg-slate-800/50 rounded-2xl text-center">
               <p className="text-lg font-black text-slate-900 dark:text-white font-mono tabular-nums">
                 {user.stats?.gamesWon || 0} / {user.stats?.gamesPlayed || 0}
