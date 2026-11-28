@@ -17,8 +17,8 @@ import {
   registerOrRecognizeCloudProfile,
   updateCloudProfile,
   uploadProfilePhotoToCloud,
-  ensureCloudProfileSeeded,
-  touchCloudLoginTimestamp,
+  applyCloudPointsDelta,
+  getCloudProfileById,
   syncLeaderboardEntry,
   recordCloudMatchHistory,
   subscribeToCloudProfile,
@@ -478,24 +478,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             confirmedCloudProfileRef.current = cloudResolvedProfile.id;
             const cloudProfile = cloudResolvedProfile;
             setCurrentUser((prev) => {
-              if (!prev) return cloudProfile;
               const mergedClaimAt = Math.max(
-                Number(prev.lastDailyClaimAt || 0),
+                Number(prev?.lastDailyClaimAt || 0),
                 Number(cloudProfile.lastDailyClaimAt || 0),
                 readLocalDailyClaimAt(cloudProfile.id)
               );
-              return {
-                ...prev,
+              const nextActive: UserProfile = {
+                ...(prev || cloudProfile),
                 ...cloudProfile,
+                stats: { ...cloudProfile.stats },
                 ...(mergedClaimAt > 0 ? { lastDailyClaimAt: mergedClaimAt } : {}),
               };
+              if (typeof window !== 'undefined') {
+                try {
+                  localStorage.setItem(LS_CURRENT_USER, JSON.stringify(nextActive));
+                } catch {
+                  // ignore
+                }
+              }
+              return nextActive;
             });
             setRegisteredProfiles((prev) => {
               const without = prev.filter((p) => p.id !== cloudProfile.id);
               return [cloudProfile, ...without];
             });
-          } else if (!isProfileExpired(activeUser)) {
-            await ensureCloudProfileSeeded(activeUser);
           }
         } catch (cloudErr) {
           console.warn('Firestore current user sync notice:', cloudErr);
@@ -630,21 +636,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
 
-      // 2. Backup valid local profiles to shared cloud backend & Firestore
+      // 2. Sync non-expired profiles to Express server only when backend API exists
       const nonExpired = registeredProfilesRef.current.filter(
         (p) => !isProfileExpired(p) && p.status !== 'deleted'
       );
-      if (nonExpired.length > 0) {
-        for (const p of nonExpired) {
-          ensureCloudProfileSeeded(p).catch(() => {});
-        }
-        if (hasBackend) {
-          await fetch('/api/profiles/sync', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ profiles: nonExpired }),
-          }).catch(() => {});
-        }
+      if (hasBackend && nonExpired.length > 0) {
+        await fetch('/api/profiles/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profiles: nonExpired }),
+        }).catch(() => {});
       }
     } catch (err) {
       console.warn('Initial server profiles sync notice:', err);
@@ -780,9 +781,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const nowIso = new Date().toISOString();
 
-    // 1. Check shared Firebase Firestore database first (cross-browser, cross-device, incognito-safe)
+    // 1. Check shared Firebase Firestore database first (12s timeout protection)
+    let cloudTimedOutOrNetworkErr = false;
     try {
-      const cloudRes = await loginCloudProfileByPhone(contactNumber);
+      const cloudRes = await Promise.race([
+        loginCloudProfileByPhone(contactNumber),
+        new Promise<never>((_, reject) =>
+          window.setTimeout(() => reject(new Error('CLOUD_LOGIN_TIMEOUT')), 12000)
+        ),
+      ]);
       if (cloudRes.suspended) {
         return {
           success: false,
@@ -802,7 +809,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
       }
       if (cloudRes.success && cloudRes.profile) {
-        const activeUser = cloudRes.profile;
+        const activeUser = hydrateDailyClaimTimestamp(cloudRes.profile);
+        confirmedCloudProfileRef.current = activeUser.id;
         unmarkRemovedSavedProfile(activeUser.id);
         setCurrentUser(activeUser);
         setRegisteredProfiles((prev) => {
@@ -821,6 +829,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: true, user: activeUser };
       }
     } catch (cloudErr) {
+      cloudTimedOutOrNetworkErr = true;
       console.warn('Firestore login lookup notice, falling back to server/local:', cloudErr);
     }
 
@@ -847,6 +856,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             lastLoginAt: nowIso,
             lastLogin: nowIso,
           };
+          unmarkRemovedSavedProfile(activeUser.id);
           setCurrentUser(activeUser);
           setRegisteredProfiles((prev) => {
             const withoutExpired = prev.filter((p) => !isProfileExpired(p));
@@ -860,7 +870,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             localStorage.removeItem(LS_LOGGED_OUT);
             localStorage.setItem(LS_CURRENT_USER, JSON.stringify(activeUser));
           }
-          await ensureCloudProfileSeeded(activeUser).catch(() => {});
           return { success: true, user: activeUser };
         }
       } catch (e) {
@@ -926,6 +935,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     if (!matched || matched.status === 'deleted') {
+      if (cloudTimedOutOrNetworkErr) {
+        return {
+          success: false,
+          error:
+            'Could not reach JIT Group cloud servers within 12 seconds. Please check your internet connection and try again.',
+        };
+      }
       return {
         success: false,
         error: `No active account found for "${contactNumber}". Please register a new profile below.`,
@@ -972,11 +988,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updatedUser));
     }
 
-    // Sync to shared Firestore cloud DB & backend server immediately
-    await Promise.all([
-      ensureCloudProfileSeeded(updatedUser).then(() => touchCloudLoginTimestamp(updatedUser)).catch(() => {}),
-      persistProfileRemotely(updatedUser).catch(() => {}),
-    ]);
+    persistProfileRemotely(updatedUser).catch(() => {});
 
     return { success: true, user: updatedUser };
   };
@@ -1485,41 +1497,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const awardGameResult = async (
     params: AwardGameParams
   ): Promise<{ success: boolean; newTotal: number; pointsAdded: number }> => {
-    if (!currentUser) {
+    const activeSnapshot = currentUserRef.current || currentUser;
+    if (!activeSnapshot) {
       return { success: false, newTotal: 0, pointsAdded: 0 };
     }
     const safePoints = Math.min(500, Math.max(0, Math.floor(params.pointsEarned)));
-    const newTotal = Math.min(1000000, (currentUser.stats.rewardPoints || 0) + safePoints);
+    const optimisticTotal = Math.min(1000000, (activeSnapshot.stats.rewardPoints || 0) + safePoints);
     const isCountedMatch = params.outcome !== 'spin';
-    const newGamesPlayed = (currentUser.stats.gamesPlayed || 0) + (isCountedMatch ? 1 : 0);
-    const newGamesWon = (currentUser.stats.gamesWon || 0) + (params.outcome === 'win' ? 1 : 0);
+    const optimisticPlayed = (activeSnapshot.stats.gamesPlayed || 0) + (isCountedMatch ? 1 : 0);
+    const optimisticWon = (activeSnapshot.stats.gamesWon || 0) + (params.outcome === 'win' ? 1 : 0);
     const nowIso = new Date().toISOString();
 
-    const updated: UserProfile = {
-      ...currentUser,
+    const optimisticUser: UserProfile = {
+      ...activeSnapshot,
       lastLoginAt: nowIso,
       lastLogin: nowIso,
       stats: {
-        ...currentUser.stats,
-        rewardPoints: newTotal,
-        gamesPlayed: newGamesPlayed,
-        gamesWon: newGamesWon,
+        ...activeSnapshot.stats,
+        rewardPoints: optimisticTotal,
+        gamesPlayed: optimisticPlayed,
+        gamesWon: optimisticWon,
       },
     };
 
-    setCurrentUser(updated);
+    setCurrentUser(optimisticUser);
     setRegisteredProfiles((prev) =>
-      prev.map((p) => (p.id === updated.id ? updated : p))
+      prev.map((p) => (p.id === optimisticUser.id ? optimisticUser : p))
     );
 
     if (typeof window !== 'undefined') {
-      localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
+      localStorage.setItem(LS_CURRENT_USER, JSON.stringify(optimisticUser));
     }
 
     const matchRecord: MatchHistoryRecord = {
       id: `match_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      profileId: updated.id,
-      playerName: updated.fullName,
+      profileId: optimisticUser.id,
+      playerName: optimisticUser.fullName,
       gameId: params.gameId,
       gameName: params.gameName,
       mode: params.mode,
@@ -1534,7 +1547,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (safePoints > 0) {
       appendWalletTransaction({
         id: `tx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        userId: updated.id,
+        userId: optimisticUser.id,
         amount: safePoints,
         type: params.gameId === 'quiz' ? 'quiz_reward' : 'game_reward',
         description: `${params.gameName}: ${params.scoreSummary}`,
@@ -1542,14 +1555,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
     }
 
+    const txRes = await applyCloudPointsDelta(activeSnapshot, {
+      pointsDelta: safePoints,
+      gamesPlayedDelta: isCountedMatch ? 1 : 0,
+      gamesWonDelta: params.outcome === 'win' ? 1 : 0,
+      lastGameId: params.gameId,
+    });
+
+    const reconciledUser: UserProfile = {
+      ...optimisticUser,
+      stats: {
+        ...optimisticUser.stats,
+        rewardPoints: txRes.rewardPoints,
+        gamesPlayed: txRes.gamesPlayed,
+        gamesWon: txRes.gamesWon,
+        streakDays: txRes.streakDays,
+      },
+    };
+
+    setCurrentUser((prev) => (prev?.id === reconciledUser.id ? reconciledUser : prev));
+    setRegisteredProfiles((prev) =>
+      prev.map((p) => (p.id === reconciledUser.id ? reconciledUser : p))
+    );
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(LS_CURRENT_USER, JSON.stringify(reconciledUser));
+    }
+
     await Promise.all([
-      updateCloudProfile(updated, { stats: updated.stats }).catch(() => {}),
-      syncLeaderboardEntry(updated, params.gameId).catch(() => {}),
       recordCloudMatchHistory(matchRecord).catch(() => {}),
-      persistProfileRemotely(updated).catch(() => {}),
+      persistProfileRemotely(reconciledUser).catch(() => {}),
     ]);
 
-    return { success: true, newTotal, pointsAdded: safePoints };
+    return { success: true, newTotal: txRes.rewardPoints, pointsAdded: safePoints };
   };
 
   const spendRewardPoints = (
@@ -1557,22 +1594,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     description: string,
     type: WalletTransaction['type'] = 'tournament_entry'
   ): { success: boolean; newTotal: number; error?: string } => {
-    if (!currentUser) {
+    const activeSnapshot = currentUserRef.current || currentUser;
+    if (!activeSnapshot) {
       return { success: false, newTotal: 0, error: 'Sign in required.' };
     }
     const cost = Math.max(0, Math.floor(amount));
-    const current = currentUser.stats.rewardPoints || 0;
+    const current = activeSnapshot.stats.rewardPoints || 0;
     if (current < cost) {
       return { success: false, newTotal: current, error: 'Insufficient virtual points.' };
     }
     const newTotal = current - cost;
     const nowIso = new Date().toISOString();
     const updated: UserProfile = {
-      ...currentUser,
+      ...activeSnapshot,
       lastLoginAt: nowIso,
       lastLogin: nowIso,
       stats: {
-        ...currentUser.stats,
+        ...activeSnapshot.stats,
         rewardPoints: newTotal,
       },
     };
@@ -1589,9 +1627,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       description,
       createdAt: 'Just now',
     });
-    updateCloudProfile(updated, { stats: updated.stats }).catch(() => {});
-    syncLeaderboardEntry(updated).catch(() => {});
-    persistProfileRemotely(updated).catch(() => {});
+
+    applyCloudPointsDelta(activeSnapshot, {
+      pointsDelta: -cost,
+      requireSufficientPoints: true,
+    })
+      .then((txRes) => {
+        const reconciled: UserProfile = {
+          ...updated,
+          stats: {
+            ...updated.stats,
+            rewardPoints: txRes.rewardPoints,
+            gamesPlayed: txRes.gamesPlayed,
+            gamesWon: txRes.gamesWon,
+            streakDays: txRes.streakDays,
+          },
+        };
+        setCurrentUser((prev) => (prev?.id === reconciled.id ? reconciled : prev));
+        setRegisteredProfiles((prev) => prev.map((p) => (p.id === reconciled.id ? reconciled : p)));
+        if (typeof window !== 'undefined') {
+          localStorage.setItem(LS_CURRENT_USER, JSON.stringify(reconciled));
+        }
+        persistProfileRemotely(reconciled).catch(() => {});
+      })
+      .catch(() => {});
+
     return { success: true, newTotal };
   };
 
@@ -1610,10 +1670,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem(LS_LOGGED_OUT);
         localStorage.setItem(LS_CURRENT_USER, JSON.stringify(updated));
       }
-      ensureCloudProfileSeeded(updated)
-        .then(() => touchCloudLoginTimestamp(updated))
+      getCloudProfileById(updated.id)
+        .then((freshCloud) => {
+          if (!freshCloud || freshCloud.status === 'deleted' || freshCloud.status === 'suspended') return;
+          const hydrated = hydrateDailyClaimTimestamp(freshCloud);
+          confirmedCloudProfileRef.current = hydrated.id;
+          if (currentUserRef.current?.id === updated.id) {
+            setCurrentUser(hydrated);
+            if (typeof window !== 'undefined') {
+              localStorage.setItem(LS_CURRENT_USER, JSON.stringify(hydrated));
+            }
+          }
+          setRegisteredProfiles((prev) => prev.map((p) => (p.id === hydrated.id ? hydrated : p)));
+        })
         .catch(() => {});
-      persistProfileRemotely(updated).catch(() => {});
     }
   };
 

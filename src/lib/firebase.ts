@@ -19,14 +19,6 @@ import {
   User as FirebaseAuthUser,
 } from 'firebase/auth';
 import {
-  getStorage,
-  ref as storageRef,
-  uploadString,
-  uploadBytes,
-  uploadBytesResumable,
-  getDownloadURL,
-} from 'firebase/storage';
-import {
   getFirestore,
   doc,
   getDoc,
@@ -84,9 +76,28 @@ import {
 } from '../types/multiplayer';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app);
 export const auth = getAuth(app);
-export const storage = getStorage(app);
+
+export const COL = {
+  test: 'jitgroup_test',
+  profiles: 'jitgroup_profiles',
+  users: 'jitgroup_users',
+  phoneIndex: 'jitgroup_phone_index',
+  leaderboard: 'jitgroup_leaderboard',
+  matchHistory: 'jitgroup_match_history',
+  userDirectory: 'jitgroup_user_directory',
+  gameRooms: 'jitgroup_games',
+  matchmakingQueue: 'jitgroup_matchmaking_queue',
+  friendRequests: 'jitgroup_friend_requests',
+  notifications: 'jitgroup_notifications',
+  conversations: 'jitgroup_conversations',
+  chats: 'jitgroup_chats',
+  reels: 'jitgroup_reels',
+  posts: 'jitgroup_posts',
+  announcements: 'jitgroup_announcements',
+  videoMedia: 'jitgroup_video_media',
+} as const;
 
 export const authPersistenceReady: Promise<void> =
   typeof window !== 'undefined'
@@ -169,7 +180,7 @@ export function handleFirestoreError(
 // Validate connection on boot using getDocFromServer
 export async function testFirestoreConnection(): Promise<void> {
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
+    await getDocFromServer(doc(db, COL.test, 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration.');
@@ -287,44 +298,14 @@ function buildUserDirectoryPayload(profile: UserProfile): Record<string, any> {
 }
 
 /**
- * Attempts to upload a compressed profile/cover Data URL to Firebase Storage
- * to obtain a short permanent CDN download URL. If Storage is unavailable or
- * restricted, gracefully falls back to the compressed Data URL for direct Firestore storage.
+/**
+ * Persists a compressed profile/cover Data URL directly in Firestore without paid Firebase Storage.
  */
 export async function uploadProfilePhotoToCloud(
-  profileId: string,
-  mode: 'avatar' | 'cover',
+  _profileId: string,
+  _mode: 'avatar' | 'cover',
   dataUrl: string
 ): Promise<string> {
-  if (!dataUrl || !dataUrl.startsWith('data:image/')) {
-    return dataUrl;
-  }
-
-  try {
-    const ext = dataUrl.startsWith('data:image/webp')
-      ? 'webp'
-      : dataUrl.startsWith('data:image/png')
-      ? 'png'
-      : 'jpg';
-    const fileRef = storageRef(storage, `profile_media/${profileId}/${mode}_${Date.now()}.${ext}`);
-
-    const downloadUrl = await Promise.race<string>([
-      (async () => {
-        await uploadString(fileRef, dataUrl, 'data_url');
-        return await getDownloadURL(fileRef);
-      })(),
-      new Promise<string>((_, reject) =>
-        setTimeout(() => reject(new Error('Storage upload timeout')), 3500)
-      ),
-    ]);
-
-    if (downloadUrl && downloadUrl.startsWith('http')) {
-      return downloadUrl;
-    }
-  } catch (err) {
-    console.info('Firebase Storage upload skipped, storing compressed photo directly in Firestore:', err);
-  }
-
   return dataUrl;
 }
 
@@ -413,8 +394,8 @@ async function fetchDocServerFirst(pathSegments: [string, string]) {
 async function cleanupExpiredCloudProfile(phoneKey: string, profileId: string): Promise<void> {
   try {
     const batch = writeBatch(db);
-    batch.delete(doc(db, 'phone_index', phoneKey));
-    batch.delete(doc(db, 'profiles', profileId));
+    batch.delete(doc(db, COL.phoneIndex, phoneKey));
+    batch.delete(doc(db, COL.profiles, profileId));
     await batch.commit();
   } catch (err) {
     // Non-fatal if already deleted or rules reject
@@ -445,7 +426,7 @@ export async function lookupCloudProfileByPhone(
   );
   for (const keyCandidate of indexKeysToTry) {
     try {
-      const indexSnap = await fetchDocServerFirst(['phone_index', keyCandidate]);
+      const indexSnap = await fetchDocServerFirst([COL.phoneIndex, keyCandidate]);
       if (!indexSnap.exists()) continue;
       const indexData = indexSnap.data();
       const pid = indexData?.profileId;
@@ -456,7 +437,7 @@ export async function lookupCloudProfileByPhone(
         return { found: false, expired: true };
       }
 
-      const profileSnap = await fetchDocServerFirst(['profiles', pid]);
+      const profileSnap = await fetchDocServerFirst([COL.profiles, pid]);
       if (profileSnap.exists()) {
         const candidateData = profileSnap.data();
         if (candidateData.status !== 'deleted') {
@@ -473,7 +454,7 @@ export async function lookupCloudProfileByPhone(
   // 2. Fallback query across profiles collection in case phone_index entry is missing or stale
   if (!profileData) {
     try {
-      const keyQ = query(collection(db, 'profiles'), where('phoneKey', '==', phoneKey), limit(10));
+      const keyQ = query(collection(db, COL.profiles), where('phoneKey', '==', phoneKey), limit(10));
       let keySnap;
       try {
         keySnap = await getDocsFromServer(keyQ);
@@ -495,7 +476,7 @@ export async function lookupCloudProfileByPhone(
 
   if (!profileData) {
     try {
-      const scanQ = query(collection(db, 'profiles'), limit(350));
+      const scanQ = query(collection(db, COL.profiles), limit(350));
       let scanSnap;
       try {
         scanSnap = await getDocsFromServer(scanQ);
@@ -529,19 +510,9 @@ export async function lookupCloudProfileByPhone(
     return { found: false, expired: true };
   }
 
-  // Repair missing/legacy canonical phone_index pointer automatically
-  setDoc(
-    doc(db, 'phone_index', phoneKey),
-    {
-      profileId,
-      lastLoginAt: serverTimestamp(),
-    },
-    { merge: true }
-  ).catch(() => {});
-
   const profile = firestoreDocToUserProfile(profileData);
   try {
-    const userSnap = await fetchDocServerFirst(['users', profileId]);
+    const userSnap = await fetchDocServerFirst([COL.users, profileId]);
     if (userSnap.exists()) {
       const userClaimAt = Number(userSnap.data()?.lastDailyClaimAt || 0);
       if (Number.isFinite(userClaimAt) && userClaimAt > (profile.lastDailyClaimAt || 0)) {
@@ -583,7 +554,7 @@ export async function loginCloudProfileByPhone(
   try {
     const batch = writeBatch(db);
     batch.set(
-      doc(db, 'profiles', profile.id),
+      doc(db, COL.profiles, profile.id),
       {
         phoneKey,
         lastLoginAt: nowIso,
@@ -593,7 +564,7 @@ export async function loginCloudProfileByPhone(
       { merge: true }
     );
     batch.set(
-      doc(db, 'users', profile.id),
+      doc(db, COL.users, profile.id),
       {
         id: profile.id,
         phoneKey,
@@ -605,7 +576,7 @@ export async function loginCloudProfileByPhone(
     );
     if (phoneKey && phoneKey.length >= 7) {
       batch.set(
-        doc(db, 'phone_index', phoneKey),
+        doc(db, COL.phoneIndex, phoneKey),
         {
           profileId: profile.id,
           lastLoginAt: serverTimestamp(),
@@ -613,7 +584,7 @@ export async function loginCloudProfileByPhone(
         { merge: true }
       );
     }
-    batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(profile));
+    batch.set(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(profile));
     await batch.commit();
     invalidateDirectoryCache();
   } catch (err: any) {
@@ -663,7 +634,7 @@ export async function registerOrRecognizeCloudProfile(
     try {
       const batch = writeBatch(db);
       batch.set(
-        doc(db, 'profiles', prev.id),
+        doc(db, COL.profiles, prev.id),
         {
           phoneKey,
           fullName: cleanName,
@@ -675,7 +646,7 @@ export async function registerOrRecognizeCloudProfile(
         { merge: true }
       );
       batch.set(
-        doc(db, 'users', prev.id),
+        doc(db, COL.users, prev.id),
         {
           id: prev.id,
           phoneKey,
@@ -689,7 +660,7 @@ export async function registerOrRecognizeCloudProfile(
       );
       if (phoneKey && phoneKey.length >= 7) {
         batch.set(
-          doc(db, 'phone_index', phoneKey),
+          doc(db, COL.phoneIndex, phoneKey),
           {
             profileId: prev.id,
             lastLoginAt: serverTimestamp(),
@@ -697,7 +668,7 @@ export async function registerOrRecognizeCloudProfile(
           { merge: true }
         );
       }
-      batch.set(doc(db, 'user_directory', prev.id), buildUserDirectoryPayload(mergedExisting));
+      batch.set(doc(db, COL.userDirectory, prev.id), buildUserDirectoryPayload(mergedExisting));
       await batch.commit();
       invalidateDirectoryCache();
     } catch (err: any) {
@@ -767,14 +738,14 @@ export async function registerOrRecognizeCloudProfile(
 
   try {
     const batch = writeBatch(db);
-    batch.set(doc(db, 'profiles', newProfile.id), firestoreProfileDoc);
-    batch.set(doc(db, 'users', newProfile.id), firestoreProfileDoc, { merge: true });
-    batch.set(doc(db, 'phone_index', phoneKey), {
+    batch.set(doc(db, COL.profiles, newProfile.id), firestoreProfileDoc);
+    batch.set(doc(db, COL.users, newProfile.id), firestoreProfileDoc, { merge: true });
+    batch.set(doc(db, COL.phoneIndex, phoneKey), {
       profileId: newProfile.id,
       createdAt: serverTimestamp(),
       lastLoginAt: serverTimestamp(),
     });
-    batch.set(doc(db, 'leaderboard', newProfile.id), {
+    batch.set(doc(db, COL.leaderboard, newProfile.id), {
       profileId: newProfile.id,
       fullName: newProfile.fullName,
       avatarUrl: newProfile.avatarUrl,
@@ -784,7 +755,7 @@ export async function registerOrRecognizeCloudProfile(
       streakDays: newProfile.stats.streakDays,
       updatedAt: serverTimestamp(),
     });
-    batch.set(doc(db, 'user_directory', newProfile.id), buildUserDirectoryPayload(newProfile));
+    batch.set(doc(db, COL.userDirectory, newProfile.id), buildUserDirectoryPayload(newProfile));
     await batch.commit();
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
@@ -811,11 +782,11 @@ export async function updateCloudProfile(
   if (!phoneKey || phoneKey.length < 7) return;
 
   const nowIso = new Date().toISOString();
-  const profileRef = doc(db, 'profiles', profile.id);
-  const indexRef = doc(db, 'phone_index', phoneKey);
+  const profileRef = doc(db, COL.profiles, profile.id);
+  const indexRef = doc(db, COL.phoneIndex, phoneKey);
 
   // Ensure document exists first; if not, seed it atomically
-  const existingSnap = await fetchDocServerFirst(['profiles', profile.id]);
+  const existingSnap = await fetchDocServerFirst([COL.profiles, profile.id]);
   if (!existingSnap.exists()) {
     await registerOrRecognizeCloudProfile(
       profile.contactNumber,
@@ -842,7 +813,6 @@ export async function updateCloudProfile(
     typeof updates.lastDailyClaimAt === 'number' && Number.isFinite(updates.lastDailyClaimAt);
 
   if (!hasDetailUpdates && !hasStatsUpdate && !hasClaimUpdate) {
-    await touchCloudLoginTimestamp(profile);
     return;
   }
 
@@ -886,9 +856,9 @@ export async function updateCloudProfile(
       };
       const batch = writeBatch(db);
       batch.update(profileRef, detailPatch);
-      batch.set(doc(db, 'users', profile.id), { id: profile.id, ...detailPatch }, { merge: true });
+      batch.set(doc(db, COL.users, profile.id), { id: profile.id, ...detailPatch }, { merge: true });
       batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
-      batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
+      batch.set(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
       invalidateDirectoryCache();
     }
@@ -911,9 +881,9 @@ export async function updateCloudProfile(
       }
       const batch = writeBatch(db);
       batch.update(profileRef, statsPatch);
-      batch.set(doc(db, 'users', profile.id), { id: profile.id, ...statsPatch }, { merge: true });
+      batch.set(doc(db, COL.users, profile.id), { id: profile.id, ...statsPatch }, { merge: true });
       batch.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
-      batch.set(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
+      batch.set(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
       await batch.commit();
     }
   } catch (err: any) {
@@ -938,12 +908,12 @@ export async function claimCloudDailyReward(
   streakDays: number;
   offlineFallback?: boolean;
 }> {
-  const userRef = doc(db, 'users', profile.id);
-  const profileRef = doc(db, 'profiles', profile.id);
-  const lbRef = doc(db, 'leaderboard', profile.id);
-  const dirRef = doc(db, 'user_directory', profile.id);
+  const userRef = doc(db, COL.users, profile.id);
+  const profileRef = doc(db, COL.profiles, profile.id);
+  const lbRef = doc(db, COL.leaderboard, profile.id);
+  const dirRef = doc(db, COL.userDirectory, profile.id);
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
-  const indexRef = phoneKey && phoneKey.length >= 7 ? doc(db, 'phone_index', phoneKey) : null;
+  const indexRef = phoneKey && phoneKey.length >= 7 ? doc(db, COL.phoneIndex, phoneKey) : null;
 
   try {
     const result = await runTransaction(db, async (tx) => {
@@ -1075,13 +1045,155 @@ export async function claimCloudDailyReward(
 }
 
 /**
+ * Atomically updates virtual reward points, gamesPlayed, and gamesWon via Firestore transaction,
+ * preserving Firestore as the single source of truth across devices and page reloads.
+ */
+export async function applyCloudPointsDelta(
+  profile: UserProfile,
+  delta: {
+    pointsDelta: number;
+    gamesPlayedDelta?: number;
+    gamesWonDelta?: number;
+    lastGameId?: string;
+    requireSufficientPoints?: boolean;
+  }
+): Promise<{
+  success: boolean;
+  rewardPoints: number;
+  gamesPlayed: number;
+  gamesWon: number;
+  streakDays: number;
+  error?: string;
+}> {
+  const userRef = doc(db, COL.users, profile.id);
+  const profileRef = doc(db, COL.profiles, profile.id);
+  const lbRef = doc(db, COL.leaderboard, profile.id);
+  const dirRef = doc(db, COL.userDirectory, profile.id);
+  const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
+  const indexRef = phoneKey && phoneKey.length >= 7 ? doc(db, COL.phoneIndex, phoneKey) : null;
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const [profileSnap, userSnap] = await Promise.all([tx.get(profileRef), tx.get(userRef)]);
+      const profileData = profileSnap.exists() ? profileSnap.data() : {};
+      const userData = userSnap.exists() ? userSnap.data() : {};
+
+      const baseStats = sanitizeStats(
+        profileSnap.exists() && profileData?.stats
+          ? profileData.stats
+          : userSnap.exists() && userData?.stats
+          ? userData.stats
+          : profile.stats
+      );
+
+      const safeDelta = Math.trunc(Number(delta.pointsDelta || 0));
+      if (delta.requireSufficientPoints && baseStats.rewardPoints + safeDelta < 0) {
+        return {
+          success: false,
+          rewardPoints: baseStats.rewardPoints,
+          gamesPlayed: baseStats.gamesPlayed,
+          gamesWon: baseStats.gamesWon,
+          streakDays: baseStats.streakDays,
+          error: 'Insufficient virtual points.',
+        };
+      }
+
+      const nextPoints = Math.min(1000000, Math.max(0, baseStats.rewardPoints + safeDelta));
+      const nextPlayed = Math.max(0, baseStats.gamesPlayed + Math.max(0, Math.trunc(delta.gamesPlayedDelta || 0)));
+      const nextWon = Math.max(0, baseStats.gamesWon + Math.max(0, Math.trunc(delta.gamesWonDelta || 0)));
+      const nextStats: UserProfile['stats'] = {
+        ...baseStats,
+        rewardPoints: nextPoints,
+        gamesPlayed: nextPlayed,
+        gamesWon: nextWon,
+      };
+      const nowIso = new Date().toISOString();
+
+      const updatedProfile: UserProfile = {
+        ...profile,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        stats: nextStats,
+      };
+
+      const commonPatch: Record<string, any> = {
+        id: profile.id,
+        fullName: updatedProfile.fullName,
+        contactNumber: updatedProfile.contactNumber,
+        ...(phoneKey ? { phoneKey } : {}),
+        address: updatedProfile.address,
+        avatarUrl: sanitizeAvatarUrl(updatedProfile.avatarUrl),
+        joinedAt: updatedProfile.joinedAt || nowIso,
+        lastLoginAt: nowIso,
+        lastLogin: nowIso,
+        lastActiveAt: serverTimestamp(),
+        stats: nextStats,
+      };
+
+      tx.set(profileRef, commonPatch, { merge: true });
+      tx.set(userRef, commonPatch, { merge: true });
+      tx.set(
+        lbRef,
+        {
+          profileId: profile.id,
+          fullName: (updatedProfile.fullName || 'JIT Member').trim().slice(0, 120),
+          avatarUrl: sanitizeAvatarUrl(updatedProfile.avatarUrl),
+          rewardPoints: nextStats.rewardPoints,
+          gamesPlayed: nextStats.gamesPlayed,
+          gamesWon: nextStats.gamesWon,
+          streakDays: nextStats.streakDays,
+          ...(delta.lastGameId ? { lastGameId: String(delta.lastGameId).slice(0, 32) } : {}),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      tx.set(dirRef, buildUserDirectoryPayload(updatedProfile), { merge: true });
+      if (indexRef) {
+        tx.set(indexRef, { profileId: profile.id, lastLoginAt: serverTimestamp() }, { merge: true });
+      }
+
+      return {
+        success: true,
+        rewardPoints: nextPoints,
+        gamesPlayed: nextPlayed,
+        gamesWon: nextWon,
+        streakDays: nextStats.streakDays,
+      };
+    });
+  } catch (err: any) {
+    if (err?.code === 'permission-denied') {
+      handleFirestoreError(err, OperationType.WRITE, `${COL.profiles}/${profile.id}`);
+    }
+    const baseStats = sanitizeStats(profile.stats);
+    const safeDelta = Math.trunc(Number(delta.pointsDelta || 0));
+    if (delta.requireSufficientPoints && baseStats.rewardPoints + safeDelta < 0) {
+      return {
+        success: false,
+        rewardPoints: baseStats.rewardPoints,
+        gamesPlayed: baseStats.gamesPlayed,
+        gamesWon: baseStats.gamesWon,
+        streakDays: baseStats.streakDays,
+        error: 'Insufficient virtual points.',
+      };
+    }
+    return {
+      success: true,
+      rewardPoints: Math.min(1000000, Math.max(0, baseStats.rewardPoints + safeDelta)),
+      gamesPlayed: Math.max(0, baseStats.gamesPlayed + Math.max(0, Math.trunc(delta.gamesPlayedDelta || 0))),
+      gamesWon: Math.max(0, baseStats.gamesWon + Math.max(0, Math.trunc(delta.gamesWonDelta || 0))),
+      streakDays: baseStats.streakDays,
+    };
+  }
+}
+
+/**
  * Ensures a profile exists in Firestore without overwriting fresher cloud state.
  */
 export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<void> {
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
   if (!phoneKey || phoneKey.length < 7) return;
   try {
-    const existing = await fetchDocServerFirst(['phone_index', phoneKey]);
+    const existing = await fetchDocServerFirst([COL.phoneIndex, phoneKey]);
     if (!existing.exists()) {
       await registerOrRecognizeCloudProfile(
         profile.contactNumber,
@@ -1091,14 +1203,14 @@ export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<vo
       );
     } else {
       const [lbSnap, dirSnap] = await Promise.all([
-        fetchDocServerFirst(['leaderboard', profile.id]),
-        fetchDocServerFirst(['user_directory', profile.id]),
+        fetchDocServerFirst([COL.leaderboard, profile.id]),
+        fetchDocServerFirst([COL.userDirectory, profile.id]),
       ]);
       if (!lbSnap.exists()) {
         await syncLeaderboardEntry(profile);
       }
       if (!dirSnap.exists()) {
-        await setDoc(doc(db, 'user_directory', profile.id), buildUserDirectoryPayload(profile));
+        await setDoc(doc(db, COL.userDirectory, profile.id), buildUserDirectoryPayload(profile));
       }
     }
   } catch (err) {
@@ -1114,12 +1226,12 @@ export async function touchCloudLoginTimestamp(profile: UserProfile): Promise<vo
   if (!phoneKey || phoneKey.length < 7) return;
   const nowIso = new Date().toISOString();
   try {
-    await updateDoc(doc(db, 'profiles', profile.id), {
+    await updateDoc(doc(db, COL.profiles, profile.id), {
       lastLoginAt: nowIso,
       lastLogin: nowIso,
       lastActiveAt: serverTimestamp(),
     });
-    await updateDoc(doc(db, 'phone_index', phoneKey), {
+    await updateDoc(doc(db, COL.phoneIndex, phoneKey), {
       lastLoginAt: serverTimestamp(),
     });
   } catch {
@@ -1138,7 +1250,7 @@ export async function syncLeaderboardEntry(
   const stats = sanitizeStats(profile.stats);
   const path = `leaderboard/${profile.id}`;
   try {
-    await setDoc(doc(db, 'leaderboard', profile.id), {
+    await setDoc(doc(db, COL.leaderboard, profile.id), {
       profileId: profile.id,
       fullName: (profile.fullName || 'JIT Member').trim().slice(0, 120),
       avatarUrl: sanitizeAvatarUrl(profile.avatarUrl),
@@ -1163,7 +1275,7 @@ export async function syncLeaderboardEntry(
 export async function fetchGlobalLeaderboard(maxEntries = 20): Promise<LeaderboardEntry[]> {
   try {
     const q = query(
-      collection(db, 'leaderboard'),
+      collection(db, COL.leaderboard),
       where('rewardPoints', '>=', 0),
       orderBy('rewardPoints', 'desc'),
       limit(maxEntries)
@@ -1199,7 +1311,7 @@ export async function recordCloudMatchHistory(
 ): Promise<void> {
   const path = `match_history/${record.id}`;
   try {
-    await setDoc(doc(db, 'match_history', record.id), {
+    await setDoc(doc(db, COL.matchHistory, record.id), {
       id: record.id,
       profileId: record.profileId,
       playerName: (record.playerName || 'JIT Member').trim().slice(0, 120),
@@ -1228,7 +1340,7 @@ export async function fetchMatchHistory(
   maxEntries = 20
 ): Promise<MatchHistoryRecord[]> {
   try {
-    const colRef = collection(db, 'match_history');
+    const colRef = collection(db, COL.matchHistory);
     const q = profileId
       ? query(
           colRef,
@@ -1268,7 +1380,7 @@ export async function fetchMatchHistory(
       try {
         const snap = await getDocs(
           query(
-            collection(db, 'match_history'),
+            collection(db, COL.matchHistory),
             where('pointsEarned', '>=', 0),
             orderBy('createdAtTs', 'desc'),
             limit(maxEntries * 2)
@@ -1328,7 +1440,7 @@ export async function fetchAllCloudProfilesAsAdmin(): Promise<UserProfile[]> {
     return [];
   }
   try {
-    const snap = await getDocs(collection(db, 'profiles'));
+    const snap = await getDocs(collection(db, COL.profiles));
     return snap.docs
       .map((d) => firestoreDocToUserProfile(d.data()))
       .filter((p) => p.status !== 'deleted');
@@ -1347,11 +1459,11 @@ export async function deleteCloudProfileAsAdmin(profile: UserProfile): Promise<v
   if (!auth.currentUser || !profile?.id) return;
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
   const paths: [string, string][] = [
-    ['profiles', profile.id],
-    ['users', profile.id],
-    ['leaderboard', profile.id],
-    ['user_directory', profile.id],
-    ...(phoneKey && phoneKey.length >= 7 ? [['phone_index', phoneKey] as [string, string]] : []),
+    [COL.profiles, profile.id],
+    [COL.users, profile.id],
+    [COL.leaderboard, profile.id],
+    [COL.userDirectory, profile.id],
+    ...(phoneKey && phoneKey.length >= 7 ? [[COL.phoneIndex, phoneKey] as [string, string]] : []),
   ];
   try {
     for (const [col, docId] of paths) {
@@ -1392,11 +1504,11 @@ export async function deleteCloudProfileByUser(profile: UserProfile): Promise<vo
     new Set([phoneKey, rawDigits].filter((k) => k && k.length >= 7))
   );
   const paths: [string, string][] = [
-    ['profiles', profile.id],
-    ['users', profile.id],
-    ['leaderboard', profile.id],
-    ['user_directory', profile.id],
-    ...phoneKeysToDelete.map((pk) => ['phone_index', pk] as [string, string]),
+    [COL.profiles, profile.id],
+    [COL.users, profile.id],
+    [COL.leaderboard, profile.id],
+    [COL.userDirectory, profile.id],
+    ...phoneKeysToDelete.map((pk) => [COL.phoneIndex, pk] as [string, string]),
   ];
   for (const [col, docId] of paths) {
     try {
@@ -1418,7 +1530,7 @@ export async function updateCloudFriendsCount(profileId: string, friendsCount: n
   if (!profileId || profileId.length < 6) return;
   const safeCount = Math.max(0, Math.floor(Number(friendsCount) || 0));
   try {
-    const profileRef = doc(db, 'profiles', profileId);
+    const profileRef = doc(db, COL.profiles, profileId);
     const snap = await getDoc(profileRef);
     if (!snap.exists()) return;
     const prevStats = sanitizeStats(snap.data()?.stats);
@@ -1426,7 +1538,7 @@ export async function updateCloudFriendsCount(profileId: string, friendsCount: n
     const nextStats = { ...prevStats, friendsCount: safeCount };
     const batch = writeBatch(db);
     batch.update(profileRef, { stats: nextStats });
-    batch.set(doc(db, 'users', profileId), { id: profileId, stats: nextStats }, { merge: true });
+    batch.set(doc(db, COL.users, profileId), { id: profileId, stats: nextStats }, { merge: true });
     await batch.commit();
   } catch {
     // Non-fatal background sync
@@ -1437,12 +1549,12 @@ export async function getFirestoreUserFriendsCount(userId: string): Promise<numb
   if (!userId) return 0;
   try {
     const qIn = query(
-      collection(db, 'friendRequests'),
+      collection(db, COL.friendRequests),
       where('toUserId', '==', userId),
       where('status', '==', 'accepted')
     );
     const qOut = query(
-      collection(db, 'friendRequests'),
+      collection(db, COL.friendRequests),
       where('fromUserId', '==', userId),
       where('status', '==', 'accepted')
     );
@@ -1492,7 +1604,7 @@ function directoryDocToUserProfile(data: Record<string, any>): UserProfile {
 export async function getCloudProfileById(profileId: string): Promise<UserProfile | null> {
   if (!profileId || profileId.length < 8) return null;
   try {
-    const snap = await fetchDocServerFirst(['profiles', profileId]);
+    const snap = await fetchDocServerFirst([COL.profiles, profileId]);
     if (snap.exists()) {
       const profile = firestoreDocToUserProfile(snap.data());
       if (profile.status !== 'deleted') return profile;
@@ -1501,7 +1613,7 @@ export async function getCloudProfileById(profileId: string): Promise<UserProfil
     // fallback to directory
   }
   try {
-    const dirSnap = await fetchDocServerFirst(['user_directory', profileId]);
+    const dirSnap = await fetchDocServerFirst([COL.userDirectory, profileId]);
     if (dirSnap.exists()) {
       return directoryDocToUserProfile(dirSnap.data());
     }
@@ -1518,8 +1630,8 @@ export function subscribeToCloudProfile(
   if (!profileId || profileId.length < 4) {
     return () => {};
   }
-  const profileRef = doc(db, 'profiles', profileId);
-  const userRef = doc(db, 'users', profileId);
+  const profileRef = doc(db, COL.profiles, profileId);
+  const userRef = doc(db, COL.users, profileId);
   let latestProfile: UserProfile | null = null;
   let latestUserClaimAt = 0;
 
@@ -1594,20 +1706,20 @@ export async function fetchPublicDirectory(maxEntries = 200, forceRefresh = fals
   const [dirRes, usersRes, lbRes] = await Promise.allSettled([
     getDocs(
       query(
-        collection(db, 'user_directory'),
+        collection(db, COL.userDirectory),
         where('rewardPoints', '>=', 0),
         limit(Math.max(maxEntries, 200))
       )
     ),
     getDocs(
       query(
-        collection(db, 'users'),
+        collection(db, COL.users),
         limit(Math.max(maxEntries, 200))
       )
     ),
     getDocs(
       query(
-        collection(db, 'leaderboard'),
+        collection(db, COL.leaderboard),
         where('rewardPoints', '>=', 0),
         limit(Math.max(maxEntries, 200))
       )
@@ -1666,7 +1778,7 @@ export async function fetchPublicDirectory(maxEntries = 200, forceRefresh = fals
       await Promise.all(
         slice.map(async ({ id, lbData }) => {
           try {
-            const pSnap = await getDoc(doc(db, 'profiles', id));
+            const pSnap = await getDoc(doc(db, COL.profiles, id));
             if (pSnap.exists()) {
               const pData = pSnap.data();
               if (pData.status === 'deleted') return;
@@ -1681,10 +1793,6 @@ export async function fetchPublicDirectory(maxEntries = 200, forceRefresh = fals
                   ? `******${pDigits.slice(-4)}`
                   : 'Private',
               });
-              // Best-effort backfill of user_directory for future fast queries
-              setDoc(doc(db, 'user_directory', fullProfile.id), buildUserDirectoryPayload(fullProfile)).catch(
-                () => {}
-              );
               return;
             }
           } catch {
@@ -2102,7 +2210,7 @@ async function syncServerClockWithTicket(
 ): Promise<void> {
   if (!player.id) return;
   try {
-    const ticketRef = doc(db, 'matchmakingQueue', player.id);
+    const ticketRef = doc(db, COL.matchmakingQueue, player.id);
     const cleanName = (player.name || 'JIT Player').slice(0, 80);
     const cleanAvatar = sanitizeRoomAvatarUrl(player.avatar);
     const nowMs = Date.now();
@@ -2199,7 +2307,7 @@ async function cleanupSingleHostedRoomDoc(
 ): Promise<void> {
   const cleanId = normalizeRoomId(code);
   if (!cleanId) return;
-  const roomRef = doc(db, 'gameRooms', cleanId);
+  const roomRef = doc(db, COL.gameRooms, cleanId);
   try {
     let roomData = data;
     if (!roomData) {
@@ -2259,7 +2367,7 @@ export async function releasePreviousHostedRoom(
   const docsByCode = new Map<string, Record<string, any>>();
   try {
     const q = query(
-      collection(db, 'gameRooms'),
+      collection(db, COL.gameRooms),
       where('hostId', '==', hostId),
       limit(50)
     );
@@ -2287,7 +2395,7 @@ async function pickAvailableRoomCodeAndCleanStale(hostId: string): Promise<strin
   for (let attempt = 0; attempt < 60; attempt++) {
     const candidate = Math.floor(1000 + Math.random() * 9000).toString();
     try {
-      const candidateRef = doc(db, 'gameRooms', candidate);
+      const candidateRef = doc(db, COL.gameRooms, candidate);
       const snap = await getDocFromServer(candidateRef).catch(() => getDoc(candidateRef));
       if (!snap.exists()) {
         return candidate;
@@ -2422,7 +2530,7 @@ export async function createFirestoreGameRoom(
 
     try {
       const created = await runTransaction(db, async (tx) => {
-        const roomRef = doc(db, 'gameRooms', chosenCode);
+        const roomRef = doc(db, COL.gameRooms, chosenCode);
         const existingSnap = await tx.get(roomRef);
         if (existingSnap.exists()) {
           throw new Error('ROOM_CODE_COLLISION');
@@ -2502,7 +2610,7 @@ export async function joinFirestoreGameRoom(
     throw new Error('Please enter a valid 4-digit room code.');
   }
 
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   const seatColors = ['Red', 'Yellow', 'Green', 'Blue', 'Purple', 'Pink'];
 
   try {
@@ -2717,7 +2825,7 @@ export async function listPublicOpenGroupRooms(gameId?: string): Promise<Multipl
   try {
     // Single-field query avoids composite index failures
     const q = query(
-      collection(db, 'gameRooms'),
+      collection(db, COL.gameRooms),
       where('isPublicMatch', '==', true),
       limit(60)
     );
@@ -2775,10 +2883,6 @@ function filterActiveWaitingRooms(
       continue;
     }
     if (isRoomDocStale(data, PUBLIC_QUEUE_STALE_MS)) {
-      const staleId = normalizeRoomId(parsed.roomId || parsed.roomCode || d.id);
-      if (parsed.players.length <= 1 && staleId) {
-        deleteDoc(doc(db, 'gameRooms', staleId)).catch(() => {});
-      }
       continue;
     }
     if (parsed.roomCode === excludeRoomCode || parsed.roomId === excludeRoomCode) continue;
@@ -2810,13 +2914,13 @@ async function listWaitingQuickMatchRooms(
   try {
     // Query waiting rooms for the selected gameType directly (two equality filters work without custom composite indexes)
     const byTypeQ = query(
-      collection(db, 'gameRooms'),
+      collection(db, COL.gameRooms),
       where('gameType', '==', gameId),
       where('status', '==', 'waiting'),
       limit(50)
     );
     const byGameIdQ = query(
-      collection(db, 'gameRooms'),
+      collection(db, COL.gameRooms),
       where('gameId', '==', gameId),
       where('status', '==', 'waiting'),
       limit(50)
@@ -2832,7 +2936,7 @@ async function listWaitingQuickMatchRooms(
 
     if (mergedById.size === 0) {
       const broadQ = query(
-        collection(db, 'gameRooms'),
+        collection(db, COL.gameRooms),
         where('status', '==', 'waiting'),
         limit(100)
       );
@@ -2867,7 +2971,7 @@ export function subscribeToPublicMatchmakingQueue(
   onWaitingRooms: (rooms: MultiplayerRoom[]) => void
 ): Unsubscribe {
   const q = query(
-    collection(db, 'gameRooms'),
+    collection(db, COL.gameRooms),
     where('gameType', '==', gameId),
     where('status', '==', 'waiting'),
     limit(100)
@@ -2926,7 +3030,6 @@ function filterActiveQueueTickets(
       continue;
     }
     if (isRoomDocStale(data, PUBLIC_QUEUE_STALE_MS)) {
-      deleteDoc(doc(db, 'matchmakingQueue', ticket.playerId)).catch(() => {});
       continue;
     }
     active.push(ticket);
@@ -2942,7 +3045,7 @@ export async function fetchFirestoreGameRoomByCode(roomCode: string): Promise<Mu
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return null;
   try {
-    const snap = await fetchDocServerFirst(['gameRooms', cleanCode]);
+    const snap = await fetchDocServerFirst([COL.gameRooms, cleanCode]);
     if (!snap.exists()) return null;
     return parseRoomSnapshotData(snap.data());
   } catch {
@@ -2953,7 +3056,7 @@ export async function fetchFirestoreGameRoomByCode(roomCode: string): Promise<Mu
 export async function leaveMatchmakingQueue(playerId: string): Promise<void> {
   if (!playerId) return;
   try {
-    await deleteDoc(doc(db, 'matchmakingQueue', playerId));
+    await deleteDoc(doc(db, COL.matchmakingQueue, playerId));
   } catch {
     // Best-effort queue cleanup
   }
@@ -2962,7 +3065,7 @@ export async function leaveMatchmakingQueue(playerId: string): Promise<void> {
 export async function touchMatchmakingQueueHeartbeat(playerId: string): Promise<void> {
   if (!playerId) return;
   try {
-    await updateDoc(doc(db, 'matchmakingQueue', playerId), {
+    await updateDoc(doc(db, COL.matchmakingQueue, playerId), {
       updatedAt: serverTimestamp(),
     });
   } catch {
@@ -2976,7 +3079,7 @@ export async function findWaitingQueueTicketForGame(
 ): Promise<MatchmakingTicket | null> {
   try {
     const q = query(
-      collection(db, 'matchmakingQueue'),
+      collection(db, COL.matchmakingQueue),
       where('status', '==', 'waiting'),
       limit(50)
     );
@@ -2994,7 +3097,7 @@ export function subscribeToMatchmakingQueueForGame(
   onWaitingTickets: (tickets: MatchmakingTicket[]) => void
 ): Unsubscribe {
   const q = query(
-    collection(db, 'matchmakingQueue'),
+    collection(db, COL.matchmakingQueue),
     where('status', '==', 'waiting'),
     limit(50)
   );
@@ -3015,7 +3118,7 @@ export function subscribeToMyMatchmakingTicket(
   onMatchedRoom: (roomCode: string, matchedWithId: string) => void
 ): Unsubscribe {
   return onSnapshot(
-    doc(db, 'matchmakingQueue', playerId),
+    doc(db, COL.matchmakingQueue, playerId),
     (snap) => {
       if (!snap.exists()) return;
       const ticket = parseMatchmakingTicket(snap.data());
@@ -3034,7 +3137,7 @@ async function enterMatchmakingQueueTicket(
   player: { id: string; name: string; avatar: string },
   gameId: string
 ): Promise<MatchmakingTicket> {
-  const ticketRef = doc(db, 'matchmakingQueue', player.id);
+  const ticketRef = doc(db, COL.matchmakingQueue, player.id);
   const nowMs = Date.now();
   const cleanAvatar = sanitizeAvatarUrl(player.avatar);
   const cleanName = (player.name || 'JIT Player').slice(0, 80);
@@ -3092,12 +3195,12 @@ export async function pairQueuePlayersIntoRoom(
     return null;
   }
   const safeMax = Math.min(4, Math.max(2, maxPlayers || 2));
-  const oppRef = doc(db, 'matchmakingQueue', opponentTicket.playerId);
-  const myRef = doc(db, 'matchmakingQueue', initiator.id);
+  const oppRef = doc(db, COL.matchmakingQueue, opponentTicket.playerId);
+  const myRef = doc(db, COL.matchmakingQueue, initiator.id);
 
   for (let attempt = 0; attempt < 4; attempt++) {
     const roomCode = await pickAvailableRoomCodeAndCleanStale(initiator.id);
-    const roomRef = doc(db, 'gameRooms', roomCode);
+    const roomRef = doc(db, COL.gameRooms, roomCode);
 
     try {
       const txResult = await runTransaction(db, async (tx) => {
@@ -3273,7 +3376,7 @@ export async function touchMatchmakingRoomHeartbeat(roomCode: string): Promise<v
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return;
   try {
-    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+    await updateDoc(doc(db, COL.gameRooms, cleanCode), {
       lastUpdated: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -3289,7 +3392,7 @@ export async function releasePublicQueueSlotIfOwner(
 ): Promise<void> {
   if (!gameId || !playerId) return;
   const slotId = `slot_${gameId}`;
-  const slotRef = doc(db, 'matchmakingQueue', slotId);
+  const slotRef = doc(db, COL.matchmakingQueue, slotId);
   try {
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(slotRef);
@@ -3320,8 +3423,8 @@ export async function tryAtomicallyJoinWaitingRoom(
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return null;
 
-  const roomRef = doc(db, 'gameRooms', cleanCode);
-  const slotRef = doc(db, 'matchmakingQueue', `slot_${gameId}`);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
+  const slotRef = doc(db, COL.matchmakingQueue, `slot_${gameId}`);
   const cleanName = (player.name || 'JIT Player').slice(0, 80);
   const cleanAvatar = sanitizeRoomAvatarUrl(player.avatar);
   const seatColors = ['Red', 'Yellow', 'Green', 'Blue'];
@@ -3466,7 +3569,7 @@ export async function quickMatchFirestoreRoom(
   const cleanName = (player.name || 'JIT Player').slice(0, 80);
   const cleanAvatar = sanitizeRoomAvatarUrl(player.avatar);
   const slotId = `slot_${gameId}`;
-  const slotRef = doc(db, 'matchmakingQueue', slotId);
+  const slotRef = doc(db, COL.matchmakingQueue, slotId);
 
   // Release any prior orphaned rooms hosted by this user; calibrate server clock non-blocking
   await releasePreviousHostedRoom(player.id).catch(() => {});
@@ -3489,8 +3592,8 @@ export async function quickMatchFirestoreRoom(
       }
     }
 
-    // 2. Atomic Firestore creation with unique auto-generated room ID: doc(collection(db, 'gameRooms'))
-    const autoRoomRef = doc(collection(db, 'gameRooms'));
+    // 2. Atomic Firestore creation with unique auto-generated room ID: doc(collection(db, COL.gameRooms))
+    const autoRoomRef = doc(collection(db, COL.gameRooms));
     const generatedRoomId = autoRoomRef.id;
 
     try {
@@ -3502,7 +3605,7 @@ export async function quickMatchFirestoreRoom(
           Boolean(slotData) && !isRoomDocStale(slotData || {}, PUBLIC_QUEUE_STALE_MS);
 
         if (slotData && slotData.status === 'waiting' && slotData.gameId === gameId && slotRoomId && slotNotStale) {
-          const waitingRoomRef = doc(db, 'gameRooms', slotRoomId);
+          const waitingRoomRef = doc(db, COL.gameRooms, slotRoomId);
           const waitingRoomSnap = await tx.get(waitingRoomRef);
           if (waitingRoomSnap.exists()) {
             const rawWaitingData = waitingRoomSnap.data();
@@ -3949,7 +4052,7 @@ export async function startFirestoreGameRoom(
   if (!cleanCode) return;
   const startId = `start_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   try {
-    const roomRef = doc(db, 'gameRooms', cleanCode);
+    const roomRef = doc(db, COL.gameRooms, cleanCode);
     const snap = await getDoc(roomRef).catch(() => null);
     const gameId = snap?.exists() ? String(snap.data().gameType || snap.data().gameId || '') : '';
     const hydratedState = buildInitialGameStateForGame(gameId, startId, initialGameState);
@@ -4021,7 +4124,7 @@ export async function pushFirestoreGameMove(
       : undefined;
 
   try {
-    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+    await updateDoc(doc(db, COL.gameRooms, cleanCode), {
       gameStateJson: JSON.stringify(newGameState),
       ...unified,
       ...(resolvedScores ? { scores: resolvedScores } : {}),
@@ -4058,7 +4161,7 @@ export async function pushFirestoreQuizAnswer(
 ): Promise<any | null> {
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return null;
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   try {
     return await runTransaction(db, async (tx) => {
       const snap = await tx.get(roomRef);
@@ -4151,7 +4254,7 @@ export async function rematchFirestoreGameRoom(
   const unified = buildUnifiedBoardAndMoveFields(stampedReset, 'REMATCH', firstTurnId);
   const turnId = String(firstTurnId || '').slice(0, 64);
   try {
-    await updateDoc(doc(db, 'gameRooms', cleanCode), {
+    await updateDoc(doc(db, COL.gameRooms, cleanCode), {
       status: 'playing',
       gameStateJson: JSON.stringify(stampedReset),
       ...unified,
@@ -4177,7 +4280,7 @@ export async function sendFirestoreRoomChat(
 ): Promise<{ sent: boolean; restricted?: boolean }> {
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return { sent: false };
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   try {
     const snap = await getDoc(roomRef);
     if (!snap.exists()) return { sent: false };
@@ -4221,7 +4324,7 @@ export async function sendFirestoreRoomReaction(
 ): Promise<RoomReaction | null> {
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return null;
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   try {
     const snap = await getDoc(roomRef);
     if (!snap.exists()) return null;
@@ -4255,7 +4358,7 @@ export async function hostUpdateRoomModeration(
 ): Promise<void> {
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return;
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   try {
     const snap = await getDoc(roomRef);
     if (!snap.exists()) return;
@@ -4286,7 +4389,7 @@ export async function hostRotateRoomPlayers(
 ): Promise<void> {
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return;
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   try {
     const snap = await getDoc(roomRef);
     if (!snap.exists()) return;
@@ -4377,7 +4480,7 @@ export async function kickOrLeaveFirestoreRoom(
   if (getStoredHostedRoomCode(targetPlayerId) === cleanCode) {
     setStoredHostedRoomCode(targetPlayerId, null);
   }
-  const roomRef = doc(db, 'gameRooms', cleanCode);
+  const roomRef = doc(db, COL.gameRooms, cleanCode);
   try {
     const snap = await getDoc(roomRef);
     if (!snap.exists()) return;
@@ -4472,7 +4575,7 @@ export function subscribeToGameRoom(
     return () => {};
   }
   return onSnapshot(
-    doc(db, 'gameRooms', cleanCode),
+    doc(db, COL.gameRooms, cleanCode),
     (snap) => {
       if (!snap.exists()) {
         onRoomDeleted?.();
@@ -4522,7 +4625,7 @@ export async function upsertFirestoreVoicePeer(
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return;
   const peerId = sanitizeVoiceId(peer.peerId);
-  const peerRef = doc(db, 'gameRooms', cleanCode, 'voice_peers', peerId);
+  const peerRef = doc(db, COL.gameRooms, cleanCode, 'voice_peers', peerId);
   const safeName = (peer.name || 'Player').trim().slice(0, 80) || 'Player';
   const safeAvatar =
     typeof peer.avatar === 'string' && peer.avatar.length <= 400000 ? peer.avatar : '';
@@ -4562,7 +4665,7 @@ export async function removeFirestoreVoicePeer(
   if (!cleanCode) return;
   const peerId = sanitizeVoiceId(rawPeerId);
   try {
-    await deleteDoc(doc(db, 'gameRooms', cleanCode, 'voice_peers', peerId));
+    await deleteDoc(doc(db, COL.gameRooms, cleanCode, 'voice_peers', peerId));
   } catch (err) {
     console.warn('Firestore voice peer cleanup notice:', err);
   }
@@ -4575,7 +4678,7 @@ export function subscribeToFirestoreVoicePeers(
   const cleanCode = normalizeRoomId(roomCode);
   if (!cleanCode) return () => {};
   const q = query(
-    collection(db, 'gameRooms', cleanCode, 'voice_peers'),
+    collection(db, COL.gameRooms, cleanCode, 'voice_peers'),
     where('micEnabled', 'in', [true, false])
   );
   return onSnapshot(
@@ -4636,7 +4739,7 @@ export async function sendFirestoreVoiceSignal(
   }
 
   try {
-    await setDoc(doc(db, 'gameRooms', cleanCode, 'voice_signals', signalId), payload);
+    await setDoc(doc(db, COL.gameRooms, cleanCode, 'voice_signals', signalId), payload);
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
       handleFirestoreError(
@@ -4658,7 +4761,7 @@ export function subscribeToFirestoreVoiceSignals(
   if (!cleanCode) return () => {};
   const targetId = sanitizeVoiceId(myPeerId);
   const q = query(
-    collection(db, 'gameRooms', cleanCode, 'voice_signals'),
+    collection(db, COL.gameRooms, cleanCode, 'voice_signals'),
     where('toId', '==', targetId)
   );
   return onSnapshot(
@@ -4707,8 +4810,8 @@ export async function sendFirestoreFriendRequest(
   let resolvedToName = (toUser.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
   let resolvedToAvatar = sanitizeAvatarUrl(toUser.avatarUrl);
   try {
-    const toSnap = await getDocFromServer(doc(db, 'profiles', toUser.id)).catch(() =>
-      getDoc(doc(db, 'profiles', toUser.id))
+    const toSnap = await getDocFromServer(doc(db, COL.profiles, toUser.id)).catch(() =>
+      getDoc(doc(db, COL.profiles, toUser.id))
     );
     if (!toSnap.exists()) {
       // Cannot create Firestore friendRequest if recipient profile doc doesn't exist yet
@@ -4723,7 +4826,7 @@ export async function sendFirestoreFriendRequest(
   }
 
   const requestId = buildFriendRequestId(fromUser.id, toUser.id);
-  const reqRef = doc(db, 'friendRequests', requestId);
+  const reqRef = doc(db, COL.friendRequests, requestId);
   const fromName = (fromUser.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
   const fromAvatar = sanitizeAvatarUrl(fromUser.avatarUrl);
   const nowIso = new Date().toISOString();
@@ -4756,7 +4859,7 @@ export async function sendFirestoreFriendRequest(
       });
     }
 
-    batch.set(doc(db, 'notifications', notifId), {
+    batch.set(doc(db, COL.notifications, notifId), {
       id: notifId,
       userId: toUser.id,
       fromUserId: fromUser.id,
@@ -4788,7 +4891,7 @@ export async function respondToFirestoreFriendRequest(
 ): Promise<void> {
   if (!fromUserId || !currentUser?.id) return;
   const requestId = buildFriendRequestId(fromUserId, currentUser.id);
-  const reqRef = doc(db, 'friendRequests', requestId);
+  const reqRef = doc(db, COL.friendRequests, requestId);
 
   try {
     const snap = await getDoc(reqRef);
@@ -4802,7 +4905,7 @@ export async function respondToFirestoreFriendRequest(
     if (action === 'accepted') {
       const myName = (currentUser.fullName || 'JIT Member').trim().slice(0, 120) || 'JIT Member';
       const notifId = `notif_fa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
-      batch.set(doc(db, 'notifications', notifId), {
+      batch.set(doc(db, COL.notifications, notifId), {
         id: notifId,
         userId: fromUserId,
         fromUserId: currentUser.id,
@@ -4835,7 +4938,7 @@ export async function removeFirestoreFriendship(
   if (!myUserId || !friendUserId) return;
   const canonicalId = buildFriendRequestId(myUserId, friendUserId);
   try {
-    const reqRef = doc(db, 'friendRequests', canonicalId);
+    const reqRef = doc(db, COL.friendRequests, canonicalId);
     const snap = await getDoc(reqRef);
     if (snap.exists()) {
       await deleteDoc(reqRef);
@@ -4900,8 +5003,8 @@ export function subscribeToFirestoreFriendRequests(
         : undefined,
   });
 
-  const qIn = query(collection(db, 'friendRequests'), where('toUserId', '==', userId));
-  const qOut = query(collection(db, 'friendRequests'), where('fromUserId', '==', userId));
+  const qIn = query(collection(db, COL.friendRequests), where('toUserId', '==', userId));
+  const qOut = query(collection(db, COL.friendRequests), where('fromUserId', '==', userId));
 
   const unsubIn = onSnapshot(
     qIn,
@@ -4942,7 +5045,7 @@ export function subscribeToFirestoreNotifications(
   onNotifications: (items: InAppNotification[]) => void
 ): Unsubscribe {
   if (!userId) return () => {};
-  const q = query(collection(db, 'notifications'), where('userId', '==', userId), limit(60));
+  const q = query(collection(db, COL.notifications), where('userId', '==', userId), limit(60));
   return onSnapshot(
     q,
     (snap) => {
@@ -4983,7 +5086,7 @@ export function subscribeToFirestoreNotifications(
 export async function markFirestoreNotificationRead(notificationId: string): Promise<void> {
   if (!notificationId) return;
   try {
-    await updateDoc(doc(db, 'notifications', notificationId), {
+    await updateDoc(doc(db, COL.notifications, notificationId), {
       isRead: true,
       updatedAt: serverTimestamp(),
     });
@@ -4997,7 +5100,7 @@ export async function markAllFirestoreNotificationsRead(notificationIds: string[
   try {
     const batch = writeBatch(db);
     notificationIds.slice(0, 40).forEach((id) => {
-      batch.update(doc(db, 'notifications', id), {
+      batch.update(doc(db, COL.notifications, id), {
         isRead: true,
         updatedAt: serverTimestamp(),
       });
@@ -5050,13 +5153,13 @@ export async function ensureFirestoreDirectConversation(
   const myKey = String(me.id || me.phone || me.contactNumber || '').trim();
   const partnerKey = String(partner.id || partner.phone || partner.contactNumber || '').trim();
   const chatId = buildCanonicalChatId(myKey, partnerKey);
-  const chatRef = doc(db, 'chats', chatId);
+  const chatRef = doc(db, COL.chats, chatId);
 
   let partnerName = (partner.fullName || '').trim();
   let partnerAvatar = partner.avatarUrl || '';
   if (!partnerName || !partnerAvatar) {
     try {
-      const snap = await getDoc(doc(db, 'profiles', partner.id));
+      const snap = await getDoc(doc(db, COL.profiles, partner.id));
       if (snap.exists()) {
         const d = snap.data();
         if (!partnerName && d?.fullName) partnerName = String(d.fullName);
@@ -5170,7 +5273,7 @@ export async function createFirestoreGroupConversation(
   const nowMs = Date.now();
 
   try {
-    await setDoc(doc(db, 'chats', chatId), {
+    await setDoc(doc(db, COL.chats, chatId), {
       id: chatId,
       type: 'group',
       name: cleanName,
@@ -5310,12 +5413,12 @@ export function subscribeToFirestoreConversations(
   };
 
   const qChats = query(
-    collection(db, 'chats'),
+    collection(db, COL.chats),
     where('participants', 'array-contains', userId),
     limit(60)
   );
   const qLegacy = query(
-    collection(db, 'conversations'),
+    collection(db, COL.conversations),
     where('participantIds', 'array-contains', userId),
     limit(60)
   );
@@ -5370,11 +5473,11 @@ function resolveMessageLabel(data: Record<string, any>, docId?: string): string 
   });
 }
 
-function getChatCollectionRoot(chatId: string): 'chats' | 'conversations' {
+function getChatCollectionRoot(chatId: string): typeof COL.chats | typeof COL.conversations {
   if (chatId.startsWith('dm_') || chatId.startsWith('conv_')) {
-    return 'conversations';
+    return COL.conversations;
   }
-  return 'chats';
+  return COL.chats;
 }
 
 export function subscribeToFirestoreMessages(
@@ -5640,7 +5743,7 @@ export async function sendFirestoreDirectMessage(
       const recipientId = directRecipientId || participants.find((pid) => pid !== sender.id);
       if (recipientId && recipientId.length >= 8) {
         const notifId = `notif_dm_${clientCreatedAt}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
-        batch.set(doc(db, 'notifications', notifId), {
+        batch.set(doc(db, COL.notifications, notifId), {
           id: notifId,
           userId: recipientId,
           fromUserId: sender.id,
@@ -5708,7 +5811,7 @@ export async function sendGameInviteToFriend(params: {
   const inviteMsg = `${senderName} invited you to play ${cleanGameName} (Room #${cleanRoom})`;
 
   const notifId = `notif_gi_${nowMs}_${Math.random().toString(36).slice(2, 7)}`.slice(0, 120);
-  await setDoc(doc(db, 'notifications', notifId), {
+  await setDoc(doc(db, COL.notifications, notifId), {
     id: notifId,
     userId: friend.id,
     fromUserId: fromUser.id,
@@ -5780,7 +5883,7 @@ export async function uploadChunkedVideoToFirestore(
   const { uint8ToBase64, cacheCloudVideoBlobLocally } = await import('../services/mediaStorage');
 
   // 1. Create parent metadata manifest doc first (required by Firestore Master Gate rule)
-  await setDoc(doc(db, 'video_media', mediaId), {
+  await setDoc(doc(db, COL.videoMedia, mediaId), {
     id: mediaId,
     creatorId: userId || 'usr_jit_member',
     mimeType,
@@ -5803,7 +5906,7 @@ export async function uploadChunkedVideoToFirestore(
       const b64 = uint8ToBase64(bytes.subarray(sliceStart, sliceEnd));
       const chunkId = `c_${String(idx).padStart(3, '0')}`;
       promises.push(
-        setDoc(doc(db, 'video_media', mediaId, 'chunks', chunkId), {
+        setDoc(doc(db, COL.videoMedia, mediaId, 'chunks', chunkId), {
           id: chunkId,
           mediaId,
           index: idx,
@@ -5856,7 +5959,7 @@ export async function fetchCloudChunkedVideoBlobUrl(uri: string): Promise<string
       }
 
       // 2. Fetch metadata + sequential base64 chunks from Firestore
-      const metaSnap = await getDoc(doc(db, 'video_media', mediaId));
+      const metaSnap = await getDoc(doc(db, COL.videoMedia, mediaId));
       if (!metaSnap.exists()) {
         return '';
       }
@@ -5865,7 +5968,7 @@ export async function fetchCloudChunkedVideoBlobUrl(uri: string): Promise<string
       const expiresAt = typeof meta.expiresAt === 'number' ? meta.expiresAt : Date.now() + VIDEO_EXPIRY_MS;
 
       const chunksSnap = await getDocs(
-        query(collection(db, 'video_media', mediaId, 'chunks'), where('index', '>=', 0), limit(80))
+        query(collection(db, COL.videoMedia, mediaId, 'chunks'), where('index', '>=', 0), limit(80))
       );
       if (chunksSnap.empty) {
         return '';
@@ -5900,124 +6003,67 @@ export async function fetchCloudChunkedVideoBlobUrl(uri: string): Promise<string
   return promise;
 }
 
+function inferVideoContentType(file: File, ext: string): string {
+  if (file.type && file.type.startsWith('video/')) {
+    return file.type;
+  }
+  switch (ext.toLowerCase()) {
+    case 'mov':
+      return 'video/quicktime';
+    case 'webm':
+      return 'video/webm';
+    case 'avi':
+      return 'video/x-msvideo';
+    case 'mkv':
+      return 'video/x-matroska';
+    case 'ogv':
+      return 'video/ogg';
+    default:
+      return 'video/mp4';
+  }
+}
+
 export async function uploadVideoAssetToCloud(
-  userId: string,
+  _userId: string,
   file: File,
   thumbnailDataUrl: string,
   expiresAt: number,
   onProgress?: (pct: number) => void
-): Promise<{ videoUrl: string; thumbnailUrl: string; storageSource: 'firebase' | 'server' | 'firestore' }> {
-  const mediaId = `vid_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const ext = (file.name.split('.').pop() || 'mp4').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6) || 'mp4';
+): Promise<{ videoUrl: string; thumbnailUrl: string; storageSource: 'indexeddb' | 'server' | 'firestore' }> {
+  const ext = (file.name.split('.').pop() || 'mp4').replace(/[^a-zA-Z0-9]/g, '').slice(0, 6).toLowerCase() || 'mp4';
+  const contentType = inferVideoContentType(file, ext);
+  const finalThumb = thumbnailDataUrl && thumbnailDataUrl.length <= 170_000 ? thumbnailDataUrl : '';
 
-  let finalThumb = thumbnailDataUrl && thumbnailDataUrl.length <= 170_000 ? thumbnailDataUrl : '';
+  onProgress?.(20);
 
-  // 1. Try Firebase Storage first (uploads video & thumbnail with fast failback)
-  try {
-    onProgress?.(10);
-    const videoPath = `videos/${userId}/${mediaId}.${ext}`;
-    const videoRef = storageRef(storage, videoPath);
-
-    const videoDownloadUrl = await new Promise<string>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        try {
-          task.cancel();
-        } catch {
-          // ignore
-        }
-        reject(new Error('Firebase Storage upload timed out'));
-      }, 15000);
-
-      const task = uploadBytesResumable(videoRef, file, {
-        contentType: file.type || 'video/mp4',
-        customMetadata: {
-          userId,
-          expiresAt: String(expiresAt),
-        },
-      });
-
-      task.on(
-        'state_changed',
-        (snap) => {
-          if (snap.totalBytes > 0) {
-            const pct = Math.min(90, Math.max(10, Math.round((snap.bytesTransferred / snap.totalBytes) * 85)));
-            onProgress?.(pct);
-          }
-        },
-        (err) => {
-          window.clearTimeout(timeoutId);
-          reject(err);
-        },
-        async () => {
-          window.clearTimeout(timeoutId);
-          try {
-            const url = await getDownloadURL(task.snapshot.ref);
-            resolve(url);
-          } catch (e) {
-            reject(e);
-          }
-        }
-      );
-    });
-
-    if (videoDownloadUrl && videoDownloadUrl.startsWith('http')) {
-      if (finalThumb && finalThumb.startsWith('data:image/')) {
-        try {
-          const thumbRef = storageRef(storage, `thumbnails/${userId}/${mediaId}.jpg`);
-          await uploadString(thumbRef, finalThumb, 'data_url');
-          const thumbUrl = await getDownloadURL(thumbRef);
-          if (thumbUrl && thumbUrl.startsWith('http')) {
-            finalThumb = thumbUrl;
-          }
-        } catch {
-          // Keep compact inline JPEG thumbnail
-        }
-      }
-      onProgress?.(100);
-      return { videoUrl: videoDownloadUrl, thumbnailUrl: finalThumb, storageSource: 'firebase' };
-    }
-  } catch (err) {
-    console.info('Firebase Storage video upload fallback engaged:', err);
-  }
-
-  // 2. Try Express binary /api/media/upload only when Express backend API is active
+  // 1. Optional Express media endpoint if active
   if (typeof window !== 'undefined' && typeof fetch === 'function' && (await detectExpressBackendAvailable())) {
-    onProgress?.(55);
-    const res = await safeFetchJson<{ url?: string }>('/api/media/upload', {
-      method: 'POST',
-      headers: {
-        'Content-Type': file.type || 'application/octet-stream',
-        'X-Media-Mime': file.type || 'video/mp4',
-        'X-Expires-At': String(expiresAt),
-      },
-      body: file,
-    });
-    if (res.ok && res.data?.url) {
-      onProgress?.(100);
-      return { videoUrl: String(res.data.url), thumbnailUrl: finalThumb, storageSource: 'server' };
-    }
-  }
-
-  // 3. Direct Firestore Base64 Data URL for compact clips (<= 520KB binary -> <= 720KB Base64 string)
-  if (file.size <= 520_000) {
     try {
-      onProgress?.(75);
-      const { fileToDataUrl } = await import('../services/mediaStorage');
-      const dataUrl = await fileToDataUrl(file);
-      if (dataUrl.length <= 720_000) {
+      onProgress?.(45);
+      const res = await safeFetchJson<{ url?: string }>('/api/media/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': contentType || 'application/octet-stream',
+          'X-Media-Mime': contentType || 'video/mp4',
+          'X-Expires-At': String(expiresAt),
+        },
+        body: file,
+      });
+      if (res.ok && res.data?.url && !String(res.data.url).startsWith('blob:')) {
         onProgress?.(100);
-        return { videoUrl: dataUrl, thumbnailUrl: finalThumb, storageSource: 'firestore' };
+        return { videoUrl: String(res.data.url), thumbnailUrl: finalThumb, storageSource: 'server' };
       }
     } catch {
-      // Fall through to chunked Firestore Base64 storage
+      // Fall back to persistent browser IndexedDB storage
     }
   }
 
-  // 4. Universal Cross-Device Cloud Fallback: Chunked Base64 Storage in Firestore (`fschunk://<mediaId>`)
-  //    Ensures ALL users on ANY browser/device globally stream the exact video without device-only blobs!
-  onProgress?.(55);
-  const fschunkUri = await uploadChunkedVideoToFirestore(userId, file, expiresAt, onProgress);
-  return { videoUrl: fschunkUri, thumbnailUrl: finalThumb, storageSource: 'firestore' };
+  // 2. Store full video binary persistently in browser IndexedDB (zero paid Firebase Storage, zero temp blob URLs)
+  onProgress?.(60);
+  const { saveVideoBlobLocally } = await import('../services/mediaStorage');
+  const { uri } = await saveVideoBlobLocally(file, expiresAt);
+  onProgress?.(100);
+  return { videoUrl: uri, thumbnailUrl: finalThumb, storageSource: 'indexeddb' };
 }
 
 export function isAccessibleVideoUrl(url?: string): boolean {
@@ -6053,12 +6099,16 @@ function unwrapSingleMediaString(val: unknown): string {
 function isLikelyVideoUrl(url?: string): boolean {
   if (!url) return false;
   const lower = url.toLowerCase();
-  if (lower.startsWith('data:video/') || lower.startsWith('fschunk://')) return true;
+  if (lower.startsWith('data:video/') || lower.startsWith('fschunk://') || lower.startsWith('idb://')) return true;
+  if (lower.includes('youtube.com/') || lower.includes('youtu.be/')) return true;
   const cleanPath = lower.split('?')[0].split('#')[0];
   return (
     cleanPath.endsWith('.mp4') ||
     cleanPath.endsWith('.webm') ||
     cleanPath.endsWith('.mov') ||
+    cleanPath.endsWith('.avi') ||
+    cleanPath.endsWith('.mkv') ||
+    cleanPath.endsWith('.m4v') ||
     cleanPath.endsWith('.ogv') ||
     lower.includes('videos%2f') ||
     lower.includes('/videos/')
@@ -6204,15 +6254,20 @@ export function isVideoContentExpired(
 }
 
 export async function publishFirestoreReel(reel: Reel): Promise<void> {
+  const rawVideoUrl = (reel.videoUrl || '').trim();
+  if (!rawVideoUrl || rawVideoUrl.startsWith('blob:')) {
+    throw new Error('Cannot save reel without a persistent cloud video URL.');
+  }
   const createdAtMs = reel.createdAtMs || Date.now();
   const expiresAt =
     reel.expiresAt && reel.expiresAt >= createdAtMs + VIDEO_EXPIRY_MS
       ? reel.expiresAt
       : createdAtMs + VIDEO_EXPIRY_MS;
-  const safeVideoUrl =
-    reel.videoUrl && reel.videoUrl.length <= 740_000 ? reel.videoUrl : '';
+  const safeVideoUrl = rawVideoUrl.length <= 740_000 ? rawVideoUrl : '';
   const safeThumb =
-    reel.thumbnailUrl && reel.thumbnailUrl.length <= 175_000 ? reel.thumbnailUrl : '';
+    reel.thumbnailUrl && !reel.thumbnailUrl.trim().startsWith('blob:') && reel.thumbnailUrl.length <= 175_000
+      ? reel.thumbnailUrl
+      : '';
 
   const payload: Record<string, any> = {
     id: reel.id,
@@ -6237,10 +6292,10 @@ export async function publishFirestoreReel(reel: Reel): Promise<void> {
   };
 
   try {
-    await setDoc(doc(db, 'reels', reel.id), payload);
+    await setDoc(doc(db, COL.reels, reel.id), payload);
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.CREATE, `reels/${reel.id}`);
+      handleFirestoreError(err, OperationType.CREATE, `${COL.reels}/${reel.id}`);
     }
     console.warn('publishFirestoreReel notice:', err);
   }
@@ -6249,7 +6304,7 @@ export async function publishFirestoreReel(reel: Reel): Promise<void> {
 export function subscribeToFirestoreReels(
   onReels: (reels: Reel[]) => void
 ): Unsubscribe {
-  const q = query(collection(db, 'reels'), where('createdAtMs', '>=', 0), limit(80));
+  const q = query(collection(db, COL.reels), where('createdAtMs', '>=', 0), limit(80));
   return onSnapshot(
     q,
     (snap) => {
@@ -6267,8 +6322,6 @@ export function subscribeToFirestoreReels(
           ) &&
           !isAccessibleVideoUrl(videoUrl)
         ) {
-          // Auto-remove genuinely expired reel (>40 days old) from Firestore
-          deleteDoc(d.ref).catch(() => {});
           return;
         }
         let comments: any[] = [];
@@ -6319,7 +6372,7 @@ export async function updateFirestoreReelInteraction(
 ): Promise<void> {
   if (!reelId) return;
   try {
-    await updateDoc(doc(db, 'reels', reelId), {
+    await updateDoc(doc(db, COL.reels, reelId), {
       ...patch,
       updatedAt: serverTimestamp(),
     });
@@ -6337,10 +6390,14 @@ export async function publishFirestorePost(post: Post): Promise<void> {
         : createdAtMs + VIDEO_EXPIRY_MS
       : post.expiresAt;
   const safeMediaUrls = Array.isArray(post.mediaUrls)
-    ? post.mediaUrls.filter((u) => typeof u === 'string' && u.length <= 740_000).slice(0, 4)
+    ? post.mediaUrls
+        .filter((u) => typeof u === 'string' && !u.trim().startsWith('blob:') && u.length <= 740_000)
+        .slice(0, 4)
     : undefined;
   const safeThumb =
-    post.thumbnailUrl && post.thumbnailUrl.length <= 175_000 ? post.thumbnailUrl : undefined;
+    post.thumbnailUrl && !post.thumbnailUrl.trim().startsWith('blob:') && post.thumbnailUrl.length <= 175_000
+      ? post.thumbnailUrl
+      : undefined;
 
   const payload: Record<string, any> = {
     id: post.id,
@@ -6366,10 +6423,10 @@ export async function publishFirestorePost(post: Post): Promise<void> {
   };
 
   try {
-    await setDoc(doc(db, 'posts', post.id), payload);
+    await setDoc(doc(db, COL.posts, post.id), payload);
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.CREATE, `posts/${post.id}`);
+      handleFirestoreError(err, OperationType.CREATE, `${COL.posts}/${post.id}`);
     }
     console.warn('publishFirestorePost notice:', err);
   }
@@ -6378,7 +6435,7 @@ export async function publishFirestorePost(post: Post): Promise<void> {
 export function subscribeToFirestorePosts(
   onPosts: (posts: Post[]) => void
 ): Unsubscribe {
-  const q = query(collection(db, 'posts'), where('createdAtMs', '>=', 0), limit(100));
+  const q = query(collection(db, COL.posts), where('createdAtMs', '>=', 0), limit(100));
   return onSnapshot(
     q,
     (snap) => {
@@ -6403,8 +6460,6 @@ export function subscribeToFirestorePosts(
           ) &&
           !isAccessibleVideoUrl(unwrapped.primaryUrl)
         ) {
-          // Auto-remove genuinely expired video post (>40 days old) from Firestore
-          deleteDoc(d.ref).catch(() => {});
           return;
         }
         let comments: any[] = [];
@@ -6452,7 +6507,7 @@ export async function updateFirestorePostInteraction(
 ): Promise<void> {
   if (!postId) return;
   try {
-    await updateDoc(doc(db, 'posts', postId), {
+    await updateDoc(doc(db, COL.posts, postId), {
       ...patch,
       updatedAt: serverTimestamp(),
     });
@@ -6464,7 +6519,7 @@ export async function updateFirestorePostInteraction(
 export async function deleteFirestorePost(postId: string): Promise<void> {
   if (!postId) return;
   try {
-    await deleteDoc(doc(db, 'posts', postId));
+    await deleteDoc(doc(db, COL.posts, postId));
   } catch (err) {
     console.warn('deleteFirestorePost notice:', err);
   }
@@ -6480,7 +6535,7 @@ export async function purgeExpiredCloudVideos(): Promise<number> {
 
   try {
     const expiredReelsQ = query(
-      collection(db, 'reels'),
+      collection(db, COL.reels),
       where('expiresAt', '>=', 0),
       where('expiresAt', '<=', now),
       limit(50)
@@ -6513,7 +6568,7 @@ export async function purgeExpiredCloudVideos(): Promise<number> {
 
   try {
     const expiredPostsQ = query(
-      collection(db, 'posts'),
+      collection(db, COL.posts),
       where('expiresAt', '>=', 0),
       where('expiresAt', '<=', now),
       limit(50)
@@ -6556,7 +6611,7 @@ export async function purgeExpiredCloudVideos(): Promise<number> {
 export async function deleteFirestoreReel(reelId: string): Promise<void> {
   if (!reelId) return;
   try {
-    await deleteDoc(doc(db, 'reels', reelId));
+    await deleteDoc(doc(db, COL.reels, reelId));
   } catch (err) {
     console.warn('deleteFirestoreReel notice:', err);
   }
@@ -6565,7 +6620,7 @@ export async function deleteFirestoreReel(reelId: string): Promise<void> {
 export async function deleteFirestoreMatchRecord(matchId: string): Promise<void> {
   if (!matchId) return;
   try {
-    await deleteDoc(doc(db, 'match_history', matchId));
+    await deleteDoc(doc(db, COL.matchHistory, matchId));
   } catch (err) {
     console.warn('deleteFirestoreMatchRecord notice:', err);
   }
@@ -6625,7 +6680,7 @@ export async function adminOverrideCloudProfileClient(
     stats: nextStats,
   };
 
-  const profileRef = doc(db, 'profiles', baseProfile.id);
+  const profileRef = doc(db, COL.profiles, baseProfile.id);
   const snap = await getDoc(profileRef).catch(() => null);
   if (snap && snap.exists()) {
     const patch: Record<string, any> = {
@@ -6653,12 +6708,12 @@ export async function adminOverrideCloudProfileClient(
 
   if (nextStatus === 'deleted') {
     await Promise.allSettled([
-      deleteDoc(doc(db, 'user_directory', baseProfile.id)),
-      deleteDoc(doc(db, 'leaderboard', baseProfile.id)),
+      deleteDoc(doc(db, COL.userDirectory, baseProfile.id)),
+      deleteDoc(doc(db, COL.leaderboard, baseProfile.id)),
     ]);
   } else {
     await Promise.allSettled([
-      setDoc(doc(db, 'user_directory', nextProfile.id), buildUserDirectoryPayload(nextProfile)),
+      setDoc(doc(db, COL.userDirectory, nextProfile.id), buildUserDirectoryPayload(nextProfile)),
       syncLeaderboardEntry(nextProfile),
     ]);
   }
@@ -6683,7 +6738,7 @@ export async function adminModerateCloudProfileClient(
       : '';
   const suspendedAt = action === 'unblock' ? '' : nowIso;
 
-  const profileRef = doc(db, 'profiles', profile.id);
+  const profileRef = doc(db, COL.profiles, profile.id);
   const snap = await getDoc(profileRef).catch(() => null);
   if (snap && snap.exists()) {
     await updateDoc(profileRef, {
@@ -6698,8 +6753,8 @@ export async function adminModerateCloudProfileClient(
 
   if (action === 'delete') {
     await Promise.allSettled([
-      deleteDoc(doc(db, 'user_directory', profile.id)),
-      deleteDoc(doc(db, 'leaderboard', profile.id)),
+      deleteDoc(doc(db, COL.userDirectory, profile.id)),
+      deleteDoc(doc(db, COL.leaderboard, profile.id)),
     ]);
   }
   invalidateDirectoryCache();
@@ -6782,9 +6837,9 @@ export async function adminFetchUserChatActivityClient(
 
   // 1. Primary conversation queries across both canonical /chats and legacy /conversations
   const [chatsRes, partRes, recentRes] = await Promise.allSettled([
-    getDocs(query(collection(db, 'chats'), where('participants', 'array-contains', userId), limit(100))),
-    getDocs(query(collection(db, 'conversations'), where('participantIds', 'array-contains', userId), limit(100))),
-    getDocs(query(collection(db, 'conversations'), limit(100))),
+    getDocs(query(collection(db, COL.chats), where('participants', 'array-contains', userId), limit(100))),
+    getDocs(query(collection(db, COL.conversations), where('participantIds', 'array-contains', userId), limit(100))),
+    getDocs(query(collection(db, COL.conversations), limit(100))),
   ]);
 
   if (chatsRes.status === 'fulfilled') {
@@ -6866,7 +6921,7 @@ export async function adminFetchUserChatActivityClient(
 
     for (const cid of Array.from(extraConvIds)) {
       try {
-        const cSnap = await getDoc(doc(db, 'conversations', cid));
+        const cSnap = await getDoc(doc(db, getChatCollectionRoot(cid), cid));
         if (cSnap.exists()) {
           convMap.set(cid, toConv(cid, cSnap.data()));
         }
@@ -6901,7 +6956,7 @@ export async function adminFetchUserActivityClient(
 
   try {
     const postsSnap = await getDocs(
-      query(collection(db, 'posts'), where('createdAtMs', '>=', 0), limit(150))
+      query(collection(db, COL.posts), where('createdAtMs', '>=', 0), limit(150))
     );
     postsSnap.forEach((d) => {
       const data = d.data();
@@ -6962,7 +7017,7 @@ export async function adminFetchUserActivityClient(
 
   try {
     const reelsSnap = await getDocs(
-      query(collection(db, 'reels'), where('createdAtMs', '>=', 0), limit(100))
+      query(collection(db, COL.reels), where('createdAtMs', '>=', 0), limit(100))
     );
     reelsSnap.forEach((d) => {
       const data = d.data();
@@ -7024,7 +7079,10 @@ export async function uploadAnnouncementMediaToCloud(
   thumbnailUrl?: string;
   expiresAt?: number;
 }> {
-  const isVideo = file.type.startsWith('video/');
+  const fileNameLower = (file.name || '').toLowerCase();
+  const isVideo =
+    file.type.startsWith('video/') ||
+    /\.(mp4|mov|webm|avi|mkv|m4v|ogv)$/i.test(fileNameLower);
   const mediaId = `ann_med_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
   if (isVideo) {
@@ -7046,35 +7104,10 @@ export async function uploadAnnouncementMediaToCloud(
     };
   }
 
-  // Image upload path
+  // Image upload path: store compact Data URL directly in Firestore without paid Firebase Storage
   onProgress?.(20);
   const { saveMediaFile } = await import('../services/mediaStorage');
   const { dataUrl } = await saveMediaFile(file);
-
-  try {
-    const ext = dataUrl.startsWith('data:image/webp')
-      ? 'webp'
-      : dataUrl.startsWith('data:image/png')
-      ? 'png'
-      : 'jpg';
-    const imgRef = storageRef(storage, `announcements/${mediaId}.${ext}`);
-    const downloadUrl = await Promise.race<string>([
-      (async () => {
-        await uploadString(imgRef, dataUrl, 'data_url');
-        return await getDownloadURL(imgRef);
-      })(),
-      new Promise<string>((_, reject) =>
-        setTimeout(() => reject(new Error('Storage announcement image timeout')), 5000)
-      ),
-    ]);
-    if (downloadUrl && downloadUrl.startsWith('http')) {
-      onProgress?.(100);
-      return { mediaUrl: downloadUrl, mediaType: 'image' };
-    }
-  } catch {
-    // Fall back to compact Data URL (persists directly in Firestore & offline without 404 risk)
-  }
-
   onProgress?.(100);
   return { mediaUrl: dataUrl, mediaType: 'image' };
 }
@@ -7082,9 +7115,13 @@ export async function uploadAnnouncementMediaToCloud(
 export async function publishFirestoreAnnouncement(ann: GlobalAnnouncement): Promise<void> {
   const createdAtMs = ann.createdAtMs || Date.now();
   const safeMediaUrl =
-    ann.mediaUrl && ann.mediaUrl.length <= 740_000 ? ann.mediaUrl : undefined;
+    ann.mediaUrl && !ann.mediaUrl.trim().startsWith('blob:') && ann.mediaUrl.length <= 740_000
+      ? ann.mediaUrl
+      : undefined;
   const safeThumb =
-    ann.thumbnailUrl && ann.thumbnailUrl.length <= 175_000 ? ann.thumbnailUrl : undefined;
+    ann.thumbnailUrl && !ann.thumbnailUrl.trim().startsWith('blob:') && ann.thumbnailUrl.length <= 175_000
+      ? ann.thumbnailUrl
+      : undefined;
 
   const payload: Record<string, any> = {
     id: ann.id,
@@ -7101,10 +7138,10 @@ export async function publishFirestoreAnnouncement(ann: GlobalAnnouncement): Pro
   };
 
   try {
-    await setDoc(doc(db, 'announcements', ann.id), payload);
+    await setDoc(doc(db, COL.announcements, ann.id), payload);
   } catch (err: any) {
     if (err?.code === 'permission-denied') {
-      handleFirestoreError(err, OperationType.CREATE, `announcements/${ann.id}`);
+      handleFirestoreError(err, OperationType.CREATE, `${COL.announcements}/${ann.id}`);
     }
     console.warn('publishFirestoreAnnouncement notice:', err);
   }
@@ -7113,11 +7150,10 @@ export async function publishFirestoreAnnouncement(ann: GlobalAnnouncement): Pro
 export function subscribeToFirestoreAnnouncements(
   onUpdate: (items: GlobalAnnouncement[]) => void
 ): Unsubscribe {
-  const q = query(collection(db, 'announcements'), where('createdAtMs', '>=', 0), limit(50));
+  const q = query(collection(db, COL.announcements), where('createdAtMs', '>=', 0), limit(50));
   return onSnapshot(
     q,
     (snap) => {
-      const now = Date.now();
       const items: GlobalAnnouncement[] = [];
       snap.forEach((d) => {
         const data = d.data();
@@ -7133,7 +7169,6 @@ export function subscribeToFirestoreAnnouncements(
           ) &&
           !isAccessibleVideoUrl(mediaUrl)
         ) {
-          deleteDoc(d.ref).catch(() => {});
           return;
         }
         items.push({
@@ -7162,7 +7197,7 @@ export function subscribeToFirestoreAnnouncements(
 export async function deleteFirestoreAnnouncement(id: string): Promise<void> {
   if (!id) return;
   try {
-    await deleteDoc(doc(db, 'announcements', id));
+    await deleteDoc(doc(db, COL.announcements, id));
   } catch (err) {
     console.warn('deleteFirestoreAnnouncement notice:', err);
   }

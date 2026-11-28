@@ -10,6 +10,7 @@ import {
   saveMediaFile,
   validateMediaFile,
   generateVideoThumbnail,
+  isVideoFile,
   VIDEO_EXPIRY_MS,
 } from '../../services/mediaStorage';
 import { uploadVideoAssetToCloud } from '../../lib/firebase';
@@ -47,7 +48,7 @@ export const AddStoryModal: React.FC<AddStoryModalProps> = ({ isOpen, onClose })
       return;
     }
 
-    const isVideo = file.type.startsWith('video/');
+    const isVideo = isVideoFile(file);
     setMediaType(isVideo ? 'video' : 'image');
     setSelectedFile(file);
 
@@ -185,7 +186,7 @@ export const AddStoryModal: React.FC<AddStoryModalProps> = ({ isOpen, onClose })
             type="file"
             ref={fileInputRef}
             onChange={handleFileSelect}
-            accept="image/*,video/*"
+            accept="image/*,video/*,.mp4,.mov,.webm,.avi,.mkv"
             className="hidden"
           />
 

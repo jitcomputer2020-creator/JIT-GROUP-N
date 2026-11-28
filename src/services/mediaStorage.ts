@@ -76,6 +76,18 @@ export function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+export function isVideoFile(file: File): boolean {
+  const type = (file.type || '').toLowerCase();
+  if (type.startsWith('video/')) return true;
+  return /\.(mp4|mov|webm|avi|mkv|m4v|ogv)$/i.test(file.name || '');
+}
+
+export function isImageFile(file: File): boolean {
+  const type = (file.type || '').toLowerCase();
+  if (type.startsWith('image/')) return true;
+  return /\.(jpe?g|png|webp|gif|bmp|avif|heic|heif)$/i.test(file.name || '');
+}
+
 /**
  * Validates file type and size constraints
  */
@@ -87,7 +99,9 @@ export function validateMediaFile(
     allowedCategory?: 'image' | 'video' | 'any';
   }
 ): { valid: boolean; error?: string } {
-  const maxMb = options?.maxSizeMb || (file.type.startsWith('video/') ? 50 : 15);
+  const isVid = isVideoFile(file);
+  const isImg = isImageFile(file);
+  const maxMb = options?.maxSizeMb || (isVid ? 100 : 15);
   const maxBytes = maxMb * 1024 * 1024;
 
   if (file.size > maxBytes) {
@@ -97,15 +111,20 @@ export function validateMediaFile(
     };
   }
 
-  if (options?.allowedCategory === 'image' && !file.type.startsWith('image/')) {
+  if (options?.allowedCategory === 'image' && !isImg) {
     return { valid: false, error: 'Only image files (JPEG, PNG, WEBP, GIF) are allowed.' };
   }
 
-  if (options?.allowedCategory === 'video' && !file.type.startsWith('video/')) {
-    return { valid: false, error: 'Only video files (MP4, WEBM, QuickTime) are allowed.' };
+  if (options?.allowedCategory === 'video' && !isVid) {
+    return { valid: false, error: 'Only video files (MP4, MOV, WebM, AVI, MKV) are allowed.' };
   }
 
-  if (options?.allowedMimeTypes && !options.allowedMimeTypes.includes(file.type)) {
+  if (
+    options?.allowedMimeTypes &&
+    file.type &&
+    file.type !== 'application/octet-stream' &&
+    !options.allowedMimeTypes.includes(file.type)
+  ) {
     return {
       valid: false,
       error: `Unsupported file type: ${file.type}. Allowed: ${options.allowedMimeTypes.join(', ')}`,
@@ -267,7 +286,7 @@ export async function saveCompressedProfileMediaFile(
  * Persistently saves a file into IndexedDB and returns the permanent Data URL
  */
 export async function saveMediaFile(file: File): Promise<{ id: string; dataUrl: string }> {
-  const isImage = file.type.startsWith('image/');
+  const isImage = isImageFile(file);
   let dataUrl =
     isImage && !file.type.includes('gif')
       ? await compressImageFile(file, { maxWidth: 1280, maxHeight: 1280, maxDataUrlLength: 340_000 })
@@ -342,7 +361,7 @@ export async function getMediaFile(id: string): Promise<string | null> {
  * Never throws; returns empty string if decoding is unavailable.
  */
 export async function generateVideoThumbnail(file: File): Promise<string> {
-  if (typeof document === 'undefined' || !file.type.startsWith('video/')) {
+  if (typeof document === 'undefined' || !isVideoFile(file)) {
     return '';
   }
 
@@ -435,27 +454,24 @@ export async function saveVideoBlobLocally(
   expiresAt: number = Date.now() + VIDEO_EXPIRY_MS
 ): Promise<{ id: string; uri: string }> {
   const id = `vid_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  try {
-    const db = await getDb();
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    const record: StoredMediaRecord = {
-      id,
-      blob: file,
-      mimeType: file.type || 'video/mp4',
-      fileName: file.name,
-      size: file.size,
-      createdAt: Date.now(),
-      expiresAt,
-    };
-    await new Promise<void>((resolve, reject) => {
-      const req = store.put(record);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
-  } catch (err) {
-    console.warn('IndexedDB video blob save notice:', err);
-  }
+  const db = await getDb();
+  const tx = db.transaction(STORE_NAME, 'readwrite');
+  const store = tx.objectStore(STORE_NAME);
+  const record: StoredMediaRecord = {
+    id,
+    blob: file,
+    mimeType: file.type || 'video/mp4',
+    fileName: file.name,
+    size: file.size,
+    createdAt: Date.now(),
+    expiresAt,
+  };
+  await new Promise<void>((resolve, reject) => {
+    const req = store.put(record);
+    req.onsuccess = () => resolve();
+    req.onerror = () =>
+      reject(req.error || new Error('Failed to save video into browser IndexedDB storage.'));
+  });
   return { id, uri: `idb://${id}` };
 }
 

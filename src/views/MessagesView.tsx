@@ -296,6 +296,7 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const markingReadIdsRef = useRef<Set<string>>(new Set());
+  const lastTypingWriteAtRef = useRef<{ convId: string; ts: number }>({ convId: '', ts: 0 });
 
   const [isTabActive, setIsTabActive] = useState<boolean>(() =>
     typeof document === 'undefined' ? true : document.visibilityState === 'visible'
@@ -1081,6 +1082,16 @@ export const MessagesView: React.FC<MessagesViewProps> = ({ onNavigate }) => {
   const handleTypingChange = useCallback(
     (isTyping: boolean) => {
       if (!currentUser?.id || !activeConv || activeConv.id === JIT_AI_CONV_ID) return;
+      const now = Date.now();
+      if (isTyping) {
+        const last = lastTypingWriteAtRef.current;
+        if (last.convId === activeConv.id && now - last.ts < 2500) {
+          return;
+        }
+        lastTypingWriteAtRef.current = { convId: activeConv.id, ts: now };
+      } else {
+        lastTypingWriteAtRef.current = { convId: activeConv.id, ts: 0 };
+      }
       updateChatTypingState(activeConv.id, currentUser.id, isTyping).catch(() => {});
     },
     [currentUser?.id, activeConv]

@@ -11,6 +11,7 @@ import { APP_CONFIG } from '../constants/branding';
 import { AddReelModal } from '../components/modals/AddReelModal';
 import { ResilientVideo } from '../components/common/ResilientVideo';
 import { isVideoContentExpired } from '../lib/firebase';
+import { extractYouTubeVideoId } from '../lib/mediaValidation';
 import { moderatePublicContent } from '../services/aiClient';
 import {
   Heart,
@@ -177,6 +178,7 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
   }
 
   const commentsList = currentReel.comments || [];
+  const isYouTubeReel = Boolean(extractYouTubeVideoId(currentReel.videoUrl || currentReel.mediaUrl));
 
   return (
     <div className="flex justify-center items-center h-[calc(100dvh-132px)] sm:h-[calc(100vh-140px)] min-h-[440px] px-1 sm:px-0">
@@ -241,17 +243,19 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           />
 
           {/* Track playback progress seamlessly */}
-          <ReelProgressSync
-            videoRef={videoRef}
-            reelId={currentReel.id}
-            onTimeUpdate={(t, d, playing) => {
-              setCurrentTime(t);
-              if (d > 0) setDuration(d);
-              setIsPlaying(playing);
-            }}
-          />
+          {!isYouTubeReel && (
+            <ReelProgressSync
+              videoRef={videoRef}
+              reelId={currentReel.id}
+              onTimeUpdate={(t, d, playing) => {
+                setCurrentTime(t);
+                if (d > 0) setDuration(d);
+                setIsPlaying(playing);
+              }}
+            />
+          )}
 
-          {!isPlaying && (
+          {!isYouTubeReel && !isPlaying && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/40">
               <div className="w-16 h-16 rounded-full bg-black/65 border border-white/20 flex items-center justify-center">
                 <Play className="w-8 h-8 text-white fill-white ml-1" />
@@ -363,39 +367,41 @@ export const ReelsView: React.FC<ReelsViewProps> = ({ onNavigate }) => {
           </div>
 
           {/* Custom Scrubber & Play/Pause Control Strip */}
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="flex items-center gap-2 bg-black/70 px-2.5 py-1.5 rounded-xl border border-white/10"
-          >
-            <button
-              type="button"
-              onClick={togglePlay}
-              aria-label={isPlaying ? 'Pause reel' : 'Play reel'}
-              className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-white/15 shrink-0"
+          {!isYouTubeReel && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center gap-2 bg-black/70 px-2.5 py-1.5 rounded-xl border border-white/10"
             >
-              {isPlaying ? <Pause className="w-3.5 h-3.5 fill-white" /> : <Play className="w-3.5 h-3.5 fill-white ml-0.5" />}
-            </button>
-            <input
-              type="range"
-              min={0}
-              max={duration > 0 ? duration : 100}
-              step={0.1}
-              value={Math.min(currentTime, duration > 0 ? duration : 100)}
-              onChange={handleSeekReel}
-              aria-label="Seek reel playback"
-              className="flex-1 h-1 rounded-full appearance-none cursor-pointer accent-purple-400"
-              style={{
-                background: `linear-gradient(to right, #a855f7 ${
-                  duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
-                }%, rgba(255,255,255,0.25) ${
-                  duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
-                }%)`,
-              }}
-            />
-            <span className="text-[10px] font-mono tabular-nums text-white/80 shrink-0">
-              {Math.floor(currentTime / 60)}:{String(Math.floor(currentTime % 60)).padStart(2, '0')}
-            </span>
-          </div>
+              <button
+                type="button"
+                onClick={togglePlay}
+                aria-label={isPlaying ? 'Pause reel' : 'Play reel'}
+                className="w-6 h-6 flex items-center justify-center rounded-md hover:bg-white/15 shrink-0"
+              >
+                {isPlaying ? <Pause className="w-3.5 h-3.5 fill-white" /> : <Play className="w-3.5 h-3.5 fill-white ml-0.5" />}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={duration > 0 ? duration : 100}
+                step={0.1}
+                value={Math.min(currentTime, duration > 0 ? duration : 100)}
+                onChange={handleSeekReel}
+                aria-label="Seek reel playback"
+                className="flex-1 h-1 rounded-full appearance-none cursor-pointer accent-purple-400"
+                style={{
+                  background: `linear-gradient(to right, #a855f7 ${
+                    duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
+                  }%, rgba(255,255,255,0.25) ${
+                    duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
+                  }%)`,
+                }}
+              />
+              <span className="text-[10px] font-mono tabular-nums text-white/80 shrink-0">
+                {Math.floor(currentTime / 60)}:{String(Math.floor(currentTime % 60)).padStart(2, '0')}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Up / Down Navigation Controls */}

@@ -7,7 +7,7 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import { Video, RotateCcw, Loader2 } from 'lucide-react';
 import { resolveLocalMediaUrl } from '../../services/mediaStorage';
 import { fetchCloudChunkedVideoBlobUrl } from '../../lib/firebase';
-import { isValidImageUrl, isValidVideoUrl } from '../../lib/mediaValidation';
+import { isValidImageUrl, isValidVideoUrl, extractYouTubeVideoId } from '../../lib/mediaValidation';
 
 // Session cache of broken video URLs so failed cards never loop network requests on re-renders
 const failedVideoCache = new Set<string>();
@@ -88,7 +88,7 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = memo(
         return;
       }
 
-      if (failedVideoCache.has(cleanSrc)) {
+      if (failedVideoCache.has(cleanSrc) && retrySeed === 0) {
         setResolvingMedia(false);
         setMediaMissing(true);
         setResolvedSrc('');
@@ -153,7 +153,10 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = memo(
     }, [cleanSrc, hasValidSrc, retrySeed]);
 
     const handleVideoReady = () => {
-      failedVideoCache.delete(cleanSrc);
+      if (cleanSrc) {
+        failedVideoCache.delete(cleanSrc);
+      }
+      setMediaMissing(false);
       setIsVideoReady(true);
       onLoadedData?.();
     };
@@ -173,11 +176,33 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = memo(
       }
       setMediaMissing(false);
       setIsVideoReady(false);
+      setResolvedSrc('');
       setRetrySeed((n) => n + 1);
     };
 
     if (!cleanSrc) {
       return null;
+    }
+
+    const ytId = extractYouTubeVideoId(cleanSrc);
+    if (ytId) {
+      const embedUrl = `https://www.youtube.com/embed/${ytId}?autoplay=${autoPlay ? 1 : 0}&mute=${muted ? 1 : 0}&loop=${loop ? 1 : 0}&playlist=${ytId}&playsinline=1&rel=0`;
+      return (
+        <div
+          className={`relative w-full aspect-video min-h-[220px] bg-black overflow-hidden flex items-center justify-center ${containerClassName}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <iframe
+            key={`${ytId}_${retrySeed}`}
+            src={embedUrl}
+            title="Video player"
+            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+            allowFullScreen
+            onLoad={() => onLoadedData?.()}
+            className="w-full h-full border-0"
+          />
+        </div>
+      );
     }
 
     // Invalid or placeholder video URL (e.g., `/sample_post.mp4`): never mount <video> or fetch network
@@ -230,7 +255,11 @@ export const ResilientVideo: React.FC<ResilientVideoProps> = memo(
               <Video className="w-6 h-6 text-blue-400" />
             )}
             <p className="text-xs font-semibold text-white">
-              {resolvingMedia ? 'Loading video...' : 'Video unavailable — tap reload'}
+              {resolvingMedia
+                ? 'Loading video...'
+                : cleanSrc.startsWith('idb://')
+                ? 'Saved locally on uploader browser — paste a direct video URL for cross-device playback'
+                : 'Video unavailable — tap reload'}
             </p>
             {!resolvingMedia && (
               <button

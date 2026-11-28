@@ -40,7 +40,22 @@ import {
 } from '../types';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-export const dbLite = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const dbLite = getFirestore(app);
+
+export const COL = {
+  test: 'jitgroup_test',
+  profiles: 'jitgroup_profiles',
+  users: 'jitgroup_users',
+  phoneIndex: 'jitgroup_phone_index',
+  leaderboard: 'jitgroup_leaderboard',
+  matchHistory: 'jitgroup_match_history',
+  userDirectory: 'jitgroup_user_directory',
+  conversations: 'jitgroup_conversations',
+  chats: 'jitgroup_chats',
+  reels: 'jitgroup_reels',
+  posts: 'jitgroup_posts',
+  announcements: 'jitgroup_announcements',
+} as const;
 
 export const INACTIVITY_EXPIRY_MS = 180 * 24 * 60 * 60 * 1000;
 
@@ -196,7 +211,7 @@ function firestoreDocToUserProfile(data: Record<string, any>): UserProfile {
 
 export async function testFirestoreConnection(): Promise<void> {
   try {
-    await getDoc(doc(dbLite, 'test', 'connection'));
+    await getDoc(doc(dbLite, COL.test, 'connection'));
   } catch {
     // Non-fatal connection probe
   }
@@ -205,8 +220,8 @@ export async function testFirestoreConnection(): Promise<void> {
 async function cleanupExpiredCloudProfile(phoneKey: string, profileId: string): Promise<void> {
   try {
     const batch = writeBatch(dbLite);
-    batch.delete(doc(dbLite, 'phone_index', phoneKey));
-    batch.delete(doc(dbLite, 'profiles', profileId));
+    batch.delete(doc(dbLite, COL.phoneIndex, phoneKey));
+    batch.delete(doc(dbLite, COL.profiles, profileId));
     await batch.commit();
   } catch (err) {
     console.warn('Expired profile cloud cleanup notice:', err);
@@ -227,7 +242,7 @@ export async function lookupCloudProfileByPhone(
     new Set([phoneKey, rawDigits, `91${phoneKey}`, `0${phoneKey}`].filter((k) => k && k.length >= 7))
   );
   for (const keyCandidate of keysToTry) {
-    const indexSnap = await getDoc(doc(dbLite, 'phone_index', keyCandidate)).catch(() => null);
+    const indexSnap = await getDoc(doc(dbLite, COL.phoneIndex, keyCandidate)).catch(() => null);
     if (!indexSnap || !indexSnap.exists()) continue;
     const indexData = indexSnap.data();
     const pid = indexData?.profileId;
@@ -238,7 +253,7 @@ export async function lookupCloudProfileByPhone(
       return { found: false, expired: true };
     }
 
-    const profileSnap = await getDoc(doc(dbLite, 'profiles', pid)).catch(() => null);
+    const profileSnap = await getDoc(doc(dbLite, COL.profiles, pid)).catch(() => null);
     if (profileSnap && profileSnap.exists()) {
       const candidate = profileSnap.data();
       if (candidate.status !== 'deleted') {
@@ -252,7 +267,7 @@ export async function lookupCloudProfileByPhone(
   if (!profileData) {
     try {
       const keySnap = await getDocs(
-        query(collection(dbLite, 'profiles'), where('phoneKey', '==', phoneKey), limit(10))
+        query(collection(dbLite, COL.profiles), where('phoneKey', '==', phoneKey), limit(10))
       );
       for (const d of keySnap.docs) {
         const data = d.data();
@@ -269,7 +284,7 @@ export async function lookupCloudProfileByPhone(
 
   if (!profileData) {
     try {
-      const scanSnap = await getDocs(query(collection(dbLite, 'profiles'), limit(350)));
+      const scanSnap = await getDocs(query(collection(dbLite, COL.profiles), limit(350)));
       for (const d of scanSnap.docs) {
         const data = d.data();
         if (!data || data.status === 'deleted') continue;
@@ -294,12 +309,6 @@ export async function lookupCloudProfileByPhone(
     await cleanupExpiredCloudProfile(phoneKey, profileId);
     return { found: false, expired: true };
   }
-
-  setDoc(
-    doc(dbLite, 'phone_index', phoneKey),
-    { profileId, lastLoginAt: serverTimestamp() },
-    { merge: true }
-  ).catch(() => {});
 
   return { found: true, profile: firestoreDocToUserProfile(profileData) };
 }
@@ -326,7 +335,7 @@ export async function loginCloudProfileByPhone(
   try {
     const batch = writeBatch(dbLite);
     batch.set(
-      doc(dbLite, 'profiles', profile.id),
+      doc(dbLite, COL.profiles, profile.id),
       {
         phoneKey,
         lastLoginAt: nowIso,
@@ -337,7 +346,7 @@ export async function loginCloudProfileByPhone(
     );
     if (phoneKey && phoneKey.length >= 7) {
       batch.set(
-        doc(dbLite, 'phone_index', phoneKey),
+        doc(dbLite, COL.phoneIndex, phoneKey),
         {
           profileId: profile.id,
           lastLoginAt: serverTimestamp(),
@@ -360,7 +369,7 @@ export async function syncNodeLeaderboardEntry(profile: UserProfile, lastGameId?
   if (!profile?.id) return;
   try {
     const stats = sanitizeStats(profile.stats);
-    await setDoc(doc(dbLite, 'leaderboard', profile.id), {
+    await setDoc(doc(dbLite, COL.leaderboard, profile.id), {
       profileId: profile.id,
       fullName: (profile.fullName || 'JIT Member').trim().slice(0, 120),
       avatarUrl: sanitizeAvatarUrl(profile.avatarUrl),
@@ -400,7 +409,7 @@ export async function registerOrRecognizeCloudProfile(
 
     const batch = writeBatch(dbLite);
     batch.set(
-      doc(dbLite, 'profiles', prev.id),
+      doc(dbLite, COL.profiles, prev.id),
       {
         phoneKey,
         fullName: cleanName,
@@ -413,7 +422,7 @@ export async function registerOrRecognizeCloudProfile(
     );
     if (phoneKey && phoneKey.length >= 7) {
       batch.set(
-        doc(dbLite, 'phone_index', phoneKey),
+        doc(dbLite, COL.phoneIndex, phoneKey),
         {
           profileId: prev.id,
           lastLoginAt: serverTimestamp(),
@@ -421,7 +430,7 @@ export async function registerOrRecognizeCloudProfile(
         { merge: true }
       );
     }
-    batch.set(doc(dbLite, 'user_directory', prev.id), buildUserDirectoryPayload(updated));
+    batch.set(doc(dbLite, COL.userDirectory, prev.id), buildUserDirectoryPayload(updated));
     await batch.commit();
 
     await syncNodeLeaderboardEntry(updated);
@@ -475,13 +484,13 @@ export async function registerOrRecognizeCloudProfile(
   }
 
   const batch = writeBatch(dbLite);
-  batch.set(doc(dbLite, 'profiles', newProfile.id), firestoreProfileDoc);
-  batch.set(doc(dbLite, 'phone_index', phoneKey), {
+  batch.set(doc(dbLite, COL.profiles, newProfile.id), firestoreProfileDoc);
+  batch.set(doc(dbLite, COL.phoneIndex, phoneKey), {
     profileId: newProfile.id,
     createdAt: serverTimestamp(),
     lastLoginAt: serverTimestamp(),
   });
-  batch.set(doc(dbLite, 'leaderboard', newProfile.id), {
+  batch.set(doc(dbLite, COL.leaderboard, newProfile.id), {
     profileId: newProfile.id,
     fullName: newProfile.fullName,
     avatarUrl: newProfile.avatarUrl,
@@ -491,7 +500,7 @@ export async function registerOrRecognizeCloudProfile(
     streakDays: newProfile.stats.streakDays,
     updatedAt: serverTimestamp(),
   });
-  batch.set(doc(dbLite, 'user_directory', newProfile.id), buildUserDirectoryPayload(newProfile));
+  batch.set(doc(dbLite, COL.userDirectory, newProfile.id), buildUserDirectoryPayload(newProfile));
   await batch.commit();
 
   return { success: true, isExisting: false, profile: newProfile };
@@ -505,8 +514,8 @@ export async function updateCloudProfile(
   if (!phoneKey || phoneKey.length < 7) return;
 
   const nowIso = new Date().toISOString();
-  const profileRef = doc(dbLite, 'profiles', profile.id);
-  const indexRef = doc(dbLite, 'phone_index', phoneKey);
+  const profileRef = doc(dbLite, COL.profiles, profile.id);
+  const indexRef = doc(dbLite, COL.phoneIndex, phoneKey);
 
   const existingSnap = await getDoc(profileRef);
   if (!existingSnap.exists()) {
@@ -533,10 +542,6 @@ export async function updateCloudProfile(
   const hasStatsUpdate = updates.stats !== undefined;
 
   if (!hasDetailUpdates && !hasStatsUpdate) {
-    const batch = writeBatch(dbLite);
-    batch.update(profileRef, { lastLoginAt: nowIso, lastLogin: nowIso, lastActiveAt: serverTimestamp() });
-    batch.update(indexRef, { lastLoginAt: serverTimestamp() });
-    await batch.commit();
     return;
   }
 
@@ -580,7 +585,7 @@ export async function updateCloudProfile(
     const batch = writeBatch(dbLite);
     batch.update(profileRef, detailPatch);
     batch.update(indexRef, { lastLoginAt: serverTimestamp() });
-    batch.set(doc(dbLite, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
+    batch.set(doc(dbLite, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
     await batch.commit();
   }
 
@@ -601,9 +606,9 @@ export async function updateCloudProfile(
     };
     const batch = writeBatch(dbLite);
     batch.update(profileRef, statsPatch);
-    batch.set(doc(dbLite, 'users', profile.id), { id: profile.id, ...statsPatch }, { merge: true });
+    batch.set(doc(dbLite, COL.users, profile.id), { id: profile.id, ...statsPatch }, { merge: true });
     batch.update(indexRef, { lastLoginAt: serverTimestamp() });
-    batch.set(doc(dbLite, 'user_directory', profile.id), buildUserDirectoryPayload(mergedProfile));
+    batch.set(doc(dbLite, COL.userDirectory, profile.id), buildUserDirectoryPayload(mergedProfile));
     await batch.commit();
   }
 
@@ -614,7 +619,7 @@ export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<vo
   const phoneKey = toCanonicalPhoneKey(profile.contactNumber);
   if (!phoneKey || phoneKey.length < 7) return;
   try {
-    const existing = await getDoc(doc(dbLite, 'phone_index', phoneKey));
+    const existing = await getDoc(doc(dbLite, COL.phoneIndex, phoneKey));
     if (!existing.exists()) {
       await registerOrRecognizeCloudProfile(
         profile.contactNumber,
@@ -623,7 +628,7 @@ export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<vo
         profile
       );
     } else {
-      const lbSnap = await getDoc(doc(dbLite, 'leaderboard', profile.id));
+      const lbSnap = await getDoc(doc(dbLite, COL.leaderboard, profile.id));
       if (!lbSnap.exists()) {
         await syncNodeLeaderboardEntry(profile);
       }
@@ -636,7 +641,7 @@ export async function ensureCloudProfileSeeded(profile: UserProfile): Promise<vo
 export async function fetchNodeLeaderboard(maxEntries = 20): Promise<LeaderboardEntry[]> {
   try {
     const q = query(
-      collection(dbLite, 'leaderboard'),
+      collection(dbLite, COL.leaderboard),
       where('rewardPoints', '>=', 0),
       orderBy('rewardPoints', 'desc'),
       limit(maxEntries)
@@ -663,7 +668,7 @@ export async function fetchNodeLeaderboard(maxEntries = 20): Promise<Leaderboard
 
 export async function fetchNodeMatchHistory(profileId?: string, maxEntries = 20): Promise<MatchHistoryRecord[]> {
   try {
-    const colRef = collection(dbLite, 'match_history');
+    const colRef = collection(dbLite, COL.matchHistory);
     const q = profileId
       ? query(
           colRef,
@@ -731,7 +736,7 @@ export async function fetchAllCloudProfilesForAdmin(
     const results = await Promise.all(
       chunk.map(async (profileId) => {
         try {
-          const snap = await getDoc(doc(dbLite, 'profiles', profileId));
+          const snap = await getDoc(doc(dbLite, COL.profiles, profileId));
           if (snap.exists()) {
             const data = snap.data();
             if (data.status === 'deleted') {
@@ -786,7 +791,7 @@ export async function fetchAllCloudProfilesForAdmin(
   for (const entry of leaderboardEntries) {
     if (!profileMap.has(entry.profileId)) {
       try {
-        const deletedCheck = await getDoc(doc(dbLite, 'profiles', entry.profileId));
+        const deletedCheck = await getDoc(doc(dbLite, COL.profiles, entry.profileId));
         if (deletedCheck.exists() && deletedCheck.data()?.status === 'deleted') {
           continue;
         }
@@ -885,7 +890,7 @@ export async function adminOverrideCloudProfile(
     stats: nextStats,
   };
 
-  const profileRef = doc(dbLite, 'profiles', baseProfile.id);
+  const profileRef = doc(dbLite, COL.profiles, baseProfile.id);
   const snap = await getDoc(profileRef);
   if (snap.exists()) {
     const patch: Record<string, any> = {
@@ -913,13 +918,13 @@ export async function adminOverrideCloudProfile(
 
   if (nextStatus === 'deleted') {
     await Promise.allSettled([
-      deleteDoc(doc(dbLite, 'leaderboard', baseProfile.id)),
-      deleteDoc(doc(dbLite, 'user_directory', baseProfile.id)),
+      deleteDoc(doc(dbLite, COL.leaderboard, baseProfile.id)),
+      deleteDoc(doc(dbLite, COL.userDirectory, baseProfile.id)),
     ]);
   } else {
     await Promise.allSettled([
       syncNodeLeaderboardEntry(nextProfile),
-      setDoc(doc(dbLite, 'user_directory', nextProfile.id), buildUserDirectoryPayload(nextProfile)),
+      setDoc(doc(dbLite, COL.userDirectory, nextProfile.id), buildUserDirectoryPayload(nextProfile)),
     ]);
   }
 
@@ -945,7 +950,7 @@ export async function adminModerateCloudProfile(
       : '';
   const suspendedAt = action === 'unblock' ? '' : nowIso;
 
-  const profileRef = doc(dbLite, 'profiles', profile.id);
+  const profileRef = doc(dbLite, COL.profiles, profile.id);
   const snap = await getDoc(profileRef);
   if (snap.exists()) {
     await updateDoc(profileRef, {
@@ -960,8 +965,8 @@ export async function adminModerateCloudProfile(
 
   if (action === 'delete') {
     await Promise.allSettled([
-      deleteDoc(doc(dbLite, 'leaderboard', profile.id)),
-      deleteDoc(doc(dbLite, 'user_directory', profile.id)),
+      deleteDoc(doc(dbLite, COL.leaderboard, profile.id)),
+      deleteDoc(doc(dbLite, COL.userDirectory, profile.id)),
     ]);
   }
 
@@ -1039,8 +1044,8 @@ export async function fetchNodeUserActivity(userId: string): Promise<{
 
   // 1. Conversations matching participantIds + recent threads scan
   const [partRes, recentRes] = await Promise.allSettled([
-    getDocs(query(collection(dbLite, 'conversations'), where('participantIds', 'array-contains', userId), limit(100))),
-    getDocs(query(collection(dbLite, 'conversations'), limit(100))),
+    getDocs(query(collection(dbLite, COL.conversations), where('participantIds', 'array-contains', userId), limit(100))),
+    getDocs(query(collection(dbLite, COL.conversations), limit(100))),
   ]);
 
   if (partRes.status === 'fulfilled') {
@@ -1074,7 +1079,7 @@ export async function fetchNodeUserActivity(userId: string): Promise<{
       slice.map(async (cid) => {
         try {
           const snap = await getDocs(
-            query(collection(dbLite, 'conversations', cid, 'messages'), where('createdAtMs', '>=', 0), limit(200))
+            query(collection(dbLite, COL.conversations, cid, 'messages'), where('createdAtMs', '>=', 0), limit(200))
           );
           snap.forEach((d) => {
             const msg = toMsg(d.id, cid, d.data());
@@ -1108,7 +1113,7 @@ export async function fetchNodeUserActivity(userId: string): Promise<{
 
     for (const cid of Array.from(extraConvIds)) {
       try {
-        const cSnap = await getDoc(doc(dbLite, 'conversations', cid));
+        const cSnap = await getDoc(doc(dbLite, COL.conversations, cid));
         if (cSnap.exists()) {
           convMap.set(cid, toConv(cid, cSnap.data()));
         }
@@ -1125,7 +1130,7 @@ export async function fetchNodeUserActivity(userId: string): Promise<{
   const reelsList: Reel[] = [];
 
   try {
-    const postsSnap = await getDocs(query(collection(dbLite, 'posts'), where('createdAtMs', '>=', 0), limit(150)));
+    const postsSnap = await getDocs(query(collection(dbLite, COL.posts), where('createdAtMs', '>=', 0), limit(150)));
     postsSnap.forEach((d) => {
       const data = d.data();
       const mediaType = (data.mediaType as Post['mediaType']) || 'none';
@@ -1169,7 +1174,7 @@ export async function fetchNodeUserActivity(userId: string): Promise<{
   }
 
   try {
-    const reelsSnap = await getDocs(query(collection(dbLite, 'reels'), where('createdAtMs', '>=', 0), limit(100)));
+    const reelsSnap = await getDocs(query(collection(dbLite, COL.reels), where('createdAtMs', '>=', 0), limit(100)));
     reelsSnap.forEach((d) => {
       const data = d.data();
       const expiresAt = typeof data.expiresAt === 'number' ? data.expiresAt : undefined;
@@ -1223,9 +1228,9 @@ export async function fetchNodePlatformCounts(): Promise<{
   announcementsCount: number;
 }> {
   const [postsRes, convRes, annRes] = await Promise.allSettled([
-    getDocs(query(collection(dbLite, 'posts'), where('createdAtMs', '>=', 0), limit(200))),
-    getDocs(query(collection(dbLite, 'conversations'), limit(100))),
-    getDocs(query(collection(dbLite, 'announcements'), where('createdAtMs', '>=', 0), limit(50))),
+    getDocs(query(collection(dbLite, COL.posts), where('createdAtMs', '>=', 0), limit(200))),
+    getDocs(query(collection(dbLite, COL.conversations), limit(100))),
+    getDocs(query(collection(dbLite, COL.announcements), where('createdAtMs', '>=', 0), limit(50))),
   ]);
   return {
     postsCount: postsRes.status === 'fulfilled' ? postsRes.value.size : 0,
@@ -1236,17 +1241,17 @@ export async function fetchNodePlatformCounts(): Promise<{
 
 export async function deleteNodePost(postId: string): Promise<void> {
   if (!postId) return;
-  await deleteDoc(doc(dbLite, 'posts', postId));
+  await deleteDoc(doc(dbLite, COL.posts, postId));
 }
 
 export async function deleteNodeReel(reelId: string): Promise<void> {
   if (!reelId) return;
-  await deleteDoc(doc(dbLite, 'reels', reelId));
+  await deleteDoc(doc(dbLite, COL.reels, reelId));
 }
 
 export async function deleteNodeMatchRecord(matchId: string): Promise<void> {
   if (!matchId) return;
-  await deleteDoc(doc(dbLite, 'match_history', matchId));
+  await deleteDoc(doc(dbLite, COL.matchHistory, matchId));
 }
 
 export async function publishNodeAnnouncement(ann: GlobalAnnouncement, feedPost?: Post): Promise<void> {
@@ -1254,7 +1259,7 @@ export async function publishNodeAnnouncement(ann: GlobalAnnouncement, feedPost?
   const safeMediaUrl = ann.mediaUrl && ann.mediaUrl.length <= 740_000 ? ann.mediaUrl : undefined;
   const safeThumb = ann.thumbnailUrl && ann.thumbnailUrl.length <= 175_000 ? ann.thumbnailUrl : undefined;
 
-  await setDoc(doc(dbLite, 'announcements', ann.id), {
+  await setDoc(doc(dbLite, COL.announcements, ann.id), {
     id: ann.id,
     title: ann.title.slice(0, 140),
     message: ann.message.slice(0, 1000),
@@ -1272,7 +1277,7 @@ export async function publishNodeAnnouncement(ann: GlobalAnnouncement, feedPost?
     const safeFeedUrls = Array.isArray(feedPost.mediaUrls)
       ? feedPost.mediaUrls.filter((u) => typeof u === 'string' && u.length <= 740_000).slice(0, 4)
       : undefined;
-    await setDoc(doc(dbLite, 'posts', feedPost.id), {
+    await setDoc(doc(dbLite, COL.posts, feedPost.id), {
       id: feedPost.id,
       authorId: feedPost.authorId,
       authorName: feedPost.authorName.slice(0, 120),
@@ -1299,7 +1304,7 @@ export async function publishNodeAnnouncement(ann: GlobalAnnouncement, feedPost?
 
 export async function fetchNodeAnnouncements(): Promise<GlobalAnnouncement[]> {
   try {
-    const snap = await getDocs(query(collection(dbLite, 'announcements'), where('createdAtMs', '>=', 0), limit(50)));
+    const snap = await getDocs(query(collection(dbLite, COL.announcements), where('createdAtMs', '>=', 0), limit(50)));
     const now = Date.now();
     const list: GlobalAnnouncement[] = [];
     snap.forEach((d) => {
@@ -1330,8 +1335,8 @@ export async function fetchNodeAnnouncements(): Promise<GlobalAnnouncement[]> {
 export async function deleteNodeAnnouncement(id: string): Promise<void> {
   if (!id) return;
   await Promise.allSettled([
-    deleteDoc(doc(dbLite, 'announcements', id)),
-    deleteDoc(doc(dbLite, 'posts', `post_ann_${id}`)),
+    deleteDoc(doc(dbLite, COL.announcements, id)),
+    deleteDoc(doc(dbLite, COL.posts, `post_ann_${id}`)),
   ]);
 }
 

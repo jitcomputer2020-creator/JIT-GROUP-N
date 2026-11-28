@@ -12,6 +12,7 @@ import {
   saveMediaFile,
   validateMediaFile,
   generateVideoThumbnail,
+  isVideoFile,
   VIDEO_EXPIRY_MS,
 } from '../services/mediaStorage';
 import { uploadVideoAssetToCloud, isVideoContentExpired } from '../lib/firebase';
@@ -144,8 +145,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
     if (!file) return;
 
     setPostError(null);
-    const isVid = file.type.startsWith('video/');
-    const validation = validateMediaFile(file, { maxSizeMb: isVid ? 50 : 15 });
+    const isVid = isVideoFile(file);
+    const validation = validateMediaFile(file, { maxSizeMb: isVid ? 100 : 15 });
     if (!validation.valid) {
       setPostError(validation.error || 'Invalid file');
       return;
@@ -491,7 +492,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onNavigate, onOpenStoryViewe
                 type="file"
                 ref={fileInputRef}
                 onChange={handleMediaSelect}
-                accept="image/*,video/*"
+                accept="image/*,video/*,.mp4,.mov,.webm,.avi,.mkv"
                 className="hidden"
               />
 

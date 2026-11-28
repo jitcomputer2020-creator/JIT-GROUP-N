@@ -33,10 +33,8 @@ import {
   tryAtomicallyJoinWaitingRoom,
   findOtherWaitingQuickMatchRoom,
   subscribeToPublicMatchmakingQueue,
-  touchMatchmakingRoomHeartbeat,
   releasePublicQueueSlotIfOwner,
   leaveMatchmakingQueue,
-  touchMatchmakingQueueHeartbeat,
   releasePreviousHostedRoom,
   startFirestoreGameRoom,
   rematchFirestoreGameRoom,
@@ -1541,14 +1539,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
 
     const pollTimer = window.setInterval(() => {
       void checkOwnRoomAndMergeIfNeeded();
-    }, 750);
-
-    const heartbeatTimer = window.setInterval(() => {
-      if (!cancelled && !settled) {
-        void touchMatchmakingRoomHeartbeat(myCode);
-        void touchMatchmakingQueueHeartbeat(`slot_${selectedGame}`);
-      }
-    }, 8000);
+    }, 4000);
 
     const handleBeforeUnload = () => {
       void releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode);
@@ -1561,7 +1552,6 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       unsubQueue();
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.clearInterval(pollTimer);
-      window.clearInterval(heartbeatTimer);
     };
   }, [
     isMatchmakingOpen,

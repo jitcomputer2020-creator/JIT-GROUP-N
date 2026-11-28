@@ -44,8 +44,8 @@ service cloud.firestore {
       return isValidDocId(id) && existing() is map;
     }
 
-    // 3. Startup Connectivity Check Document (/test/connection)
-    match /test/{docId} {
+    // 3. Startup Connectivity Check Document (/jitgroup_test/connection)
+    match /jitgroup_test/{docId} {
       allow get: if isValidDocId(docId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(docId);
@@ -53,14 +53,14 @@ service cloud.firestore {
     }
 
     // 4. Profiles & Users Collections (supports Firebase Auth, phone login, and guest sessions)
-    match /profiles/{profileId} {
+    match /jitgroup_profiles/{profileId} {
       allow get: if isValidDocId(profileId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(profileId);
       allow delete: if isValidExistingDoc(profileId);
     }
 
-    match /users/{userId} {
+    match /jitgroup_users/{userId} {
       allow get: if isValidDocId(userId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(userId);
@@ -68,7 +68,7 @@ service cloud.firestore {
     }
 
     // 5. Phone Lookup Index
-    match /phone_index/{phoneKey} {
+    match /jitgroup_phone_index/{phoneKey} {
       allow get: if isValidDocId(phoneKey);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(phoneKey);
@@ -76,7 +76,7 @@ service cloud.firestore {
     }
 
     // 6. Public Campus Gaming Leaderboard
-    match /leaderboard/{profileId} {
+    match /jitgroup_leaderboard/{profileId} {
       allow get: if isValidDocId(profileId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(profileId);
@@ -84,7 +84,7 @@ service cloud.firestore {
     }
 
     // 7. Match History & Reward Ledger
-    match /match_history/{matchId} {
+    match /jitgroup_match_history/{matchId} {
       allow get: if isValidDocId(matchId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(matchId);
@@ -92,22 +92,22 @@ service cloud.firestore {
     }
 
     // 8. Authorized Administrator Registry (read-only lookup for signed-in admins)
-    match /admins/{adminId} {
+    match /jitgroup_admins/{adminId} {
       allow get: if isSignedIn() && isValidDocId(adminId);
       allow list: if false;
       allow create, update, delete: if false;
     }
 
     // 9. Public Non-PII User Search Directory
-    match /user_directory/{profileId} {
+    match /jitgroup_user_directory/{profileId} {
       allow get: if isValidDocId(profileId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(profileId);
       allow delete: if isValidExistingDoc(profileId);
     }
 
-    // 10. Real-Time Multiplayer Game Rooms (/gameRooms and /rooms alias)
-    match /gameRooms/{roomCode} {
+    // 10. Real-Time Multiplayer Game Rooms (/jitgroup_games)
+    match /jitgroup_games/{roomCode} {
       allow get: if isValidDocId(roomCode);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(roomCode);
@@ -128,38 +128,24 @@ service cloud.firestore {
       }
     }
 
-    match /rooms/{roomId} {
-      allow get: if isValidDocId(roomId);
-      allow list: if isBoundedQuery();
-      allow create, update: if isValidDocWrite(roomId);
-      allow delete: if isValidExistingDoc(roomId);
-    }
-
-    // 11. Real-Time Random Matchmaking Queue (/matchmakingQueue and /matchmaking alias)
-    match /matchmakingQueue/{ticketId} {
+    // 11. Real-Time Random Matchmaking Queue (/jitgroup_matchmaking_queue)
+    match /jitgroup_matchmaking_queue/{ticketId} {
       allow get: if isValidDocId(ticketId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(ticketId);
       allow delete: if isValidExistingDoc(ticketId);
     }
 
-    match /matchmaking/{ticketId} {
-      allow get: if isValidDocId(ticketId);
-      allow list: if isBoundedQuery();
-      allow create, update: if isValidDocWrite(ticketId);
-      allow delete: if isValidExistingDoc(ticketId);
-    }
-
-    // 12. Real-Time Friend Requests
-    match /friendRequests/{requestId} {
+    // 12. Real-Time Friend Requests (/jitgroup_friend_requests)
+    match /jitgroup_friend_requests/{requestId} {
       allow get: if isValidDocId(requestId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(requestId);
       allow delete: if isValidExistingDoc(requestId);
     }
 
-    // 13. Real-Time User Notifications
-    match /notifications/{notificationId} {
+    // 13. Real-Time User Notifications (/jitgroup_notifications)
+    match /jitgroup_notifications/{notificationId} {
       allow get: if isValidDocId(notificationId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(notificationId);
@@ -167,7 +153,7 @@ service cloud.firestore {
     }
 
     // 14. Personal Direct Messages & Group Conversations
-    match /conversations/{conversationId} {
+    match /jitgroup_conversations/{conversationId} {
       allow get: if isValidDocId(conversationId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(conversationId);
@@ -182,7 +168,7 @@ service cloud.firestore {
     }
 
     // 14b. Canonical Unified Chats & Server-Timestamped Messages
-    match /chats/{chatId} {
+    match /jitgroup_chats/{chatId} {
       allow get: if isValidDocId(chatId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(chatId);
@@ -201,32 +187,32 @@ service cloud.firestore {
       allow list: if isBoundedQuery();
     }
 
-    // 15. Video Reels
-    match /reels/{reelId} {
+    // 15. Video Reels (/jitgroup_reels)
+    match /jitgroup_reels/{reelId} {
       allow get: if isValidDocId(reelId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(reelId);
       allow delete: if isValidExistingDoc(reelId);
     }
 
-    // 16. Public Feed Posts
-    match /posts/{postId} {
+    // 16. Public Feed Posts (/jitgroup_posts)
+    match /jitgroup_posts/{postId} {
       allow get: if isValidDocId(postId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(postId);
       allow delete: if isValidExistingDoc(postId);
     }
 
-    // 17. Site-Wide Global Announcements
-    match /announcements/{announcementId} {
+    // 17. Site-Wide Global Announcements (/jitgroup_announcements)
+    match /jitgroup_announcements/{announcementId} {
       allow get: if isValidDocId(announcementId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(announcementId);
       allow delete: if isValidExistingDoc(announcementId);
     }
 
-    // 18. Cross-Device Chunked Cloud Video Storage
-    match /video_media/{mediaId} {
+    // 18. Cross-Device Chunked Cloud Video Storage (/jitgroup_video_media)
+    match /jitgroup_video_media/{mediaId} {
       allow get: if isValidDocId(mediaId);
       allow list: if isBoundedQuery();
       allow create, update: if isValidDocWrite(mediaId);

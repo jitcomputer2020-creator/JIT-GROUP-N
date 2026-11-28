@@ -11,6 +11,7 @@ import {
   saveMediaFile,
   validateMediaFile,
   generateVideoThumbnail,
+  isVideoFile,
   VIDEO_EXPIRY_MS,
 } from '../../services/mediaStorage';
 import { uploadVideoAssetToCloud } from '../../lib/firebase';
@@ -42,8 +43,8 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
     if (!file) return;
 
     setErrorMsg(null);
-    const isVid = file.type.startsWith('video/');
-    const validation = validateMediaFile(file, { maxSizeMb: isVid ? 50 : 15 });
+    const isVid = isVideoFile(file);
+    const validation = validateMediaFile(file, { maxSizeMb: isVid ? 100 : 15 });
     if (!validation.valid) {
       setErrorMsg(validation.error || 'Invalid file');
       return;
@@ -66,8 +67,8 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
         setMediaUrls([dataUrl]);
         setMediaType(isVid ? 'video' : 'image');
       }
-    } catch {
-      setErrorMsg('Failed to process media file. Please try again.');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Failed to process media file. Please try again.');
     } finally {
       setIsUploading(false);
     }
@@ -157,7 +158,7 @@ export const EditPostModal: React.FC<EditPostModalProps> = ({ post, onClose }) =
             type="file"
             ref={fileInputRef}
             onChange={handleFileChange}
-            accept="image/*,video/*"
+            accept="image/*,video/*,.mp4,.mov,.webm,.avi,.mkv"
             className="hidden"
           />
 

@@ -10,7 +10,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { doc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { Bot, RotateCcw, Sparkles, Users, Loader2 } from 'lucide-react';
-import { db, auth, handleFirestoreError, OperationType } from '../../lib/firebase';
+import { db, auth, COL, handleFirestoreError, OperationType } from '../../lib/firebase';
 import { GameId } from '../../types';
 import { AIDifficulty, GameMode, RoomParticipantInfo } from '../../types/multiplayer';
 import { checkTicTacToeWinner, getTicTacToeAIMove } from '../../services/gameAIEngine';
@@ -200,7 +200,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       return;
     }
 
-    const docRef = doc(db, 'gameRooms', roomId);
+    const docRef = doc(db, COL.gameRooms, roomId);
     const unsub = onSnapshot(
       docRef,
       (docSnap) => {
@@ -382,7 +382,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
         isWritingRef.current = true;
         try {
           // Direct Firestore Write ONLY — onSnapshot handles UI updates on both devices
-          const roomRef = doc(db, 'gameRooms', roomId);
+          const roomRef = doc(db, COL.gameRooms, roomId);
           await updateDoc(roomRef, {
             boardState: {
               board: nextBoard,
@@ -537,7 +537,7 @@ export const TicTacToeGame: React.FC<TicTacToeGameProps> = ({
       };
       const emptyBoard = Array<CellValue>(9).fill(null);
       try {
-        const roomRef = doc(db, 'gameRooms', roomId);
+        const roomRef = doc(db, COL.gameRooms, roomId);
         await updateDoc(roomRef, {
           boardState: {
             board: emptyBoard,

@@ -55,7 +55,6 @@ import {
   updateFirestorePostInteraction,
   deleteFirestorePost,
   deleteFirestoreReel,
-  purgeExpiredCloudVideos,
   subscribeToFirestoreAnnouncements,
   updateCloudFriendsCount,
 } from '../lib/firebase';
@@ -163,13 +162,18 @@ function sanitizePostRecordMedia(p: Post): Post {
   const validMediaUrls = p.mediaUrls?.filter(
     (u) =>
       typeof u === 'string' &&
+      !u.startsWith('blob:') &&
       !isPlaceholderOrInvalidMediaString(u) &&
       (isValidVideoUrl(u) || isValidImageUrl(u)) &&
       !(u.startsWith('data:video/') && u.length > 250_000)
   );
-  const safeVideoUrl = sanitizeVideoUrl(p.videoUrl);
+  const safeVideoUrl =
+    p.videoUrl && !p.videoUrl.startsWith('blob:') ? sanitizeVideoUrl(p.videoUrl) : undefined;
   const safeMediaUrl =
-    p.mediaUrl && !isPlaceholderOrInvalidMediaString(p.mediaUrl) && (isValidVideoUrl(p.mediaUrl) || isValidImageUrl(p.mediaUrl))
+    p.mediaUrl &&
+    !p.mediaUrl.startsWith('blob:') &&
+    !isPlaceholderOrInvalidMediaString(p.mediaUrl) &&
+    (isValidVideoUrl(p.mediaUrl) || isValidImageUrl(p.mediaUrl))
       ? p.mediaUrl
       : undefined;
   const hasAnyMedia = Boolean(
@@ -200,7 +204,7 @@ function sanitizeReelsForCache(list: Reel[]): Reel[] {
       return {
         ...r,
         videoUrl:
-          cleanUrl.startsWith('data:video/') && cleanUrl.length > 250_000
+          cleanUrl.startsWith('blob:') || (cleanUrl.startsWith('data:video/') && cleanUrl.length > 250_000)
             ? ''
             : cleanUrl,
       };
@@ -489,16 +493,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [currentUser?.id, demoRemovedIds]);
 
-  // Keep user's Campus Friends stat synced with live accepted friendIds once Firestore hydrates
+  // Keep user's local Campus Friends stat synced with live accepted friendIds once Firestore hydrates
   useEffect(() => {
     if (!currentUser?.id || friendsHydratedForUserId !== currentUser.id) return;
     const liveCount = friendIds.filter((id) => id !== currentUser.id).length;
+    lastSyncedFriendsCountRef.current = { uid: currentUser.id, count: liveCount };
     syncLocalFriendsCount(liveCount);
-    const prevSync = lastSyncedFriendsCountRef.current;
-    if (!prevSync || prevSync.uid !== currentUser.id || prevSync.count !== liveCount) {
-      lastSyncedFriendsCountRef.current = { uid: currentUser.id, count: liveCount };
-      updateCloudFriendsCount(currentUser.id, liveCount).catch(() => {});
-    }
   }, [currentUser?.id, friendIds, friendsHydratedForUserId, syncLocalFriendsCount]);
 
   // Real-time Firestore Reels, Posts, and Announcements subscriptions (plus 40-day expiry & delete reconciliation)
@@ -613,7 +613,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [currentUser?.id]);
 
-  // Background 40-day video auto-expiry cleanup (Firestore + IndexedDB + in-memory UI state)
+  // Background 40-day video auto-expiry cleanup (IndexedDB + in-memory UI state only, zero blind Firestore writes)
   useEffect(() => {
     const runExpirySweep = () => {
       setReels((prev) => prev.filter((r) => !isVideoContentExpired(r)));
@@ -621,7 +621,6 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setCloudAnnouncements((prev) => prev.filter((a) => !isVideoContentExpired(a)));
       setServerAnnouncements((prev) => prev.filter((a) => !isVideoContentExpired(a)));
       purgeExpiredLocalMedia().catch(() => {});
-      purgeExpiredCloudVideos().catch(() => {});
     };
 
     runExpirySweep();
@@ -1141,6 +1140,7 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     expiresAt?: number;
   }) => {
     if (!currentUser) return;
+    if (!videoUrl || videoUrl.startsWith('blob:')) return;
     const nowMs = createdAtMs || Date.now();
     const resolvedExpiresAt = expiresAt || nowMs + VIDEO_EXPIRY_MS;
     const newReel: Reel = {
@@ -1263,7 +1263,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const acceptFriendRequest = (userId: string) => {
     if (!currentUser) return;
     setPendingIncomingRequestIds((prev) => prev.filter((id) => id !== userId));
-    setFriendIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    setFriendIds((prev) => {
+      const next = prev.includes(userId) ? prev : [...prev, userId];
+      const nextCount = next.filter((id) => id !== currentUser.id).length;
+      updateCloudFriendsCount(currentUser.id, nextCount).catch(() => {});
+      return next;
+    });
     setDemoRemovedIds((prev) => prev.filter((id) => id !== userId));
     respondToFirestoreFriendRequest(userId, currentUser, 'accepted').catch(() => {});
   };
@@ -1279,7 +1284,12 @@ export const SocialProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   const removeFriend = (userId: string) => {
     if (!currentUser) return;
-    setFriendIds((prev) => prev.filter((id) => id !== userId));
+    setFriendIds((prev) => {
+      const next = prev.filter((id) => id !== userId);
+      const nextCount = next.filter((id) => id !== currentUser.id).length;
+      updateCloudFriendsCount(currentUser.id, nextCount).catch(() => {});
+      return next;
+    });
     if (isPrimaryDemoUser) {
       setDemoRemovedIds((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
     }

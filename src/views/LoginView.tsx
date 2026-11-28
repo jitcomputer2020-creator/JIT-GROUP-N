@@ -43,13 +43,17 @@ export const LoginView: React.FC<LoginViewProps> = ({ onNavigate }) => {
     setError('');
     setLoading(true);
 
-    const res = await loginWithContact(contactNumber);
-    setLoading(false);
-
-    if (res.success) {
-      onNavigate('home');
-    } else {
-      setError(res.error || 'Failed to login with this contact number.');
+    try {
+      const res = await loginWithContact(contactNumber);
+      if (res.success) {
+        onNavigate('home');
+      } else {
+        setError(res.error || 'Failed to login with this contact number.');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Unable to check your account right now. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -298,7 +302,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onNavigate }) => {
             </div>
 
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Remove this saved account from quick login? You can always sign back in later using the registered phone number.
+              Remove this saved account from quick login on this browser only? Your permanent JIT Group Firebase account stays safe, and you can always sign back in anytime using your registered phone number.
             </p>
 
             <div className="flex gap-2 pt-1">
