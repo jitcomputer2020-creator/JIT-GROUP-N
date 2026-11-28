@@ -15,6 +15,7 @@ interface MatchmakingQueueModalProps {
   roomCode?: string;
   onCancel: () => void;
   onFallbackToAI: () => void;
+  onPlayBotNow?: () => void;
 }
 
 export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
@@ -23,6 +24,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
   roomCode,
   onCancel,
   onFallbackToAI,
+  onPlayBotNow,
 }) => {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
@@ -43,6 +45,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
   const gameMeta = APP_CONFIG.games.find((g) => g.id === gameId);
   const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, '0');
   const secs = String(elapsedSeconds % 60).padStart(2, '0');
+  const remainingAutoBotSeconds = Math.max(0, 15 - elapsedSeconds);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/75 animate-in fade-in">
@@ -82,7 +85,7 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
             Searching for Player...
           </h4>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 max-w-xs">
-            Pairing you automatically into a shared live room, or matching an active Demo Challenger if no online player joins within {Math.max(0, 5 - elapsedSeconds)}s.
+            Pairing you automatically into a shared live room, or matching an active Demo Challenger if no online player joins within {remainingAutoBotSeconds}s.
           </p>
 
           <div className="mt-4 flex items-center gap-3">
@@ -107,11 +110,11 @@ export const MatchmakingQueueModal: React.FC<MatchmakingQueueModalProps> = ({
         <div className="space-y-2.5">
           <button
             type="button"
-            onClick={onFallbackToAI}
+            onClick={onPlayBotNow || onFallbackToAI}
             className="w-full py-2.5 min-h-[44px] bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-xl text-xs font-bold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity whitespace-nowrap"
           >
             <Bot className="w-4 h-4" />
-            <span>Play vs AI Bot Instead</span>
+            <span>Play vs Bot Now</span>
           </button>
 
           <button

@@ -32,6 +32,7 @@ import {
   quickMatchFirestoreRoom,
   tryAtomicallyJoinWaitingRoom,
   findOtherWaitingQuickMatchRoom,
+  listWaitingQuickMatchRooms,
   subscribeToPublicMatchmakingQueue,
   releasePublicQueueSlotIfOwner,
   leaveMatchmakingQueue,
@@ -228,6 +229,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
   useEffect(() => {
     activePlayerIdRef.current = activePlayer.id;
   }, [activePlayer.id]);
+
+  const activePlayerRef = useRef(activePlayer);
+  activePlayerRef.current = activePlayer;
 
   const selectedGameRef = useRef<GameId>(selectedGame);
   useEffect(() => {
@@ -1467,9 +1471,9 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     if (
       !isMatchmakingOpen ||
       gameMode !== 'random' ||
-      !currentRoom ||
+      !currentRoomRef.current ||
       gameStarted ||
-      isRoomMatchStarted(currentRoom)
+      isRoomMatchStarted(currentRoomRef.current)
     ) {
       return;
     }
@@ -1477,20 +1481,46 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     let cancelled = false;
     let settled = false;
     let joining = false;
-    const myCode = currentRoom.roomCode;
+    const myCode = currentRoomRef.current.roomCode;
 
     const enterMatchedRoom = (room: MultiplayerRoom, isNewSubscription = true) => {
       if (cancelled || settled) return;
       settled = true;
       clearAiTimers();
       awardedMatchRef.current.tictactoe = false;
-      resetChess(false);
-      resetLudo(false);
-      resetQuiz(false);
-      resetSnakeLadder(false);
-      resetCarromState(false);
-      resetSpinState();
-      resetTruthDare();
+      const syncedBoard = room.boardState || room.gameState;
+      const hasExistingMoves = Boolean(
+        syncedBoard &&
+          (syncedBoard.moveId ||
+            (Array.isArray(syncedBoard.board) && syncedBoard.board.some((c: any) => c !== null)))
+      );
+      if (!hasExistingMoves) {
+        resetChess(false);
+        resetLudo(false);
+        resetQuiz(false);
+        resetSnakeLadder(false);
+        resetCarromState(false);
+        resetSpinState();
+        resetTruthDare();
+      } else {
+        const lastAction =
+          room.gameId === 'ludo'
+            ? 'LUDO_MOVE'
+            : room.gameId === 'chess'
+            ? 'CHESS_MOVE'
+            : room.gameId === 'snake_ladder'
+            ? 'SL_MOVE'
+            : room.gameId === 'carrom'
+            ? 'CARROM_MOVE'
+            : room.gameId === 'quiz'
+            ? 'QUIZ_MOVE'
+            : room.gameId === 'spin_wheel'
+            ? 'SPIN_MOVE'
+            : room.gameId === 'truth_dare'
+            ? 'TD_MOVE'
+            : 'TTT_MOVE';
+        applySyncedMoveState(lastAction, syncedBoard);
+      }
       setSubView('play');
       currentRoomRef.current = room;
       setCurrentRoom(room);
@@ -1508,26 +1538,32 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       showRewardToast(`Match found! Connected to Room #${displayCode}`);
     };
 
-    const tryMergeIntoWaitingRoom = async (candidate: MultiplayerRoom | null) => {
-      if (!candidate || cancelled || settled || joining) return;
+    const tryMergeIntoWaitingRooms = async (candidates: MultiplayerRoom[]) => {
+      if (!candidates.length || cancelled || settled || joining) return;
       // Deterministic clock-skew-free tie breaker: higher roomCode yields to lower roomCode
-      const shouldYield = candidate.roomCode < myCode;
-      if (!shouldYield) return;
+      const yieldTargets = [...candidates]
+        .filter((c) => c.roomCode < myCode)
+        .sort((a, b) => (a.roomCode < b.roomCode ? -1 : a.roomCode > b.roomCode ? 1 : 0));
+      if (yieldTargets.length === 0) return;
 
       joining = true;
+      const localPlayer = activePlayerRef.current;
       try {
-        await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
-        const joined =
-          (await tryAtomicallyJoinWaitingRoom(candidate.roomCode, selectedGame, activePlayer)) ||
-          (await joinFirestoreGameRoom(candidate.roomCode, selectedGame, activePlayer));
-        if (!cancelled && !settled && joined) {
-          // Detach old waiting room listener FIRST so deleting myCode doesn't fire onRoomDeleted -> gameMode('ai')
-          detachRoomSubscription();
-          await kickOrLeaveFirestoreRoom(myCode, activePlayer.id).catch(() => {});
-          enterMatchedRoom(joined, true);
-        } else {
-          joining = false;
+        for (const candidate of yieldTargets) {
+          if (cancelled || settled) return;
+          await releasePublicQueueSlotIfOwner(selectedGame, localPlayer.id, myCode).catch(() => {});
+          const joined =
+            (await tryAtomicallyJoinWaitingRoom(candidate.roomCode, selectedGame, localPlayer)) ||
+            (await joinFirestoreGameRoom(candidate.roomCode, selectedGame, localPlayer).catch(() => null));
+          if (!cancelled && !settled && joined) {
+            // Detach old waiting room listener FIRST so deleting myCode doesn't fire onRoomDeleted -> gameMode('ai')
+            detachRoomSubscription();
+            await kickOrLeaveFirestoreRoom(myCode, localPlayer.id).catch(() => {});
+            enterMatchedRoom(joined, true);
+            return;
+          }
         }
+        joining = false;
       } catch {
         joining = false;
       }
@@ -1542,46 +1578,63 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           enterMatchedRoom(freshOwnRoom, false);
           return;
         }
-        const candidate = await findOtherWaitingQuickMatchRoom(selectedGame, myCode, activePlayer.id);
-        await tryMergeIntoWaitingRoom(candidate);
+        const candidates = await listWaitingQuickMatchRooms(
+          selectedGame,
+          myCode,
+          activePlayerRef.current.id
+        );
+        if (candidates.length > 0) {
+          await tryMergeIntoWaitingRooms(candidates);
+        } else {
+          const single = await findOtherWaitingQuickMatchRoom(
+            selectedGame,
+            myCode,
+            activePlayerRef.current.id
+          );
+          if (single) {
+            await tryMergeIntoWaitingRooms([single]);
+          }
+        }
       } catch {
         // Retry on next poll tick
       }
     };
 
-    // Real-time queue listener + fast 750ms server verification guarantees instant match transition
+    // Real-time queue listener + fast 1.5s server verification guarantees instant match transition
     const unsubQueue = subscribeToPublicMatchmakingQueue(
       selectedGame,
       myCode,
-      activePlayer.id,
+      activePlayerRef.current.id,
       (waitingRooms) => {
         if (waitingRooms.length > 0 && !cancelled && !settled && !joining) {
-          const sorted = [...waitingRooms].sort((a, b) =>
-            a.roomCode < b.roomCode ? -1 : a.roomCode > b.roomCode ? 1 : 0
-          );
-          void tryMergeIntoWaitingRoom(sorted[0]);
+          void tryMergeIntoWaitingRooms(waitingRooms);
         }
       }
     );
 
+    const initialPollTimer = window.setTimeout(() => {
+      void checkOwnRoomAndMergeIfNeeded();
+    }, 350);
+
     const pollTimer = window.setInterval(() => {
       void checkOwnRoomAndMergeIfNeeded();
-    }, 4000);
+    }, 1500);
 
-    // If no online player joins within 5 seconds, pair automatically with an active Demo Challenger
+    // If no online player joins within 15 seconds, pair automatically with an active Demo Challenger
     const demoFallbackTimer = window.setTimeout(() => {
       if (cancelled || settled || joining) return;
       joining = true;
       void (async () => {
         try {
-          const pool = INITIAL_FRIENDS.filter((f) => f.id !== activePlayer.id);
+          const localPlayer = activePlayerRef.current;
+          const pool = INITIAL_FRIENDS.filter((f) => f.id !== localPlayer.id);
           const demo = pool[Math.floor(Math.random() * pool.length)] || INITIAL_FRIENDS[0];
           const botPlayer = {
             id: `bot_demo_${demo.id}`,
             name: demo.fullName,
             avatar: demo.avatarUrl || APP_CONFIG.logoUrl,
           };
-          await releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode).catch(() => {});
+          await releasePublicQueueSlotIfOwner(selectedGame, localPlayer.id, myCode).catch(() => {});
           const botRoom = await activateDemoOpponentInRoom(myCode, selectedGame, botPlayer);
           if (!cancelled && !settled && botRoom) {
             enterMatchedRoom(botRoom, false);
@@ -1592,11 +1645,11 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
           joining = false;
         }
       })();
-    }, 5000);
+    }, 15000);
 
     const handleBeforeUnload = () => {
-      void releasePublicQueueSlotIfOwner(selectedGame, activePlayer.id, myCode);
-      void kickOrLeaveFirestoreRoom(myCode, activePlayer.id);
+      void releasePublicQueueSlotIfOwner(selectedGame, activePlayerRef.current.id, myCode);
+      void kickOrLeaveFirestoreRoom(myCode, activePlayerRef.current.id);
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
 
@@ -1604,6 +1657,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
       cancelled = true;
       unsubQueue();
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.clearTimeout(initialPollTimer);
       window.clearInterval(pollTimer);
       window.clearTimeout(demoFallbackTimer);
     };
@@ -1612,14 +1666,12 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     gameMode,
     gameStarted,
     currentRoom?.roomCode,
-    currentRoom?.createdAt,
-    currentRoom?.status,
-    currentRoom?.player2,
-    currentRoom?.player2Id,
     selectedGame,
-    activePlayer,
+    activePlayer.id,
+    applySyncedMoveState,
     isRoomMatchStarted,
     attachFirestoreRoomSubscription,
+    detachRoomSubscription,
     clearAiTimers,
     resetChess,
     resetLudo,
@@ -2082,6 +2134,61 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
     }
     setActiveCallType(null);
     handlePlayAI(aiDifficulty);
+  };
+
+  const handlePlayBotNow = async () => {
+    const room = currentRoomRef.current;
+    if (!room) {
+      await handleFallbackToAI();
+      return;
+    }
+    clearAiTimers();
+    clearRollTimers();
+    try {
+      const localPlayer = activePlayerRef.current;
+      const pool = INITIAL_FRIENDS.filter((f) => f.id !== localPlayer.id);
+      const demo = pool[Math.floor(Math.random() * pool.length)] || INITIAL_FRIENDS[0];
+      const botPlayer = {
+        id: `bot_demo_${demo.id}`,
+        name: demo.fullName,
+        avatar: demo.avatarUrl || APP_CONFIG.logoUrl,
+      };
+      await releasePublicQueueSlotIfOwner(
+        selectedGameRef.current,
+        localPlayer.id,
+        room.roomCode
+      ).catch(() => {});
+      await leaveMatchmakingQueue(localPlayer.id).catch(() => {});
+      const botRoom = await activateDemoOpponentInRoom(
+        room.roomCode,
+        selectedGameRef.current,
+        botPlayer
+      );
+      if (botRoom) {
+        awardedMatchRef.current.tictactoe = false;
+        resetChess(false);
+        resetLudo(false);
+        resetQuiz(false);
+        resetSnakeLadder(false);
+        resetCarromState(false);
+        resetSpinState();
+        resetTruthDare();
+        setSubView('play');
+        currentRoomRef.current = botRoom;
+        setCurrentRoom(botRoom);
+        setWaiting(false);
+        setGameStarted(true);
+        setIsModeSelectOpen(false);
+        setIsLobbyOpen(false);
+        setIsMatchmakingOpen(false);
+        soundFx.playWin();
+        showRewardToast(`Matched with ${botPlayer.name} — Game On!`);
+        return;
+      }
+    } catch {
+      // Fall back to local AI if room update fails
+    }
+    await handleFallbackToAI();
   };
 
   // --------------------------------------------------------------------------
@@ -5301,6 +5408,7 @@ export const GamesView: React.FC<GamesViewProps> = ({ onNavigate }) => {
         roomCode={currentRoom?.roomCode}
         onCancel={handleLeaveRoom}
         onFallbackToAI={handleFallbackToAI}
+        onPlayBotNow={handlePlayBotNow}
       />
 
       {/* 4c. Host Seat Rotation & Voice/Chat Moderation Panel */}
